@@ -64,9 +64,10 @@ class DockerSandboxCommandTest {
     @EnabledIfEnvironmentVariable(named = "AGENTSCOPE_DOCKER_INTEGRATION", matches = "true")
     void realDockerExecPreservesComplexAndLargeShellPrograms() throws Exception {
         DockerSandboxClient client = new DockerSandboxClient();
-        DockerSandboxClientOptions options =
-                new DockerSandboxClientOptions().image("ubuntu:24.04").workspaceRoot("/workspace");
-        try (Sandbox sandbox = client.create(new WorkspaceSpec(), null, options)) {
+        DockerSandboxClientOptions options = new DockerSandboxClientOptions().image("ubuntu:24.04");
+        WorkspaceSpec workspaceSpec = new WorkspaceSpec();
+        workspaceSpec.setRoot("/workspace");
+        try (Sandbox sandbox = client.create(workspaceSpec, null, options)) {
             sandbox.start();
 
             String complex =

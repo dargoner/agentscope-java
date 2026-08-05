@@ -93,6 +93,29 @@ class SandboxBackedFilesystemTest {
     }
 
     @Test
+    void getWorkspaceRoot_usesRuntimeContextBinding() {
+        SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
+        RuntimeContext ctxA = rc("session-a");
+        RuntimeContext ctxB = rc("session-b");
+        FakeSandbox sandboxA = new FakeSandbox(new ExecResult(0, "", "", false));
+        FakeSandbox sandboxB = new FakeSandbox(new ExecResult(0, "", "", false));
+        sandboxA.workspaceRoot = "/sandbox/a";
+        sandboxB.workspaceRoot = "/sandbox/b";
+        filesystem.bindSandbox(bindKey(ctxA), sandboxA);
+        filesystem.bindSandbox(bindKey(ctxB), sandboxB);
+
+        assertEquals("/sandbox/a", filesystem.getWorkspaceRoot(ctxA));
+        assertEquals("/sandbox/b", filesystem.getWorkspaceRoot(ctxB));
+    }
+
+    @Test
+    void getWorkspaceRoot_fallbackWhenSessionIsUnbound() {
+        SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
+
+        assertEquals("/workspace", filesystem.getWorkspaceRoot(rc("unknown-session")));
+    }
+
+    @Test
     void downloadFiles_returnsFailureWhenCommandFails() {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandbox = new FakeSandbox(new ExecResult(1, "", "boom", false));
@@ -318,9 +341,15 @@ class SandboxBackedFilesystemTest {
 
         private final ExecResult execResult;
         protected String lastCommand;
+        protected String workspaceRoot = "/workspace";
 
         protected BaseFakeSandbox(ExecResult execResult) {
             this.execResult = execResult;
+        }
+
+        @Override
+        public String getWorkspaceRoot() {
+            return workspaceRoot;
         }
 
         @Override
