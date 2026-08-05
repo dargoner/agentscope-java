@@ -24,6 +24,7 @@ import io.agentscope.harness.agent.IsolationScope;
 import io.agentscope.harness.agent.filesystem.remote.store.BaseStore;
 import io.agentscope.harness.agent.filesystem.spec.LocalFilesystemSpec;
 import io.agentscope.harness.agent.filesystem.spec.RemoteFilesystemSpec;
+import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -190,7 +191,9 @@ public class EnvironmentSpecFactory {
                         stringConfig(config, "workspaceRoot"),
                         e2bProperties.getWorkspaceRoot(),
                         "/home/user");
-        spec.workspaceRoot(workspaceRoot);
+        WorkspaceSpec workspaceSpec = new WorkspaceSpec();
+        workspaceSpec.setRoot(workspaceRoot);
+        spec.workspaceSpec(workspaceSpec);
 
         int timeout =
                 intConfig(

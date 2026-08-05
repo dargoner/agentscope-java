@@ -67,6 +67,7 @@ class EnvironmentSpecFactoryE2bTest {
                                 "sandboxTimeoutSeconds",
                                 120));
         assertThat(spec.getIsolationScope()).isEqualTo(IsolationScope.SESSION);
+        assertThat(spec.toSandboxContext().getWorkspaceSpec().getRoot()).isEqualTo("/workspace");
         assertThat(factory.hasE2bApiKey(Map.of())).isTrue();
     }
 
