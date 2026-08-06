@@ -36,6 +36,7 @@ import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.middleware.MiddlewareBase;
 import io.agentscope.core.middleware.ReasoningInput;
@@ -410,8 +411,8 @@ class ReActAgentPerSessionStateTest {
     }
 
     @Test
-    @DisplayName("user interrupt drops a partial streaming tool call from persisted reasoning")
-    void userInterruptDropsPartialStreamingToolCall() throws Exception {
+    @DisplayName("user interrupt reconciles a partial streaming tool call")
+    void userInterruptReconcilesPartialStreamingToolCall() throws Exception {
         InMemoryAgentStateStore store = new InMemoryAgentStateStore();
         GatedReasoningModel model =
                 new GatedReasoningModel(
@@ -455,7 +456,8 @@ class ReActAgentPerSessionStateTest {
                         .enablePendingToolRecovery(true)
                         .build();
         AgentState restoredState = restored.getAgentState("u1", "streaming");
-        assertFalse(hasToolUse(restoredState, "call-streaming"));
+        assertTrue(hasToolUse(restoredState, "call-streaming"));
+        assertTrue(hasErrorToolResult(restoredState, "call-streaming"));
         assertTrue(allText(restoredState).contains("partial response"));
 
         Msg continued =
@@ -465,9 +467,8 @@ class ReActAgentPerSessionStateTest {
     }
 
     @Test
-    @DisplayName(
-            "user interrupt before acting drops a completed tool call from persisted reasoning")
-    void userInterruptBeforeActingDropsCompletedToolCall() throws Exception {
+    @DisplayName("user interrupt before acting reconciles a completed tool call")
+    void userInterruptBeforeActingReconcilesCompletedToolCall() throws Exception {
         InMemoryAgentStateStore store = new InMemoryAgentStateStore();
         GateReasoningCompletionMiddleware gate = new GateReasoningCompletionMiddleware();
         RuntimeContext ctx = RuntimeContext.builder().userId("u1").sessionId("pre-acting").build();
@@ -495,7 +496,8 @@ class ReActAgentPerSessionStateTest {
         assertEquals(GenerateReason.INTERRUPTED, reply.getGenerateReason());
 
         AgentState restoredState = agent(store).getAgentState("u1", "pre-acting");
-        assertFalse(hasToolUse(restoredState, "call-complete"));
+        assertTrue(hasToolUse(restoredState, "call-complete"));
+        assertTrue(hasErrorToolResult(restoredState, "call-complete"));
         assertTrue(allText(restoredState).contains("completed response"));
     }
 
@@ -533,8 +535,8 @@ class ReActAgentPerSessionStateTest {
     }
 
     @Test
-    @DisplayName("user interrupt does not persist a reasoning message containing only a tool call")
-    void userInterruptDropsToolOnlyReasoningMessage() throws Exception {
+    @DisplayName("user interrupt reconciles a reasoning message containing only a tool call")
+    void userInterruptReconcilesToolOnlyReasoningMessage() throws Exception {
         InMemoryAgentStateStore store = new InMemoryAgentStateStore();
         GatedReasoningModel model =
                 new GatedReasoningModel(
@@ -566,7 +568,9 @@ class ReActAgentPerSessionStateTest {
 
         assertEquals(
                 GenerateReason.INTERRUPTED, future.get(5, TimeUnit.SECONDS).getGenerateReason());
-        assertFalse(hasToolUse(first.getAgentState("u1", "tool-only"), "call-only"));
+        AgentState state = first.getAgentState("u1", "tool-only");
+        assertTrue(hasToolUse(state, "call-only"));
+        assertTrue(hasErrorToolResult(state, "call-only"));
     }
 
     @Test
@@ -846,6 +850,15 @@ class ReActAgentPerSessionStateTest {
         return state.getContext().stream()
                 .flatMap(msg -> msg.getContentBlocks(ToolUseBlock.class).stream())
                 .anyMatch(block -> id.equals(block.getId()));
+    }
+
+    private static boolean hasErrorToolResult(AgentState state, String id) {
+        return state.getContext().stream()
+                .flatMap(msg -> msg.getContentBlocks(ToolResultBlock.class).stream())
+                .anyMatch(
+                        block ->
+                                id.equals(block.getId())
+                                        && block.getState() == ToolResultState.ERROR);
     }
 
     private static List<String> allText(AgentState state) {

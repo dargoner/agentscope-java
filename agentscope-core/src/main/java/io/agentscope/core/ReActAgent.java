@@ -2059,6 +2059,42 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
             }
         }
 
+        /**
+         * Synthesize error {@link ToolResultBlock}s for pending tool calls in the last assistant
+         * message that have no matching results.
+         *
+         * <p>Called from {@link ReActAgent#handleInterrupt} before the recovery message is
+         * appended, so that an interrupt signalled between reasoning (which writes the assistant
+         * {@code tool_use}) and acting (which would produce the tool results) does not persist a
+         * {@link ToolUseBlock} with no matching {@link ToolResultBlock}. Without this, the next
+         * resumed run inherits an inconsistent context and providers may return an empty response.
+         *
+         * <p>Must run <em>before</em> the recovery message is added, otherwise that recovery
+         * message becomes the last assistant message and {@link #getPendingToolUseIds()} no longer
+         * detects the pending calls.
+         */
+        private void synthesizeErrorResultsForPendingToolCalls() {
+            List<ToolUseBlock> pendingToolCalls = extractPendingToolCalls();
+            if (pendingToolCalls.isEmpty()) {
+                return;
+            }
+            for (ToolUseBlock toolCall : pendingToolCalls) {
+                ToolResultBlock errorResult =
+                        buildErrorToolResult(
+                                toolCall.getId(),
+                                "Tool execution was interrupted before it could run. Tool: "
+                                        + toolCall.getName());
+                Msg toolResultMsg =
+                        ToolResultMessageBuilder.buildToolResultMsg(
+                                errorResult, toolCall, getName());
+                state.contextMutable().add(toolResultMsg);
+                log.info(
+                        "Synthesized interrupted-result for pending tool call: {} ({})",
+                        toolCall.getName(),
+                        toolCall.getId());
+            }
+        }
+
         private void publishEvent(AgentEvent event) {
             FluxSink<AgentEvent> sink = eventSink;
             if (sink != null) {
@@ -2425,12 +2461,7 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                     }));
         }
 
-        /**
-         * Persist partial reasoning after an interrupt without leaving user-aborted tool calls in
-         * the conversation. Acting has not started at either call site, so retaining those calls
-         * would create orphaned tool uses with no possible result. System interrupts keep their
-         * existing resume policy.
-         */
+        /** Persist partial reasoning after an interrupt. */
         private void persistInterruptedReasoningMessage(Msg msg) {
             if (msg == null) {
                 return;
@@ -2445,21 +2476,7 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                 return;
             }
 
-            Msg interruptedMsg = source == InterruptSource.USER ? withoutToolUseBlocks(msg) : msg;
-            if (interruptedMsg != null) {
-                state.contextMutable().add(interruptedMsg);
-            }
-        }
-
-        private static Msg withoutToolUseBlocks(Msg msg) {
-            if (!msg.hasContentBlocks(ToolUseBlock.class)) {
-                return msg;
-            }
-            List<ContentBlock> retained =
-                    msg.getContent().stream()
-                            .filter(block -> !(block instanceof ToolUseBlock))
-                            .toList();
-            return retained.isEmpty() ? null : msg.withContent(retained);
+            state.contextMutable().add(msg);
         }
 
         /**
@@ -3975,6 +3992,10 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                         shutdownManager.saveOnInterruptObserved(requestId);
                         return Mono.error(new AgentShuttingDownException());
                     }
+                    // Reconcile any pending tool calls before appending the recovery message.
+                    // The tool_use written during reasoning would otherwise be persisted with no
+                    // matching tool result, leaving the AgentState inconsistent for the next run.
+                    scope.synthesizeErrorResultsForPendingToolCalls();
                     String recoveryText =
                             "I noticed that you have interrupted me. What can I do for you?";
                     Msg recoveryMsg =
