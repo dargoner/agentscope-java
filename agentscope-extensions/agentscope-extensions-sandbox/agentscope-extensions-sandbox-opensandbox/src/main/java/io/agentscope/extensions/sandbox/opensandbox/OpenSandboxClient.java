@@ -64,6 +64,8 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         state.setImage(merged.getImage());
         state.setEntrypoint(merged.getEntrypoint());
         state.setResourceLimits(merged.getResourceLimits());
+        state.setRestoreSnapshotId(merged.getRestoreSnapshotId());
+        state.setMetadata(merged.getMetadata());
         state.setSandboxTimeoutSeconds(merged.getSandboxTimeoutSeconds());
         state.setSandboxOwned(true);
         state.setWorkspaceRootReady(false);
@@ -200,6 +202,8 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         merged.setImage(call.getImage());
         merged.setEntrypoint(call.getEntrypoint());
         merged.setResourceLimits(call.getResourceLimits());
+        merged.setRestoreSnapshotId(call.getRestoreSnapshotId());
+        merged.setMetadata(call.getMetadata());
         merged.setSandboxTimeoutSeconds(call.getSandboxTimeoutSeconds());
         merged.setReadyTimeoutSeconds(call.getReadyTimeoutSeconds());
         merged.setRequestTimeoutSeconds(call.getRequestTimeoutSeconds());

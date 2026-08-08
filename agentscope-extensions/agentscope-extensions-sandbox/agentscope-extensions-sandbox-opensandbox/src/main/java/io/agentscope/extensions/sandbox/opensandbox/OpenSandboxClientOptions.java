@@ -25,11 +25,17 @@ import java.util.Map;
 /** Options for the OpenSandbox-backed {@link SandboxClient}. */
 public class OpenSandboxClientOptions extends SandboxClientOptions {
 
+    public static final String DEFAULT_IMAGE =
+            "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/"
+                    + "code-interpreter:v1.1.0";
+
     private String endpoint = "http://localhost:8080";
     private String apiKey;
-    private String image = "ubuntu:22.04";
-    private List<String> entrypoint = List.of("tail", "-f", "/dev/null");
-    private Map<String, String> resourceLimits = Map.of("cpu", "1", "memory", "2Gi");
+    private String image = DEFAULT_IMAGE;
+    private List<String> entrypoint = List.of();
+    private Map<String, String> resourceLimits = Map.of();
+    private String restoreSnapshotId;
+    private Map<String, String> metadata = Map.of();
     private int sandboxTimeoutSeconds = 600;
     private int readyTimeoutSeconds = 30;
     private int requestTimeoutSeconds = 30;
@@ -78,10 +84,8 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
     }
 
     public void setEntrypoint(List<String> entrypoint) {
-        if (entrypoint == null
-                || entrypoint.isEmpty()
-                || entrypoint.stream().anyMatch(String::isBlank)) {
-            throw new IllegalArgumentException("entrypoint must contain at least one command");
+        if (entrypoint == null || entrypoint.stream().anyMatch(String::isBlank)) {
+            throw new IllegalArgumentException("entrypoint must not contain blank commands");
         }
         this.entrypoint = List.copyOf(entrypoint);
     }
@@ -104,6 +108,37 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
                     copy.put(key, value);
                 });
         this.resourceLimits = Map.copyOf(copy);
+    }
+
+    public String getRestoreSnapshotId() {
+        return restoreSnapshotId;
+    }
+
+    public void setRestoreSnapshotId(String restoreSnapshotId) {
+        if (restoreSnapshotId != null && restoreSnapshotId.isBlank()) {
+            throw new IllegalArgumentException("restoreSnapshotId must not be blank");
+        }
+        this.restoreSnapshotId = restoreSnapshotId;
+    }
+
+    public Map<String, String> getMetadata() {
+        return Map.copyOf(metadata);
+    }
+
+    public void setMetadata(Map<String, String> metadata) {
+        if (metadata == null) {
+            throw new IllegalArgumentException("metadata must not be null");
+        }
+        Map<String, String> copy = new LinkedHashMap<>();
+        metadata.forEach(
+                (key, value) -> {
+                    if (key == null || key.isBlank() || value == null || value.isBlank()) {
+                        throw new IllegalArgumentException(
+                                "metadata must contain nonblank entries");
+                    }
+                    copy.put(key, value);
+                });
+        this.metadata = Map.copyOf(copy);
     }
 
     public int getSandboxTimeoutSeconds() {
@@ -148,6 +183,8 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
         copy.setImage(source.getImage());
         copy.setEntrypoint(new ArrayList<>(source.getEntrypoint()));
         copy.setResourceLimits(new LinkedHashMap<>(source.getResourceLimits()));
+        copy.setRestoreSnapshotId(source.getRestoreSnapshotId());
+        copy.setMetadata(new LinkedHashMap<>(source.getMetadata()));
         copy.setSandboxTimeoutSeconds(source.getSandboxTimeoutSeconds());
         copy.setReadyTimeoutSeconds(source.getReadyTimeoutSeconds());
         copy.setRequestTimeoutSeconds(source.getRequestTimeoutSeconds());

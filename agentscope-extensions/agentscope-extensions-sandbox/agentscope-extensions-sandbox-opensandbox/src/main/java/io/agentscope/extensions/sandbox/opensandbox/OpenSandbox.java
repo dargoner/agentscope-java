@@ -80,6 +80,11 @@ public class OpenSandbox extends AbstractBaseSandbox implements SandboxFileTrans
         }
     }
 
+    /** Closes this instance's SDK handle without changing the remote sandbox lifecycle. */
+    public void disconnect() throws Exception {
+        closeHandle();
+    }
+
     @Override
     protected ExecResult doExec(RuntimeContext runtimeContext, String command, int timeoutSeconds)
             throws Exception {
@@ -178,7 +183,10 @@ public class OpenSandbox extends AbstractBaseSandbox implements SandboxFileTrans
             if (!sdk.isNotFound(error)) {
                 throw error;
             }
-            state.setWorkspaceRootReady(false);
+            if (isBlank(state.getRestoreSnapshotId())) {
+                state.setWorkspaceRootReady(false);
+                state.setWorkspaceProjectionHash(null);
+            }
             assign(sdk.create(state, options));
         }
     }

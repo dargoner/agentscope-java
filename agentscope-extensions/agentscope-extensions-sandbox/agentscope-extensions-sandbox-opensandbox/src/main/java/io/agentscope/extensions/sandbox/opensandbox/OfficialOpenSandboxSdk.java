@@ -44,15 +44,26 @@ final class OfficialOpenSandboxSdk implements OpenSandboxSdk {
 
     @Override
     public Handle create(OpenSandboxState state, OpenSandboxClientOptions options) {
-        Sandbox sandbox =
+        Sandbox.Builder builder =
                 Sandbox.builder()
-                        .image(state.getImage())
-                        .entrypoint(state.getEntrypoint())
-                        .resource(state.getResourceLimits())
                         .timeout(Duration.ofSeconds(state.getSandboxTimeoutSeconds()))
                         .readyTimeout(Duration.ofSeconds(options.getReadyTimeoutSeconds()))
-                        .connectionConfig(config(options))
-                        .build();
+                        .connectionConfig(config(options));
+        if (state.getRestoreSnapshotId() == null || state.getRestoreSnapshotId().isBlank()) {
+            builder.image(state.getImage());
+        } else {
+            builder.snapshotId(state.getRestoreSnapshotId());
+        }
+        if (!state.getEntrypoint().isEmpty()) {
+            builder.entrypoint(state.getEntrypoint());
+        }
+        if (!state.getResourceLimits().isEmpty()) {
+            builder.resource(state.getResourceLimits());
+        }
+        if (!state.getMetadata().isEmpty()) {
+            builder.metadata(state.getMetadata());
+        }
+        Sandbox sandbox = builder.build();
         return new HandleImpl(sandbox);
     }
 
@@ -192,6 +203,12 @@ final class OfficialOpenSandboxSdk implements OpenSandboxSdk {
         state.setSandboxId(info.getId());
         state.setSandboxOwned(true);
         state.setEntrypoint(info.getEntrypoint());
+        state.setRestoreSnapshotId(info.getSnapshotId());
+        state.setMetadata(info.getMetadata());
+        state.setRemoteStatus(info.getStatus().getState());
+        state.setRemoteCreatedAt(info.getCreatedAt().toInstant());
+        state.setRemoteExpiresAt(
+                info.getExpiresAt() == null ? null : info.getExpiresAt().toInstant());
         if (info.getImage() != null) {
             state.setImage(info.getImage().getImage());
         }

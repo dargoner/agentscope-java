@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.harness.agent.sandbox.SandboxState;
 import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import io.agentscope.harness.agent.sandbox.json.HarnessSandboxJacksonModule;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -45,6 +46,11 @@ class OpenSandboxStateSerializationTest {
         state.setEntrypoint(List.of("tail", "-f", "/dev/null"));
         state.setResourceLimits(Map.of("cpu", "2", "memory", "4Gi"));
         state.setSandboxTimeoutSeconds(900);
+        state.setRestoreSnapshotId("snapshot-1");
+        state.setMetadata(Map.of("agentscope.workspace-id", "workspace-1"));
+        state.setRemoteStatus("PAUSED");
+        state.setRemoteCreatedAt(Instant.parse("2026-08-08T08:00:00Z"));
+        state.setRemoteExpiresAt(Instant.parse("2026-08-08T08:05:00Z"));
         WorkspaceSpec workspace = new WorkspaceSpec();
         workspace.setRoot("/workspace");
         state.setWorkspaceSpec(workspace);
@@ -58,8 +64,25 @@ class OpenSandboxStateSerializationTest {
         assertEquals(List.of("tail", "-f", "/dev/null"), restored.getEntrypoint());
         assertEquals(Map.of("cpu", "2", "memory", "4Gi"), restored.getResourceLimits());
         assertEquals(900, restored.getSandboxTimeoutSeconds());
+        assertEquals("snapshot-1", restored.getRestoreSnapshotId());
+        assertEquals(Map.of("agentscope.workspace-id", "workspace-1"), restored.getMetadata());
+        assertEquals("PAUSED", restored.getRemoteStatus());
+        assertEquals(Instant.parse("2026-08-08T08:00:00Z"), restored.getRemoteCreatedAt());
+        assertEquals(Instant.parse("2026-08-08T08:05:00Z"), restored.getRemoteExpiresAt());
         assertTrue(restored.isSandboxOwned());
         assertTrue(json.contains("\"type\":\"opensandbox\""));
         assertFalse(json.toLowerCase().contains("apikey"));
+    }
+
+    @Test
+    void clientSerializedStateNeverContainsApiKey() {
+        OpenSandboxClientOptions options = new OpenSandboxClientOptions();
+        options.setApiKey("secret-only-for-test");
+        OpenSandboxClient client = new OpenSandboxClient(options, null);
+
+        String json =
+                client.serializeState(client.create(new WorkspaceSpec(), null, null).getState());
+
+        assertFalse(json.contains("secret-only-for-test"));
     }
 }
