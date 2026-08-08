@@ -19,7 +19,7 @@ OpenSandbox 服务，同时保持与现有 Provider 一致的使用方式和生�
 - 执行 Shell 命令，准确返回退出码、stdout 和 stderr。
 - 支持文件上传、下载以及工作区 tar 快照持久化和恢复。
 - 将 sandbox ID 和工作区状态序列化，供后续调用或其他实例恢复。
-- 区分停止和销毁：普通调用结束保留远端实例，明确关闭时才销毁自有实例。
+- 区分停止和销毁：`stop()` 只持久化并释放本地资源，`shutdown()` 销毁自有实例。
 - 支持 endpoint、API Key、镜像、资源和超时配置。
 - 使用真实 OpenSandbox 服务完成端到端验证。
 
@@ -111,6 +111,8 @@ agentscope-extensions/agentscope-extensions-sandbox/
 - `sandboxOwned`
 - `image`
 - `entrypoint`
+- `resourceLimits`
+- `sandboxTimeoutSeconds`
 
 基类继续持久化 session ID、`WorkspaceSpec`、快照和工作区就绪状态。API Key、
 endpoint 和 SDK 对象不进入状态 JSON。
@@ -126,7 +128,8 @@ endpoint 和 SDK 对象不进入状态 JSON。
 - `doSetupWorkspace()` 创建工作区目录。
 - `doDestroyWorkspace()` best-effort 删除工作区。
 - `stop()` 先执行基类快照逻辑，再关闭本地 SDK HTTP 资源，不销毁远端实例。
-- `shutdown()` 只对 `sandboxOwned=true` 的实例执行 `kill()`，随后关闭本地资源。
+- `shutdown()` 只对 `sandboxOwned=true` 的实例通过官方 `SandboxManager.killSandbox(id)`
+  按 ID 销毁。该操作不依赖可能已由 `stop()` 关闭的 SDK handle。
 
 ### 4.5 工作区与文件传输
 
@@ -170,13 +173,22 @@ SandboxLifecycleMiddleware
        -> SDK Sandbox.builder().build() 或 Sandbox.connector().connect()
        -> AbstractBaseSandbox 初始化/恢复工作区
   -> Agent 使用 SandboxBackedFilesystem 和 shell 工具
-  -> OpenSandbox.stop
-       -> 持久化工作区快照
-       -> 保存 OpenSandboxState
-       -> 关闭本地 SDK handle
+  -> 保存 OpenSandboxState
+  -> SandboxManager.release
+       -> OpenSandbox.stop
+            -> 持久化工作区快照
+            -> 关闭本地 SDK handle
+       -> OpenSandbox.shutdown
+            -> SandboxManager.killSandbox(sandboxId)
 ```
 
-最终清理时：
+Harness 对 self-managed sandbox 的每轮 release 都按现有契约执行 `stop()` 和
+`shutdown()`，因此远端实例会在调用结束时销毁。下一轮会读取持久状态，发现原
+sandbox ID 不存在后，使用状态中保存的镜像、entrypoint、资源和 TTL 重建实例，
+再从 AgentScope 快照恢复工作区。用户通过 external sandbox 注入的 user-managed
+实例不由 Harness 停止或销毁。
+
+显式清理同样执行：
 
 ```text
 SandboxManager delete/close
@@ -253,7 +265,8 @@ mvn install
 3. `SandboxBackedFilesystem` 能上传和下载文本及二进制文件。
 4. 同一持久化状态能够连接已有实例；实例不存在时能够重建并恢复工作区。
 5. 暂时网络错误或认证错误不会触发新建第二个实例。
-6. `stop()` 不销毁远端实例，`shutdown()` 会销毁 AgentScope 自有实例。
+6. `stop()` 不销毁远端实例，`shutdown()` 按 ID 销毁 AgentScope 自有实例；
+   Harness 每轮 release 的 `stop() + shutdown()` 行为与其他 Provider 保持一致。
 7. 状态 JSON、日志和测试文件中不包含 API Key。
 8. 单元测试、模块聚合构建和全仓 `mvn install` 通过。
 9. 指定真实服务上的创建、命令、文件、恢复和销毁流程通过。
