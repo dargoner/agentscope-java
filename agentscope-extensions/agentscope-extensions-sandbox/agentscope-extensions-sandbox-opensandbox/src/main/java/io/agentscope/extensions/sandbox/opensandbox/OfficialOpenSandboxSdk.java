@@ -18,7 +18,6 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter;
-import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotState;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import java.io.InputStream;
@@ -140,24 +139,36 @@ final class OfficialOpenSandboxSdk implements OpenSandboxSdk {
     }
 
     @Override
-    public String createSnapshot(
-            String sandboxId,
-            String name,
-            Duration readyTimeout,
-            OpenSandboxClientOptions options) {
+    public String createSnapshot(String sandboxId, String name, OpenSandboxClientOptions options) {
         try (SandboxManager manager = manager(options)) {
-            SnapshotInfo snapshot = manager.createSnapshot(sandboxId, name);
-            return manager.waitForSnapshotReady(snapshot.getId(), readyTimeout).getId();
+            return manager.createSnapshot(sandboxId, name).getId();
+        }
+    }
+
+    @Override
+    public String waitForSnapshotReady(
+            String snapshotId, Duration readyTimeout, OpenSandboxClientOptions options) {
+        try (SandboxManager manager = manager(options)) {
+            return manager.waitForSnapshotReady(snapshotId, readyTimeout).getId();
         }
     }
 
     @Override
     public Map<String, Instant> listReadySnapshotsByNamePrefix(
             String namePrefix, OpenSandboxClientOptions options) {
+        Map<String, Instant> ready = new LinkedHashMap<>();
+        listSnapshotDetailsByNamePrefix(namePrefix, options).values().stream()
+                .filter(snapshot -> SnapshotState.READY.equalsIgnoreCase(snapshot.status()))
+                .forEach(snapshot -> ready.put(snapshot.id(), snapshot.createdAt()));
+        return Map.copyOf(ready);
+    }
+
+    @Override
+    public Map<String, OpenSandboxClient.NativeSnapshot> listSnapshotDetailsByNamePrefix(
+            String namePrefix, OpenSandboxClientOptions options) {
         try (SandboxManager manager = manager(options)) {
-            Map<String, Instant> snapshots = new LinkedHashMap<>();
-            SnapshotFilter.Builder filter =
-                    SnapshotFilter.builder().states(SnapshotState.READY).pageSize(100);
+            Map<String, OpenSandboxClient.NativeSnapshot> snapshots = new LinkedHashMap<>();
+            SnapshotFilter.Builder filter = SnapshotFilter.builder().pageSize(100);
             while (true) {
                 PagedSnapshotInfos page = manager.listSnapshots(filter.build());
                 page.getSnapshotInfos().stream()
@@ -167,7 +178,14 @@ final class OfficialOpenSandboxSdk implements OpenSandboxSdk {
                                 snapshot ->
                                         snapshots.put(
                                                 snapshot.getId(),
-                                                snapshot.getCreatedAt().toInstant()));
+                                                new OpenSandboxClient.NativeSnapshot(
+                                                        snapshot.getId(),
+                                                        snapshot.getName(),
+                                                        snapshot.getCreatedAt().toInstant(),
+                                                        snapshot.getStatus() == null
+                                                                ? SnapshotState.UNKNOWN
+                                                                : snapshot.getStatus()
+                                                                        .getState())));
                 if (!page.getPagination().getHasNextPage()) {
                     return Map.copyOf(snapshots);
                 }

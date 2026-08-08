@@ -22,6 +22,19 @@ import java.util.UUID;
 
 /** {@link SandboxClient} backed by OpenSandbox. */
 public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions> {
+    public record NativeSnapshot(String id, String name, Instant createdAt, String status) {
+        public NativeSnapshot(String id, String name, Instant createdAt) {
+            this(id, name, createdAt, "READY");
+        }
+
+        public NativeSnapshot {
+            requireText(id, "id");
+            requireText(name, "name");
+            Objects.requireNonNull(createdAt, "createdAt");
+            requireText(status, "status");
+        }
+    }
+
     private final ObjectMapper objectMapper;
     private final OpenSandboxClientOptions defaultOptions;
     private final OpenSandboxSdk sdk;
@@ -163,12 +176,26 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
                 });
     }
 
-    public String createNativeSnapshot(String sandboxId, String name, Duration readyTimeout) {
+    public String createNativeSnapshot(String sandboxId, String name) {
         return invoke(
                 () ->
                         sdk.createSnapshot(
                                 requireText(sandboxId, "sandboxId"),
                                 requireText(name, "name"),
+                                options()));
+    }
+
+    public String createNativeSnapshot(String sandboxId, String name, Duration readyTimeout) {
+        return waitForNativeSnapshotReady(
+                createNativeSnapshot(sandboxId, name),
+                requirePositive(readyTimeout, "readyTimeout"));
+    }
+
+    public String waitForNativeSnapshotReady(String snapshotId, Duration readyTimeout) {
+        return invoke(
+                () ->
+                        sdk.waitForSnapshotReady(
+                                requireText(snapshotId, "snapshotId"),
                                 requirePositive(readyTimeout, "readyTimeout"),
                                 options()));
     }
@@ -177,6 +204,13 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         return invoke(
                 () ->
                         sdk.listReadySnapshotsByNamePrefix(
+                                requireText(namePrefix, "namePrefix"), options()));
+    }
+
+    public Map<String, NativeSnapshot> listNativeSnapshotDetailsByNamePrefix(String namePrefix) {
+        return invoke(
+                () ->
+                        sdk.listSnapshotDetailsByNamePrefix(
                                 requireText(namePrefix, "namePrefix"), options()));
     }
 

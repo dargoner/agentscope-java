@@ -76,6 +76,10 @@ class OpenSandboxClientTest {
         assertEquals(List.of("sandbox-1"), sdk.resumedIds);
         assertEquals(Instant.parse("2026-08-08T10:30:00Z"), renewed);
         assertEquals("snapshot-1", snapshotId);
+        assertEquals("sandbox-1", sdk.snapshotSandboxId);
+        assertEquals("workspace-v1", sdk.snapshotName);
+        assertEquals("snapshot-1", sdk.waitedSnapshotId);
+        assertEquals(Duration.ofMinutes(10), sdk.snapshotReadyTimeout);
         assertEquals(Map.of("workspace", "one"), sdk.patchedMetadata);
         assertEquals(List.of("snapshot-old"), sdk.deletedSnapshotIds);
         assertEquals("http://opensandbox.internal:8090", sdk.lastOptions.getEndpoint());
@@ -91,6 +95,13 @@ class OpenSandboxClientTest {
         sdk.described = described;
         sdk.discovered = List.of(discovered);
         sdk.readySnapshots.put("snapshot-2", Instant.parse("2026-08-08T09:00:00Z"));
+        sdk.snapshotDetails.put(
+                "snapshot-2",
+                new OpenSandboxClient.NativeSnapshot(
+                        "snapshot-2",
+                        "agentscope-ws-one-2-1000",
+                        Instant.parse("2026-08-08T09:00:00Z"),
+                        "CREATING"));
         OpenSandboxClient client = new OpenSandboxClient(new OpenSandboxClientOptions(), null, sdk);
 
         assertEquals(described, client.describe("sandbox-1"));
@@ -98,6 +109,9 @@ class OpenSandboxClientTest {
         assertEquals(
                 sdk.readySnapshots,
                 client.listReadyNativeSnapshotsByNamePrefix("agentscope-ws-one-"));
+        assertEquals(
+                sdk.snapshotDetails,
+                client.listNativeSnapshotDetailsByNamePrefix("agentscope-ws-one-"));
         assertTrue(client.isNotFound(new IllegalStateException("missing")));
     }
 
@@ -112,10 +126,16 @@ class OpenSandboxClientTest {
         private final List<String> resumedIds = new ArrayList<>();
         private final List<String> deletedSnapshotIds = new ArrayList<>();
         private final Map<String, Instant> readySnapshots = new LinkedHashMap<>();
+        private final Map<String, OpenSandboxClient.NativeSnapshot> snapshotDetails =
+                new LinkedHashMap<>();
         private OpenSandboxState described;
         private List<OpenSandboxState> discovered = List.of();
         private Map<String, String> patchedMetadata;
         private OpenSandboxClientOptions lastOptions;
+        private String snapshotSandboxId;
+        private String snapshotName;
+        private String waitedSnapshotId;
+        private Duration snapshotReadyTimeout;
 
         @Override
         public Handle create(OpenSandboxState state, OpenSandboxClientOptions options) {
@@ -193,12 +213,20 @@ class OpenSandboxClientTest {
 
         @Override
         public String createSnapshot(
-                String sandboxId,
-                String name,
-                Duration readyTimeout,
-                OpenSandboxClientOptions options) {
+                String sandboxId, String name, OpenSandboxClientOptions options) {
             lastOptions = options;
+            snapshotSandboxId = sandboxId;
+            snapshotName = name;
             return "snapshot-1";
+        }
+
+        @Override
+        public String waitForSnapshotReady(
+                String snapshotId, Duration readyTimeout, OpenSandboxClientOptions options) {
+            lastOptions = options;
+            waitedSnapshotId = snapshotId;
+            snapshotReadyTimeout = readyTimeout;
+            return snapshotId;
         }
 
         @Override
@@ -206,6 +234,13 @@ class OpenSandboxClientTest {
                 String namePrefix, OpenSandboxClientOptions options) {
             lastOptions = options;
             return readySnapshots;
+        }
+
+        @Override
+        public Map<String, OpenSandboxClient.NativeSnapshot> listSnapshotDetailsByNamePrefix(
+                String namePrefix, OpenSandboxClientOptions options) {
+            lastOptions = options;
+            return snapshotDetails;
         }
 
         @Override

@@ -60,13 +60,23 @@ interface OpenSandboxSdk {
         throw unsupported();
     }
 
-    default String createSnapshot(
-            String sandboxId, String name, Duration readyTimeout, OpenSandboxClientOptions options)
+    default String createSnapshot(String sandboxId, String name, OpenSandboxClientOptions options)
+            throws Exception {
+        throw unsupported();
+    }
+
+    default String waitForSnapshotReady(
+            String snapshotId, Duration readyTimeout, OpenSandboxClientOptions options)
             throws Exception {
         throw unsupported();
     }
 
     default Map<String, Instant> listReadySnapshotsByNamePrefix(
+            String namePrefix, OpenSandboxClientOptions options) throws Exception {
+        throw unsupported();
+    }
+
+    default Map<String, OpenSandboxClient.NativeSnapshot> listSnapshotDetailsByNamePrefix(
             String namePrefix, OpenSandboxClientOptions options) throws Exception {
         throw unsupported();
     }

@@ -8,6 +8,7 @@ package io.agentscope.extensions.sandbox.opensandbox.redis;
 
 import io.agentscope.extensions.sandbox.opensandbox.OpenSandbox;
 import io.agentscope.extensions.sandbox.opensandbox.OpenSandboxClient;
+import io.agentscope.extensions.sandbox.opensandbox.OpenSandboxClient.NativeSnapshot;
 import io.agentscope.extensions.sandbox.opensandbox.OpenSandboxClientOptions;
 import io.agentscope.extensions.sandbox.opensandbox.OpenSandboxState;
 import io.agentscope.harness.agent.sandbox.Sandbox;
@@ -22,10 +23,13 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -46,7 +50,7 @@ import org.slf4j.LoggerFactory;
 public final class RedisOpenSandboxClient
         implements SandboxClient<OpenSandboxClientOptions>, AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(RedisOpenSandboxClient.class);
-    private static final int SCHEMA_VERSION = 1;
+    private static final int SCHEMA_VERSION = OpenSandboxWorkspaceRecord.CURRENT_SCHEMA_VERSION;
 
     private final OpenSandboxClient delegate;
     private final OpenSandboxWorkspaceStore store;
@@ -56,6 +60,7 @@ public final class RedisOpenSandboxClient
     private final ScheduledExecutorService scheduler;
     private final String instanceId;
     private final boolean ownsScheduler;
+    private final OpenSandboxLifecycleSweeper sweeper;
 
     public RedisOpenSandboxClient(
             RedissonClient redisson,
@@ -104,6 +109,14 @@ public final class RedisOpenSandboxClient
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.instanceId = requireText(instanceId, "instanceId");
         this.ownsScheduler = ownsScheduler;
+        if (ownsScheduler && this.lifecycle.isSweeperEnabled()) {
+            this.sweeper =
+                    new OpenSandboxLifecycleSweeper(
+                            this.delegate, this.store, this.lifecycle, this.clock, this.scheduler);
+            this.sweeper.start();
+        } else {
+            this.sweeper = null;
+        }
     }
 
     @Override
@@ -157,40 +170,47 @@ public final class RedisOpenSandboxClient
             throw new SandboxException.SandboxConfigurationException(
                     "Sandbox was not created by this RedisOpenSandboxClient");
         }
-        Exception failure = null;
-        try {
-            managed.stop();
-        } catch (Exception error) {
-            failure = error;
-        }
         try {
             withLock(
                     managed.workspaceId(),
                     () -> {
                         OpenSandboxWorkspaceRecord current =
                                 store.load(managed.workspaceId()).orElse(null);
-                        delegate.delete(managed.delegate());
-                        if (current != null && !store.compareAndSet(current, null)) {
-                            throw new SandboxException.SandboxRuntimeException(
-                                    "OpenSandbox record changed while deleting", null);
+                        if (current != null) {
+                            validateGeneration(current.getGeneration());
                         }
-                        store.clearLeases(managed.workspaceId());
-                        store.cancelIdle(managed.workspaceId());
+                        List<OpenSandboxState> discovered =
+                                delegate.listByMetadata(workspaceIdentity(managed.workspaceId()));
+                        Map<String, NativeSnapshot> discoveredSnapshots =
+                                delegate.listNativeSnapshotDetailsByNamePrefix(
+                                        OpenSandboxLifecycleSweeper.snapshotNamePrefix(
+                                                managed.workspaceId()));
+                        long generation =
+                                Math.max(
+                                        managed.lease().generation(),
+                                        current == null ? 0 : current.getGeneration());
+                        for (OpenSandboxState state : discovered) {
+                            generation = Math.max(generation, metadataGeneration(state));
+                        }
+                        for (NativeSnapshot snapshot : discoveredSnapshots.values()) {
+                            generation =
+                                    Math.max(
+                                            generation,
+                                            snapshotGeneration(
+                                                    managed.workspaceId(), snapshot.name()));
+                        }
+                        long deletedThrough =
+                                store.advanceDeletedThroughGeneration(
+                                        managed.workspaceId(), generation);
+                        validateGeneration(deletedThrough);
+                        deleteLocked(managed, discovered, discoveredSnapshots, deletedThrough);
                         return null;
                     });
+        } catch (RuntimeException error) {
+            throw error;
         } catch (Exception error) {
-            if (failure == null) {
-                failure = error;
-            } else {
-                failure.addSuppressed(error);
-            }
-        }
-        if (failure instanceof RuntimeException runtime) {
-            throw runtime;
-        }
-        if (failure != null) {
             throw new SandboxException.SandboxRuntimeException(
-                    "Failed to delete Redis-managed OpenSandbox", failure);
+                    "Failed to delete Redis-managed OpenSandbox", error);
         }
     }
 
@@ -241,23 +261,36 @@ public final class RedisOpenSandboxClient
         withLock(
                 lease.workspaceId(),
                 () -> {
+                    Instant now = clock.instant();
+                    store.scheduleRepair(lease.workspaceId(), now);
                     OpenSandboxWorkspaceRecord current =
                             store.load(lease.workspaceId()).orElse(null);
-                    store.removeLease(lease.workspaceId(), lease.leaseId());
+                    if (current != null) {
+                        validateGeneration(current.getGeneration());
+                    }
                     if (current == null || current.getGeneration() != lease.generation()) {
+                        store.removeLease(lease.workspaceId(), lease.leaseId());
                         return null;
                     }
+                    List<OpenSandboxActiveLease> remaining =
+                            store.activeLeases(lease.workspaceId(), lease.generation()).stream()
+                                    .filter(active -> !active.leaseId().equals(lease.leaseId()))
+                                    .toList();
                     OpenSandboxWorkspaceRecord update = current.copy();
-                    update.setLastAccessAt(clock.instant());
-                    update.setUpdatedAt(clock.instant());
+                    update.setLastAccessAt(now);
+                    update.setUpdatedAt(now);
                     update.setDirty(true);
+                    if (remaining.isEmpty()) {
+                        update.setExpiresAt(
+                                delegate.renew(current.getSandboxId(), idleRetention(lifecycle)));
+                    }
                     if (!store.compareAndSet(current, update)) {
                         throw new SandboxException.SandboxRuntimeException(
                                 "OpenSandbox record changed while releasing", null);
                     }
-                    if (store.activeLeases(lease.workspaceId(), lease.generation()).isEmpty()) {
-                        store.scheduleIdle(
-                                lease.workspaceId(), clock.instant().plus(lifecycle.getIdleTtl()));
+                    store.removeLease(lease.workspaceId(), lease.leaseId());
+                    if (remaining.isEmpty()) {
+                        store.scheduleIdle(lease.workspaceId(), now.plus(lifecycle.getIdleTtl()));
                     } else {
                         store.cancelIdle(lease.workspaceId());
                     }
@@ -294,9 +327,40 @@ public final class RedisOpenSandboxClient
         return digest(canonical.toString());
     }
 
+    static Duration idleRetention(OpenSandboxRedisLifecycleOptions lifecycle) {
+        Objects.requireNonNull(lifecycle, "lifecycle");
+        return lifecycle.getIdleTtl().plus(evictionRetention(lifecycle));
+    }
+
+    static Duration evictionRetention(OpenSandboxRedisLifecycleOptions lifecycle) {
+        Objects.requireNonNull(lifecycle, "lifecycle");
+        return lifecycle
+                .getEvictionGrace()
+                .plus(lifecycle.getSweepInterval().multipliedBy(2))
+                .plus(
+                        lifecycle
+                                .getSnapshotReadyTimeout()
+                                .multipliedBy(
+                                        (OpenSandboxLifecycleSweeper.SWEEP_BATCH_SIZE
+                                                        + OpenSandboxLifecycleSweeper
+                                                                .SNAPSHOT_CONCURRENCY
+                                                        - 1)
+                                                / OpenSandboxLifecycleSweeper
+                                                        .SNAPSHOT_CONCURRENCY));
+    }
+
+    static Duration snapshotAttemptRetention(OpenSandboxRedisLifecycleOptions lifecycle) {
+        Objects.requireNonNull(lifecycle, "lifecycle");
+        return lifecycle
+                .getSnapshotReadyTimeout()
+                .plus(lifecycle.getSweepInterval().multipliedBy(2));
+    }
+
     @Override
     public void close() {
-        if (ownsScheduler) {
+        if (sweeper != null) {
+            sweeper.close();
+        } else if (ownsScheduler) {
             scheduler.shutdownNow();
         }
     }
@@ -314,11 +378,32 @@ public final class RedisOpenSandboxClient
                     workspaceId,
                     () -> {
                         OpenSandboxWorkspaceRecord current = store.load(workspaceId).orElse(null);
+                        if (current != null) {
+                            validateGeneration(current.getGeneration());
+                        }
+                        long deletedThrough = store.deletedThroughGeneration(workspaceId);
+                        validateGeneration(deletedThrough);
+                        if (current != null && current.getGeneration() <= deletedThrough) {
+                            markDeletedRecordOrphans(current);
+                            if (!store.compareAndSet(current, null)) {
+                                throw new SandboxException.SandboxRuntimeException(
+                                        "OpenSandbox record changed while applying delete fence",
+                                        null);
+                            }
+                            current = null;
+                        }
                         OpenSandbox remote;
                         long generation;
+                        String recoveredCurrentSnapshot = null;
+                        String recoveredPreviousSnapshot = null;
                         if (current == null) {
-                            generation = 1;
-                            remote = createRemote(spec, options, workspaceId, generation, null);
+                            MissingRecordRecovery recovery =
+                                    recoverMissingRecord(
+                                            spec, options, workspaceId, deletedThrough);
+                            generation = recovery.generation();
+                            remote = recovery.remote();
+                            recoveredCurrentSnapshot = recovery.currentSnapshotId();
+                            recoveredPreviousSnapshot = recovery.previousSnapshotId();
                         } else {
                             ensureProfileMatches(current, options);
                             generation = current.getGeneration();
@@ -326,7 +411,7 @@ public final class RedisOpenSandboxClient
                             if (!Objects.equals(
                                     current.getSandboxId(),
                                     ((OpenSandboxState) remote.getState()).getSandboxId())) {
-                                generation = current.getGeneration() + 1;
+                                generation = nextGeneration(current.getGeneration());
                             }
                         }
                         OpenSandboxWorkspaceRecord update =
@@ -338,6 +423,10 @@ public final class RedisOpenSandboxClient
                                         agentId,
                                         options,
                                         generation);
+                        if (current == null) {
+                            update.setNativeSnapshotId(recoveredCurrentSnapshot);
+                            update.setPreviousNativeSnapshotId(recoveredPreviousSnapshot);
+                        }
                         if (!store.compareAndSet(current, update)) {
                             remote.disconnect();
                             throw new SandboxException.SandboxRuntimeException(
@@ -375,7 +464,7 @@ public final class RedisOpenSandboxClient
             String workspaceId)
             throws Exception {
         if (current.getSandboxId() == null || current.getSandboxId().isBlank()) {
-            return rebuild(current, spec, options, workspaceId, true);
+            return rebuild(current, spec, options, workspaceId, false);
         }
         OpenSandboxState info;
         try {
@@ -384,7 +473,7 @@ public final class RedisOpenSandboxClient
             if (!delegate.isNotFound(error)) {
                 throw error;
             }
-            return rebuild(current, spec, options, workspaceId, true);
+            return rebuild(current, spec, options, workspaceId, false);
         }
         if ("PAUSED".equalsIgnoreCase(info.getRemoteStatus())) {
             try {
@@ -396,12 +485,7 @@ public final class RedisOpenSandboxClient
                 return rebuild(current, spec, options, workspaceId, false);
             }
         }
-        SandboxState deserialized = delegate.deserializeState(current.getSerializedSandboxState());
-        if (!(deserialized instanceof OpenSandboxState persisted)) {
-            throw new SandboxException.SandboxConfigurationException(
-                    "Redis record does not contain OpenSandboxState");
-        }
-        persisted.setWorkspaceSpec(spec.copy());
+        OpenSandboxState persisted = connectionState(current, info, spec, options);
         OpenSandbox remote = requireOpenSandbox(delegate.resume(persisted));
         String expectedId = persisted.getSandboxId();
         try {
@@ -420,6 +504,160 @@ public final class RedisOpenSandboxClient
         return remote;
     }
 
+    private static OpenSandboxState connectionState(
+            OpenSandboxWorkspaceRecord record,
+            OpenSandboxState remote,
+            WorkspaceSpec spec,
+            OpenSandboxClientOptions options) {
+        OpenSandboxState state = new OpenSandboxState();
+        state.setSandboxId(record.getSandboxId());
+        state.setSandboxOwned(true);
+        state.setWorkspaceSpec(spec.copy());
+        state.setWorkspaceRootReady(true);
+        state.setImage(options.getImage());
+        state.setEntrypoint(options.getEntrypoint());
+        state.setResourceLimits(options.getResourceLimits());
+        state.setSandboxTimeoutSeconds(options.getSandboxTimeoutSeconds());
+        state.setMetadata(remote.getMetadata());
+        state.setRemoteStatus(remote.getRemoteStatus());
+        state.setRemoteCreatedAt(remote.getRemoteCreatedAt());
+        state.setRemoteExpiresAt(remote.getRemoteExpiresAt());
+        return state;
+    }
+
+    private MissingRecordRecovery recoverMissingRecord(
+            WorkspaceSpec spec,
+            OpenSandboxClientOptions options,
+            String workspaceId,
+            long deletedThrough)
+            throws Exception {
+        List<OpenSandboxState> live =
+                new ArrayList<>(delegate.listByMetadata(workspaceIdentity(workspaceId)));
+        live.sort(
+                Comparator.comparingLong(RedisOpenSandboxClient::metadataGeneration)
+                        .reversed()
+                        .thenComparing(
+                                OpenSandboxState::getRemoteCreatedAt,
+                                Comparator.nullsLast(Comparator.reverseOrder()))
+                        .thenComparing(OpenSandboxState::getSandboxId));
+        List<OpenSandboxState> eligible =
+                live.stream().filter(state -> metadataGeneration(state) > deletedThrough).toList();
+        for (OpenSandboxState state : live) {
+            if (!eligible.contains(state)) {
+                store.markOrphanSandbox(workspaceId, state.getSandboxId(), clock.instant());
+            }
+        }
+        if (!eligible.isEmpty()) {
+            OpenSandboxState winner = eligible.get(0);
+            String discoveredProfile = winner.getMetadata().get("agentscope.runtime-profile");
+            if (discoveredProfile != null
+                    && !discoveredProfile.equals(runtimeProfileHash(options))) {
+                throw new SandboxException.SandboxConfigurationException(
+                        "Discovered OpenSandbox runtime profile differs from the requested"
+                                + " profile");
+            }
+            for (int index = 1; index < eligible.size(); index++) {
+                store.markOrphanSandbox(
+                        workspaceId, eligible.get(index).getSandboxId(), clock.instant());
+            }
+            if ("PAUSED".equalsIgnoreCase(winner.getRemoteStatus())) {
+                delegate.resumeRemote(winner.getSandboxId());
+            }
+            winner.setWorkspaceSpec(spec.copy());
+            winner.setWorkspaceRootReady(true);
+            OpenSandbox remote = requireOpenSandbox(delegate.resume(winner));
+            try {
+                remote.startExisting();
+            } catch (Exception error) {
+                remote.disconnect();
+                throw error;
+            }
+            return new MissingRecordRecovery(
+                    remote, Math.max(1, metadataGeneration(winner)), null, null);
+        }
+
+        List<Map.Entry<String, NativeSnapshot>> ready =
+                new ArrayList<>(
+                        delegate
+                                .listNativeSnapshotDetailsByNamePrefix(
+                                        OpenSandboxLifecycleSweeper.snapshotNamePrefix(workspaceId))
+                                .entrySet()
+                                .stream()
+                                .filter(snapshot -> isReady(snapshot.getValue()))
+                                .toList());
+        ready.sort(
+                Comparator.<Map.Entry<String, NativeSnapshot>, Instant>comparing(
+                                entry -> entry.getValue().createdAt(), Comparator.reverseOrder())
+                        .thenComparing(Map.Entry::getKey));
+        List<Map.Entry<String, NativeSnapshot>> eligibleSnapshots =
+                ready.stream()
+                        .filter(
+                                snapshot ->
+                                        deletedThrough == 0
+                                                || snapshotGeneration(
+                                                                workspaceId,
+                                                                snapshot.getValue().name())
+                                                        > deletedThrough)
+                        .toList();
+        if (deletedThrough > 0) {
+            for (Map.Entry<String, NativeSnapshot> snapshot : ready) {
+                if (eligibleSnapshots.contains(snapshot)) {
+                    continue;
+                }
+                store.markOrphanSnapshot(workspaceId, snapshot.getKey(), clock.instant());
+            }
+        }
+        if (eligibleSnapshots.isEmpty() && deletedThrough > 0) {
+            long generation = nextGeneration(deletedThrough);
+            return new MissingRecordRecovery(
+                    createRemote(spec, options, workspaceId, generation, null),
+                    generation,
+                    null,
+                    null);
+        }
+        if (eligibleSnapshots.isEmpty()) {
+            return new MissingRecordRecovery(
+                    createRemote(spec, options, workspaceId, 1, null), 1, null, null);
+        }
+        String currentSnapshot = eligibleSnapshots.get(0).getKey();
+        String previousSnapshot =
+                eligibleSnapshots.size() > 1 ? eligibleSnapshots.get(1).getKey() : null;
+        long recoveryGeneration =
+                Math.max(
+                        nextGeneration(deletedThrough),
+                        eligibleSnapshots.stream()
+                                .mapToLong(
+                                        snapshot ->
+                                                snapshotGeneration(
+                                                        workspaceId, snapshot.getValue().name()))
+                                .max()
+                                .orElse(1));
+        Exception failure = null;
+        List<String> recoverySnapshots = new ArrayList<>();
+        recoverySnapshots.add(currentSnapshot);
+        if (previousSnapshot != null) {
+            recoverySnapshots.add(previousSnapshot);
+        }
+        for (String snapshotId : recoverySnapshots) {
+            try {
+                return new MissingRecordRecovery(
+                        createRemote(spec, options, workspaceId, recoveryGeneration, snapshotId),
+                        recoveryGeneration,
+                        currentSnapshot,
+                        previousSnapshot);
+            } catch (Exception error) {
+                if (failure == null) {
+                    failure = error;
+                } else {
+                    failure.addSuppressed(error);
+                }
+            }
+        }
+        throw new SandboxException.SandboxRuntimeException(
+                "All discovered native snapshot restore attempts failed; refusing empty workspace",
+                failure);
+    }
+
     private OpenSandbox rebuild(
             OpenSandboxWorkspaceRecord current,
             WorkspaceSpec spec,
@@ -427,7 +665,7 @@ public final class RedisOpenSandboxClient
             String workspaceId,
             boolean allowImageCreate)
             throws Exception {
-        long generation = current.getGeneration() + 1;
+        long generation = nextGeneration(current.getGeneration());
         List<String> snapshots = new ArrayList<>();
         if (current.getNativeSnapshotId() != null) {
             snapshots.add(current.getNativeSnapshotId());
@@ -467,6 +705,7 @@ public final class RedisOpenSandboxClient
             long generation,
             String snapshotId)
             throws Exception {
+        validateGeneration(generation);
         OpenSandboxClientOptions options = OpenSandboxClientOptions.copyOf(requested);
         options.setRestoreSnapshotId(snapshotId);
         Map<String, String> metadata = new LinkedHashMap<>(options.getMetadata());
@@ -474,6 +713,7 @@ public final class RedisOpenSandboxClient
         metadata.put("agentscope.workspace-id", workspaceId);
         metadata.put("agentscope.generation", Long.toString(generation));
         metadata.put("agentscope.schema-version", Integer.toString(SCHEMA_VERSION));
+        metadata.put("agentscope.runtime-profile", runtimeProfileHash(options));
         options.setMetadata(metadata);
         OpenSandbox remote = requireOpenSandbox(delegate.create(spec, null, options));
         try {
@@ -507,7 +747,6 @@ public final class RedisOpenSandboxClient
         update.setIsolationScope(isolationKey.getScope().name());
         update.setAgentId(agentId);
         update.setSandboxId(state.getSandboxId());
-        update.setSerializedSandboxState(delegate.serializeState(state));
         update.setRuntimeImage(options.getImage());
         update.setRuntimeProfileHash(runtimeProfileHash(options));
         update.setLifecycleState(OpenSandboxWorkspaceRecord.LifecycleState.RUNNING);
@@ -529,6 +768,9 @@ public final class RedisOpenSandboxClient
                     () -> {
                         OpenSandboxWorkspaceRecord current =
                                 store.load(lease.workspaceId()).orElse(null);
+                        if (current != null) {
+                            validateGeneration(current.getGeneration());
+                        }
                         if (current == null || current.getGeneration() != lease.generation()) {
                             store.removeLease(lease.workspaceId(), lease.leaseId());
                             return null;
@@ -544,6 +786,22 @@ public final class RedisOpenSandboxClient
                                         now),
                                 lifecycle.getActiveLeaseTtl());
                         store.cancelIdle(lease.workspaceId());
+                        if (current.getExpiresAt() == null
+                                || !current.getExpiresAt()
+                                        .isAfter(now.plus(lifecycle.getActiveRenewLead()))) {
+                            Instant renewedUntil =
+                                    delegate.renew(
+                                            current.getSandboxId(),
+                                            lifecycle.getActiveSandboxTtl());
+                            OpenSandboxWorkspaceRecord renewed = current.copy();
+                            renewed.setExpiresAt(renewedUntil);
+                            renewed.setUpdatedAt(now);
+                            if (!store.compareAndSet(current, renewed)) {
+                                throw new SandboxException.SandboxRuntimeException(
+                                        "OpenSandbox record changed while renewing active sandbox",
+                                        null);
+                            }
+                        }
                         return null;
                     });
         } catch (RuntimeException error) {
@@ -643,6 +901,207 @@ public final class RedisOpenSandboxClient
         return value;
     }
 
+    private static Map<String, String> workspaceIdentity(String workspaceId) {
+        return Map.of(
+                "agentscope.owner", "opensandbox-redis", "agentscope.workspace-id", workspaceId);
+    }
+
+    private void markDeletedRecordOrphans(OpenSandboxWorkspaceRecord record) {
+        Instant now = clock.instant();
+        if (record.getSandboxId() != null && !record.getSandboxId().isBlank()) {
+            store.markOrphanSandbox(record.getWorkspaceId(), record.getSandboxId(), now);
+        }
+        if (record.getNativeSnapshotId() != null && !record.getNativeSnapshotId().isBlank()) {
+            store.markOrphanSnapshot(record.getWorkspaceId(), record.getNativeSnapshotId(), now);
+        }
+        if (record.getPreviousNativeSnapshotId() != null
+                && !record.getPreviousNativeSnapshotId().isBlank()) {
+            store.markOrphanSnapshot(
+                    record.getWorkspaceId(), record.getPreviousNativeSnapshotId(), now);
+        }
+    }
+
+    private void deleteDiscoveredSandbox(
+            String workspaceId, String sandboxId, OpenSandboxState state) {
+        try {
+            deleteRemoteSandbox(workspaceId, sandboxId, delegate.resume(state));
+        } catch (RuntimeException error) {
+            if (!delegate.isNotFound(error)) {
+                throw error;
+            }
+            store.removeOrphanSandbox(
+                    new OpenSandboxWorkspaceStore.OrphanReference(workspaceId, sandboxId));
+        }
+    }
+
+    private void deleteRemoteSandbox(String workspaceId, String sandboxId, Sandbox remote) {
+        try {
+            delegate.delete(remote);
+        } catch (RuntimeException error) {
+            if (!delegate.isNotFound(error)) {
+                throw error;
+            }
+        }
+        store.removeOrphanSandbox(
+                new OpenSandboxWorkspaceStore.OrphanReference(workspaceId, sandboxId));
+    }
+
+    private void deleteRemoteSnapshot(String workspaceId, String snapshotId) {
+        if (store.isSnapshotReferenced(snapshotId)) {
+            return;
+        }
+        try {
+            delegate.deleteNativeSnapshot(snapshotId);
+        } catch (RuntimeException error) {
+            if (!delegate.isNotFound(error)) {
+                throw error;
+            }
+        }
+        store.removeOrphanSnapshot(
+                new OpenSandboxWorkspaceStore.OrphanReference(workspaceId, snapshotId));
+    }
+
+    private void deleteLocked(
+            RedisManagedOpenSandbox managed,
+            List<OpenSandboxState> discovered,
+            Map<String, NativeSnapshot> discoveredSnapshots,
+            long deletedThrough)
+            throws Exception {
+        Exception failure = null;
+        try {
+            managed.stop();
+        } catch (Exception error) {
+            failure = error;
+        }
+        try {
+            OpenSandboxWorkspaceRecord current = store.load(managed.workspaceId()).orElse(null);
+            if (current != null) {
+                validateGeneration(current.getGeneration());
+            }
+            boolean deleteCurrent = current == null || current.getGeneration() <= deletedThrough;
+            Instant now = clock.instant();
+            Map<String, OpenSandboxState> sandboxes = new LinkedHashMap<>();
+            for (OpenSandboxState state : discovered) {
+                if (metadataGeneration(state) <= deletedThrough) {
+                    sandboxes.put(state.getSandboxId(), state);
+                }
+            }
+            String managedSandboxId =
+                    ((OpenSandboxState) managed.delegate().getState()).getSandboxId();
+            if (deleteCurrent
+                    && current != null
+                    && current.getSandboxId() != null
+                    && !current.getSandboxId().equals(managedSandboxId)) {
+                OpenSandboxState state = new OpenSandboxState();
+                state.setSandboxId(current.getSandboxId());
+                state.setSandboxOwned(true);
+                sandboxes.putIfAbsent(current.getSandboxId(), state);
+            }
+            sandboxes.remove(managedSandboxId);
+
+            LinkedHashSet<String> snapshots = new LinkedHashSet<>();
+            if (deleteCurrent && current != null) {
+                addIfPresent(snapshots, current.getNativeSnapshotId());
+                addIfPresent(snapshots, current.getPreviousNativeSnapshotId());
+            }
+            discoveredSnapshots.values().stream()
+                    .filter(
+                            snapshot ->
+                                    snapshotGeneration(managed.workspaceId(), snapshot.name())
+                                            <= deletedThrough)
+                    .map(NativeSnapshot::id)
+                    .forEach(snapshots::add);
+
+            store.markOrphanSandbox(managed.workspaceId(), managedSandboxId, now);
+            for (String sandboxId : sandboxes.keySet()) {
+                store.markOrphanSandbox(managed.workspaceId(), sandboxId, now);
+            }
+            for (String snapshotId : snapshots) {
+                store.markOrphanSnapshot(managed.workspaceId(), snapshotId, now);
+            }
+
+            deleteRemoteSandbox(managed.workspaceId(), managedSandboxId, managed.delegate());
+            for (Map.Entry<String, OpenSandboxState> entry : sandboxes.entrySet()) {
+                deleteDiscoveredSandbox(managed.workspaceId(), entry.getKey(), entry.getValue());
+            }
+            if (deleteCurrent && current != null && !store.compareAndSet(current, null)) {
+                throw new SandboxException.SandboxRuntimeException(
+                        "OpenSandbox record changed while deleting", null);
+            }
+            for (String snapshotId : snapshots) {
+                deleteRemoteSnapshot(managed.workspaceId(), snapshotId);
+            }
+            if (deleteCurrent) {
+                store.clearLeases(managed.workspaceId());
+                store.cancelIdle(managed.workspaceId());
+                store.cancelRepair(managed.workspaceId());
+            }
+        } catch (Exception error) {
+            if (failure == null) {
+                failure = error;
+            } else {
+                failure.addSuppressed(error);
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private static void addIfPresent(LinkedHashSet<String> values, String value) {
+        if (value != null && !value.isBlank()) {
+            values.add(value);
+        }
+    }
+
+    static long snapshotGeneration(String workspaceId, String snapshotName) {
+        String prefix = OpenSandboxLifecycleSweeper.snapshotNamePrefix(workspaceId);
+        if (snapshotName == null || !snapshotName.startsWith(prefix)) {
+            throw invalidGeneration();
+        }
+        int separator = snapshotName.indexOf('-', prefix.length() + 1);
+        if (separator < 0) {
+            throw invalidGeneration();
+        }
+        return parseGeneration(snapshotName.substring(prefix.length(), separator));
+    }
+
+    private static boolean isReady(NativeSnapshot snapshot) {
+        return "READY".equalsIgnoreCase(snapshot.status());
+    }
+
+    private static long metadataGeneration(OpenSandboxState state) {
+        return parseGeneration(state.getMetadata().getOrDefault("agentscope.generation", "0"));
+    }
+
+    static long parseGeneration(String value) {
+        try {
+            return validateGeneration(Long.parseLong(value));
+        } catch (NumberFormatException ignored) {
+            throw invalidGeneration();
+        }
+    }
+
+    private static long nextGeneration(long generation) {
+        validateGeneration(generation);
+        try {
+            return validateGeneration(Math.addExact(generation, 1));
+        } catch (ArithmeticException ignored) {
+            throw invalidGeneration();
+        }
+    }
+
+    static long validateGeneration(long generation) {
+        if (generation < 0 || generation == Long.MAX_VALUE) {
+            throw invalidGeneration();
+        }
+        return generation;
+    }
+
+    private static SandboxException.SandboxRuntimeException invalidGeneration() {
+        return new SandboxException.SandboxRuntimeException("Invalid OpenSandbox generation", null);
+    }
+
     private static ScheduledExecutorService newScheduler() {
         AtomicInteger number = new AtomicInteger();
         ThreadFactory factory =
@@ -650,8 +1109,7 @@ public final class RedisOpenSandboxClient
                     Thread thread =
                             new Thread(
                                     runnable,
-                                    "agentscope-opensandbox-redis-heartbeat-"
-                                            + number.incrementAndGet());
+                                    "agentscope-opensandbox-redis-" + number.incrementAndGet());
                     thread.setDaemon(true);
                     return thread;
                 };
@@ -662,4 +1120,10 @@ public final class RedisOpenSandboxClient
     private interface LockedOperation<T> {
         T run() throws Exception;
     }
+
+    private record MissingRecordRecovery(
+            OpenSandbox remote,
+            long generation,
+            String currentSnapshotId,
+            String previousSnapshotId) {}
 }

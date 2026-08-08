@@ -10,6 +10,8 @@ import java.time.Instant;
 
 /** JSON-serializable source of truth for one managed OpenSandbox workspace. */
 public final class OpenSandboxWorkspaceRecord {
+    static final int CURRENT_SCHEMA_VERSION = 2;
+
     public enum LifecycleState {
         CREATING,
         RUNNING,
@@ -19,12 +21,11 @@ public final class OpenSandboxWorkspaceRecord {
         ERROR
     }
 
-    private int schemaVersion = 1;
+    private int schemaVersion = CURRENT_SCHEMA_VERSION;
     private String workspaceId;
     private String isolationScope;
     private String agentId;
     private String sandboxId;
-    private String serializedSandboxState;
     private String runtimeImage;
     private String runtimeProfileHash;
     private LifecycleState lifecycleState = LifecycleState.ABSENT;
@@ -77,14 +78,6 @@ public final class OpenSandboxWorkspaceRecord {
 
     public void setSandboxId(String sandboxId) {
         this.sandboxId = sandboxId;
-    }
-
-    public String getSerializedSandboxState() {
-        return serializedSandboxState;
-    }
-
-    public void setSerializedSandboxState(String serializedSandboxState) {
-        this.serializedSandboxState = serializedSandboxState;
     }
 
     public String getRuntimeImage() {
@@ -198,7 +191,6 @@ public final class OpenSandboxWorkspaceRecord {
         copy.isolationScope = isolationScope;
         copy.agentId = agentId;
         copy.sandboxId = sandboxId;
-        copy.serializedSandboxState = serializedSandboxState;
         copy.runtimeImage = runtimeImage;
         copy.runtimeProfileHash = runtimeProfileHash;
         copy.lifecycleState = lifecycleState;
