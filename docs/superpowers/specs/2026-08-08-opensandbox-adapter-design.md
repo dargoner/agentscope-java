@@ -16,7 +16,8 @@ OpenSandbox 服务，同时保持与现有 Provider 一致的使用方式和生�
 目标包括：
 
 - 创建 OpenSandbox 实例并初始化 AgentScope 工作区。
-- 执行 Shell 命令，准确返回退出码、stdout 和 stderr。
+- 执行 Shell 命令；成功时返回输出，非零退出码按现有 Provider 语义抛出
+  `SandboxException.ExecException` 并保留退出码、stdout 和 stderr。
 - 支持文件上传、下载以及工作区 tar 快照持久化和恢复。
 - 将 sandbox ID 和工作区状态序列化，供后续调用或其他实例恢复。
 - 区分停止和销毁：`stop()` 只持久化并释放本地资源，`shutdown()` 销毁自有实例。
@@ -124,7 +125,8 @@ endpoint 和 SDK 对象不进入状态 JSON。
 - `start()`：没有 sandbox ID 时创建；已有 ID 时连接。
 - 恢复明确返回不存在时创建新实例，清除工作区就绪标记，由 AgentScope 快照恢复。
 - 认证失败、超时和服务端异常不自动创建，防止暂时不可达时产生重复实例。
-- `doExec(...)` 使用 `commands().run(...)`，映射退出码和输出。
+- `doExec(...)` 使用 `commands().run(...)`，映射退出码和输出；非零退出码抛出
+  `SandboxException.ExecException`。
 - `doSetupWorkspace()` 创建工作区目录。
 - `doDestroyWorkspace()` best-effort 删除工作区。
 - `stop()` 先执行基类快照逻辑，再关闭本地 SDK HTTP 资源，不销毁远端实例。
@@ -203,7 +205,8 @@ SandboxManager delete/close
 
 - 参数缺失或格式错误转换为 `SandboxConfigurationException`。
 - 创建、连接和 SDK 调用错误转换为带 cause 的 AgentScope `SandboxException`。
-- 命令超时映射为执行超时错误；非零退出码作为正常 `ExecResult` 返回。
+- 命令超时映射为执行超时错误；非零退出码转换为
+  `SandboxException.ExecException`，与 Daytona、E2B、Kubernetes 保持一致。
 - 只有 SDK 明确报告 sandbox 不存在时才执行重建。
 - 工作区初始化、归档和恢复错误沿用 `AbstractBaseSandbox` 的错误分类。
 - 清理操作采用 best-effort，并保留主异常，避免清理失败覆盖真实错误。
@@ -219,7 +222,7 @@ SandboxManager delete/close
 - `OpenSandboxClientOptionsTest`：endpoint 解析、默认值、资源和超时校验。
 - `OpenSandboxStateSerializationTest`：Jackson subtype 和字段往返，确认无 API Key。
 - 生命周期测试：创建、连接、停止、销毁以及仅在明确不存在时重建。
-- 命令映射测试：退出码、stdout、stderr、超时和 SDK 异常。
+- 命令映射测试：成功输出、非零退出码的 `ExecException`、超时和 SDK 异常。
 - 文件传输测试：上传、下载、tar 快照和临时文件清理。
 
 如官方 SDK 的 final 类型不便直接替换，在模块内部增加最小 package-private SDK
@@ -261,7 +264,8 @@ mvn install
 ## 8. 验收标准
 
 1. 使用 OpenSandbox endpoint、API Key 和镜像即可创建并使用沙箱。
-2. Shell 执行结果包含正确退出码、stdout 和 stderr。
+2. Shell 成功执行返回正确输出；非零退出码抛出的 `ExecException` 包含正确退出码、
+   stdout 和 stderr。
 3. `SandboxBackedFilesystem` 能上传和下载文本及二进制文件。
 4. 同一持久化状态能够连接已有实例；实例不存在时能够重建并恢复工作区。
 5. 暂时网络错误或认证错误不会触发新建第二个实例。
