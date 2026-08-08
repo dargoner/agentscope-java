@@ -35,9 +35,33 @@ public interface SandboxClient<O extends SandboxClientOptions> {
     Sandbox create(WorkspaceSpec workspaceSpec, SandboxSnapshotSpec snapshotSpec, O options);
 
     /**
+     * Creates a sandbox with the resolved harness workspace identity.
+     *
+     * <p>The default implementation preserves compatibility with clients that do not need cluster
+     * workspace identity.
+     */
+    default Sandbox create(
+            WorkspaceSpec workspaceSpec,
+            SandboxSnapshotSpec snapshotSpec,
+            O options,
+            SandboxIsolationKey isolationKey,
+            String agentId) {
+        return create(workspaceSpec, snapshotSpec, options);
+    }
+
+    /**
      * Resumes a sandbox from previously serialized {@link SandboxState}.
      */
     Sandbox resume(SandboxState state);
+
+    /**
+     * Resumes a sandbox with the resolved harness workspace identity.
+     *
+     * <p>The default implementation preserves compatibility with existing clients.
+     */
+    default Sandbox resume(SandboxState state, SandboxIsolationKey isolationKey, String agentId) {
+        return resume(state);
+    }
 
     void delete(Sandbox sandbox);
 
