@@ -13,10 +13,21 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.OutputMessage;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.RunCommandRequest;
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxInfo;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotState;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import java.io.InputStream;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Production bridge to the official OpenSandbox Java SDK. */
 final class OfficialOpenSandboxSdk implements OpenSandboxSdk {
@@ -65,6 +76,103 @@ final class OfficialOpenSandboxSdk implements OpenSandboxSdk {
     }
 
     @Override
+    public OpenSandboxState getInfo(String sandboxId, OpenSandboxClientOptions options) {
+        try (SandboxManager manager = manager(options)) {
+            return toState(manager.getSandboxInfo(sandboxId));
+        }
+    }
+
+    @Override
+    public List<OpenSandboxState> listByMetadata(
+            Map<String, String> metadata, OpenSandboxClientOptions options) {
+        try (SandboxManager manager = manager(options)) {
+            List<OpenSandboxState> states = new ArrayList<>();
+            SandboxFilter.Builder filter = SandboxFilter.builder().metadata(metadata).pageSize(100);
+            while (true) {
+                PagedSandboxInfos page = manager.listSandboxInfos(filter.build());
+                page.getSandboxInfos().stream().map(this::toState).forEach(states::add);
+                if (!page.getPagination().getHasNextPage()) {
+                    return List.copyOf(states);
+                }
+                filter.page(page.getPagination().getPage() + 1);
+            }
+        }
+    }
+
+    @Override
+    public void patchMetadata(
+            String sandboxId, Map<String, String> metadata, OpenSandboxClientOptions options) {
+        try (SandboxManager manager = manager(options)) {
+            manager.patchSandboxMetadata(sandboxId, metadata);
+        }
+    }
+
+    @Override
+    public Instant renew(String sandboxId, Duration duration, OpenSandboxClientOptions options) {
+        try (SandboxManager manager = manager(options)) {
+            return manager.renewSandbox(sandboxId, duration).getExpiresAt().toInstant();
+        }
+    }
+
+    @Override
+    public void pause(String sandboxId, OpenSandboxClientOptions options) {
+        try (SandboxManager manager = manager(options)) {
+            manager.pauseSandbox(sandboxId);
+        }
+    }
+
+    @Override
+    public void resumeRemote(String sandboxId, OpenSandboxClientOptions options) {
+        try (SandboxManager manager = manager(options)) {
+            manager.resumeSandbox(sandboxId);
+        }
+    }
+
+    @Override
+    public String createSnapshot(
+            String sandboxId,
+            String name,
+            Duration readyTimeout,
+            OpenSandboxClientOptions options) {
+        try (SandboxManager manager = manager(options)) {
+            SnapshotInfo snapshot = manager.createSnapshot(sandboxId, name);
+            return manager.waitForSnapshotReady(snapshot.getId(), readyTimeout).getId();
+        }
+    }
+
+    @Override
+    public Map<String, Instant> listReadySnapshotsByNamePrefix(
+            String namePrefix, OpenSandboxClientOptions options) {
+        try (SandboxManager manager = manager(options)) {
+            Map<String, Instant> snapshots = new LinkedHashMap<>();
+            SnapshotFilter.Builder filter =
+                    SnapshotFilter.builder().states(SnapshotState.READY).pageSize(100);
+            while (true) {
+                PagedSnapshotInfos page = manager.listSnapshots(filter.build());
+                page.getSnapshotInfos().stream()
+                        .filter(snapshot -> snapshot.getName() != null)
+                        .filter(snapshot -> snapshot.getName().startsWith(namePrefix))
+                        .forEach(
+                                snapshot ->
+                                        snapshots.put(
+                                                snapshot.getId(),
+                                                snapshot.getCreatedAt().toInstant()));
+                if (!page.getPagination().getHasNextPage()) {
+                    return Map.copyOf(snapshots);
+                }
+                filter.page(page.getPagination().getPage() + 1);
+            }
+        }
+    }
+
+    @Override
+    public void deleteSnapshot(String snapshotId, OpenSandboxClientOptions options) {
+        try (SandboxManager manager = manager(options)) {
+            manager.deleteSnapshot(snapshotId);
+        }
+    }
+
+    @Override
     public boolean isNotFound(Throwable error) {
         for (Throwable current = error; current != null; current = current.getCause()) {
             if (current instanceof SandboxApiException apiException
@@ -73,6 +181,21 @@ final class OfficialOpenSandboxSdk implements OpenSandboxSdk {
             }
         }
         return false;
+    }
+
+    private SandboxManager manager(OpenSandboxClientOptions options) {
+        return SandboxManager.builder().connectionConfig(config(options)).build();
+    }
+
+    private OpenSandboxState toState(SandboxInfo info) {
+        OpenSandboxState state = new OpenSandboxState();
+        state.setSandboxId(info.getId());
+        state.setSandboxOwned(true);
+        state.setEntrypoint(info.getEntrypoint());
+        if (info.getImage() != null) {
+            state.setImage(info.getImage().getImage());
+        }
+        return state;
     }
 
     private static final class HandleImpl implements Handle {

@@ -13,6 +13,11 @@ import io.agentscope.harness.agent.sandbox.SandboxState;
 import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import io.agentscope.harness.agent.sandbox.json.HarnessSandboxJacksonModule;
 import io.agentscope.harness.agent.sandbox.snapshot.SandboxSnapshotSpec;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 /** {@link SandboxClient} backed by OpenSandbox. */
@@ -111,6 +116,80 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         }
     }
 
+    public OpenSandboxState describe(String sandboxId) {
+        return invoke(() -> sdk.getInfo(requireText(sandboxId, "sandboxId"), options()));
+    }
+
+    public List<OpenSandboxState> listByMetadata(Map<String, String> metadata) {
+        return invoke(
+                () -> sdk.listByMetadata(Map.copyOf(Objects.requireNonNull(metadata)), options()));
+    }
+
+    public void patchMetadata(String sandboxId, Map<String, String> metadata) {
+        invoke(
+                () -> {
+                    sdk.patchMetadata(
+                            requireText(sandboxId, "sandboxId"),
+                            Map.copyOf(Objects.requireNonNull(metadata)),
+                            options());
+                    return null;
+                });
+    }
+
+    public Instant renew(String sandboxId, Duration duration) {
+        return invoke(
+                () ->
+                        sdk.renew(
+                                requireText(sandboxId, "sandboxId"),
+                                requirePositive(duration, "duration"),
+                                options()));
+    }
+
+    public void pause(String sandboxId) {
+        invoke(
+                () -> {
+                    sdk.pause(requireText(sandboxId, "sandboxId"), options());
+                    return null;
+                });
+    }
+
+    public void resumeRemote(String sandboxId) {
+        invoke(
+                () -> {
+                    sdk.resumeRemote(requireText(sandboxId, "sandboxId"), options());
+                    return null;
+                });
+    }
+
+    public String createNativeSnapshot(String sandboxId, String name, Duration readyTimeout) {
+        return invoke(
+                () ->
+                        sdk.createSnapshot(
+                                requireText(sandboxId, "sandboxId"),
+                                requireText(name, "name"),
+                                requirePositive(readyTimeout, "readyTimeout"),
+                                options()));
+    }
+
+    public Map<String, Instant> listReadyNativeSnapshotsByNamePrefix(String namePrefix) {
+        return invoke(
+                () ->
+                        sdk.listReadySnapshotsByNamePrefix(
+                                requireText(namePrefix, "namePrefix"), options()));
+    }
+
+    public void deleteNativeSnapshot(String snapshotId) {
+        invoke(
+                () -> {
+                    sdk.deleteSnapshot(requireText(snapshotId, "snapshotId"), options());
+                    return null;
+                });
+    }
+
+    public boolean isNotFound(Throwable error) {
+        return sdk.isNotFound(error);
+    }
+
     private OpenSandboxClientOptions merge(OpenSandboxClientOptions call) {
         OpenSandboxClientOptions merged = OpenSandboxClientOptions.copyOf(defaultOptions);
         if (call == null) {
@@ -126,5 +205,40 @@ public class OpenSandboxClient implements SandboxClient<OpenSandboxClientOptions
         merged.setRequestTimeoutSeconds(call.getRequestTimeoutSeconds());
         merged.setUseServerProxy(call.isUseServerProxy());
         return merged;
+    }
+
+    private OpenSandboxClientOptions options() {
+        return OpenSandboxClientOptions.copyOf(defaultOptions);
+    }
+
+    private <T> T invoke(CheckedSupplier<T> operation) {
+        try {
+            return operation.get();
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new SandboxException.SandboxRuntimeException(
+                    "OpenSandbox management operation failed", e);
+        }
+    }
+
+    private static String requireText(String value, String name) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(name + " must not be blank");
+        }
+        return value;
+    }
+
+    private static Duration requirePositive(Duration value, String name) {
+        Objects.requireNonNull(value, name);
+        if (value.isZero() || value.isNegative()) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return value;
+    }
+
+    @FunctionalInterface
+    private interface CheckedSupplier<T> {
+        T get() throws Exception;
     }
 }
