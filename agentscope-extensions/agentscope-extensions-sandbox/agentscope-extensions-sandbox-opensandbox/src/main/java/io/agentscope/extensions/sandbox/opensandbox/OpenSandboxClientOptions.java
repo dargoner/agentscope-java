@@ -176,7 +176,7 @@ public class OpenSandboxClientOptions extends SandboxClientOptions {
         this.useServerProxy = useServerProxy;
     }
 
-    static OpenSandboxClientOptions copyOf(OpenSandboxClientOptions source) {
+    public static OpenSandboxClientOptions copyOf(OpenSandboxClientOptions source) {
         OpenSandboxClientOptions copy = new OpenSandboxClientOptions();
         copy.setEndpoint(source.getEndpoint());
         copy.setApiKey(source.getApiKey());

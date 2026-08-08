@@ -98,6 +98,10 @@ public final class OpenSandboxWorkspaceStore implements AutoCloseable {
         leases(workspaceId).fastRemove(requireText(leaseId, "leaseId"));
     }
 
+    public void clearLeases(String workspaceId) {
+        leases(workspaceId).delete();
+    }
+
     public List<OpenSandboxActiveLease> activeLeases(String workspaceId, long generation) {
         if (generation < 0) {
             throw new IllegalArgumentException("generation must not be negative");

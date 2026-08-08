@@ -58,6 +58,18 @@ class OpenSandboxTest {
     }
 
     @Test
+    void startExistingNeverRecreatesAfterNotFound() {
+        Fixture fixture = fixture();
+        fixture.state.setSandboxId("gone");
+        fixture.sdk.connectFailure = new NotFoundException();
+
+        assertThrows(NotFoundException.class, fixture.sandbox::startExisting);
+
+        assertEquals(1, fixture.sdk.connectCalls);
+        assertEquals(0, fixture.sdk.createCalls);
+    }
+
+    @Test
     void shutdownKillsOwnedSandboxByIdAfterHandleWasClosed() throws Exception {
         Fixture fixture = fixture();
         fixture.sandbox.start();
