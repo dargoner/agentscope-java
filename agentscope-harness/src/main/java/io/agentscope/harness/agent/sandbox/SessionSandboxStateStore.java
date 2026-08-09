@@ -95,7 +95,8 @@ public final class SessionSandboxStateStore {
     private String slotSessionId(SandboxIsolationKey key) {
         IsolationScope scope = key.getScope();
         return switch (scope) {
-            case SESSION -> "sandbox:session:" + key.getValue();
+            case SESSION ->
+                    "sandbox:session:" + SandboxWorkspaceKey.from(key, agentId).getStableId();
             case USER -> "sandbox:user:" + agentId + ":" + key.getValue();
             case AGENT -> "sandbox:agent:" + agentId;
             case GLOBAL -> "sandbox:global";

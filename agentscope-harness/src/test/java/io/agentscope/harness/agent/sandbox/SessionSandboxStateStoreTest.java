@@ -52,6 +52,53 @@ class SessionSandboxStateStoreTest {
     }
 
     @Test
+    void sessionScopeSeparatesAgentsSharingTheSameSession() throws Exception {
+        InMemoryAgentStateStore backend = new InMemoryAgentStateStore();
+        SessionSandboxStateStore first = new SessionSandboxStateStore(backend, "agent-a");
+        SessionSandboxStateStore second = new SessionSandboxStateStore(backend, "agent-b");
+        SandboxIsolationKey key = sessionKey("shared-session", "agent-a");
+
+        first.save(key, "first");
+
+        assertEquals("first", first.load(key).orElseThrow());
+        assertFalse(second.load(key).isPresent());
+
+        second.save(key, "second");
+        assertEquals("first", first.load(key).orElseThrow());
+        assertEquals("second", second.load(key).orElseThrow());
+    }
+
+    @Test
+    void sessionScopeUsesBoundedPathSafeOpaqueSlotForArbitrarySessionIds() throws Exception {
+        RecordingStore backend = new RecordingStore();
+        SessionSandboxStateStore recordingStore = new SessionSandboxStateStore(backend, AGENT_ID);
+        String rawSessionId = "prefix:with/path\\and-张三-" + "x".repeat(1000);
+
+        recordingStore.save(sessionKey(rawSessionId, AGENT_ID), JSON);
+
+        assertTrue(backend.lastSessionId.matches("sandbox:session:[A-Za-z0-9_-]{43}"));
+        assertTrue(backend.lastSessionId.length() <= 255);
+        assertFalse(backend.lastSessionId.contains("prefix"));
+        assertEquals(JSON, recordingStore.load(sessionKey(rawSessionId, AGENT_ID)).orElseThrow());
+    }
+
+    @Test
+    void nonSessionScopesKeepExistingSlotFormats() throws Exception {
+        RecordingStore backend = new RecordingStore();
+        SessionSandboxStateStore recordingStore = new SessionSandboxStateStore(backend, AGENT_ID);
+
+        recordingStore.save(isolationKey(IsolationScope.USER, "user-123"), JSON);
+        assertEquals("sandbox:user:test-agent:user-123", backend.lastSessionId);
+
+        recordingStore.save(isolationKey(IsolationScope.AGENT, AGENT_ID), JSON);
+        assertEquals("sandbox:agent:test-agent", backend.lastSessionId);
+
+        recordingStore.save(
+                isolationKey(IsolationScope.GLOBAL, SandboxIsolationKey.GLOBAL_VALUE), JSON);
+        assertEquals("sandbox:global", backend.lastSessionId);
+    }
+
+    @Test
     void userScope_roundTrip() throws Exception {
         SandboxIsolationKey key = isolationKey(IsolationScope.USER, "user-123");
         store.save(key, JSON);
@@ -113,6 +160,14 @@ class SessionSandboxStateStoreTest {
                 .orElseThrow();
     }
 
+    private static SandboxIsolationKey sessionKey(String sessionId, String agentId) {
+        return SandboxIsolationKey.resolve(
+                        IsolationScope.SESSION,
+                        RuntimeContext.builder().sessionId(sessionId).build(),
+                        agentId)
+                .orElseThrow();
+    }
+
     private static RuntimeContext runtimeContext(IsolationScope scope, String value) {
         RuntimeContext.Builder b = RuntimeContext.builder();
         if (scope == IsolationScope.SESSION) {
@@ -161,6 +216,23 @@ class SessionSandboxStateStoreTest {
         public void delete(String userId, String sessionId, String key) {
             validate(sessionId);
             super.delete(userId, sessionId, key);
+        }
+    }
+
+    private static final class RecordingStore extends InMemoryAgentStateStore {
+        private String lastSessionId;
+
+        @Override
+        public void save(String userId, String sessionId, String key, State value) {
+            lastSessionId = sessionId;
+            super.save(userId, sessionId, key, value);
+        }
+
+        @Override
+        public <T extends State> Optional<T> get(
+                String userId, String sessionId, String key, Class<T> type) {
+            lastSessionId = sessionId;
+            return super.get(userId, sessionId, key, type);
         }
     }
 }
