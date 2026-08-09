@@ -14,8 +14,8 @@ import io.agentscope.extensions.sandbox.opensandbox.OpenSandboxState;
 import io.agentscope.harness.agent.sandbox.Sandbox;
 import io.agentscope.harness.agent.sandbox.SandboxClient;
 import io.agentscope.harness.agent.sandbox.SandboxException;
-import io.agentscope.harness.agent.sandbox.SandboxIsolationKey;
 import io.agentscope.harness.agent.sandbox.SandboxState;
+import io.agentscope.harness.agent.sandbox.SandboxWorkspaceKey;
 import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import io.agentscope.harness.agent.sandbox.snapshot.NoopSnapshotSpec;
 import io.agentscope.harness.agent.sandbox.snapshot.SandboxSnapshotSpec;
@@ -132,14 +132,12 @@ public final class RedisOpenSandboxClient
             WorkspaceSpec workspaceSpec,
             SandboxSnapshotSpec snapshotSpec,
             OpenSandboxClientOptions options,
-            SandboxIsolationKey isolationKey,
-            String agentId) {
+            SandboxWorkspaceKey workspaceKey) {
         rejectTarSnapshot(snapshotSpec);
         return borrow(
                 workspaceSpec == null ? new WorkspaceSpec() : workspaceSpec.copy(),
                 options == null ? defaultOptions : options,
-                Objects.requireNonNull(isolationKey, "isolationKey"),
-                requireText(agentId, "agentId"));
+                Objects.requireNonNull(workspaceKey, "workspaceKey"));
     }
 
     @Override
@@ -148,7 +146,7 @@ public final class RedisOpenSandboxClient
     }
 
     @Override
-    public Sandbox resume(SandboxState state, SandboxIsolationKey isolationKey, String agentId) {
+    public Sandbox resume(SandboxState state, SandboxWorkspaceKey workspaceKey) {
         if (!(state instanceof OpenSandboxState openSandboxState)) {
             throw new SandboxException.SandboxConfigurationException(
                     "Redis OpenSandbox requires OpenSandboxState on resume");
@@ -157,11 +155,7 @@ public final class RedisOpenSandboxClient
                 openSandboxState.getWorkspaceSpec() == null
                         ? new WorkspaceSpec()
                         : openSandboxState.getWorkspaceSpec().copy();
-        return borrow(
-                spec,
-                defaultOptions,
-                Objects.requireNonNull(isolationKey, "isolationKey"),
-                requireText(agentId, "agentId"));
+        return borrow(spec, defaultOptions, Objects.requireNonNull(workspaceKey, "workspaceKey"));
     }
 
     @Override
@@ -298,26 +292,6 @@ public final class RedisOpenSandboxClient
                 });
     }
 
-    static String workspaceId(SandboxIsolationKey isolationKey, String agentId) {
-        Objects.requireNonNull(isolationKey, "isolationKey");
-        String canonical =
-                switch (isolationKey.getScope()) {
-                    case USER ->
-                            "v1\0user\0"
-                                    + requireText(agentId, "agentId")
-                                    + "\0"
-                                    + requireText(isolationKey.getValue(), "isolation value");
-                    case SESSION ->
-                            "v1\0session\0"
-                                    + requireText(agentId, "agentId")
-                                    + "\0"
-                                    + requireText(isolationKey.getValue(), "isolation value");
-                    case AGENT -> "v1\0agent\0" + requireText(agentId, "agentId");
-                    case GLOBAL -> "v1\0global";
-                };
-        return digest(canonical);
-    }
-
     static String runtimeProfileHash(OpenSandboxClientOptions options) {
         Objects.requireNonNull(options, "options");
         StringBuilder canonical = new StringBuilder("v1\0image\0").append(options.getImage());
@@ -368,11 +342,10 @@ public final class RedisOpenSandboxClient
     private RedisManagedOpenSandbox borrow(
             WorkspaceSpec spec,
             OpenSandboxClientOptions requestedOptions,
-            SandboxIsolationKey isolationKey,
-            String agentId) {
+            SandboxWorkspaceKey workspaceKey) {
         OpenSandboxClientOptions options = OpenSandboxClientOptions.copyOf(requestedOptions);
         ensureControlPlaneMatchesDefaults(options);
-        String workspaceId = workspaceId(isolationKey, agentId);
+        String workspaceId = workspaceKey.getStableId();
         try {
             return withLock(
                     workspaceId,
@@ -419,8 +392,7 @@ public final class RedisOpenSandboxClient
                                         current,
                                         remote,
                                         workspaceId,
-                                        isolationKey,
-                                        agentId,
+                                        workspaceKey,
                                         options,
                                         generation);
                         if (current == null) {
@@ -735,8 +707,7 @@ public final class RedisOpenSandboxClient
             OpenSandboxWorkspaceRecord current,
             OpenSandbox remote,
             String workspaceId,
-            SandboxIsolationKey isolationKey,
-            String agentId,
+            SandboxWorkspaceKey workspaceKey,
             OpenSandboxClientOptions options,
             long generation) {
         OpenSandboxWorkspaceRecord update =
@@ -744,8 +715,8 @@ public final class RedisOpenSandboxClient
         OpenSandboxState state = (OpenSandboxState) remote.getState();
         update.setSchemaVersion(SCHEMA_VERSION);
         update.setWorkspaceId(workspaceId);
-        update.setIsolationScope(isolationKey.getScope().name());
-        update.setAgentId(agentId);
+        update.setIsolationScope(workspaceKey.getScope().name());
+        update.setAgentId(workspaceKey.getAgentId());
         update.setSandboxId(state.getSandboxId());
         update.setRuntimeImage(options.getImage());
         update.setRuntimeProfileHash(runtimeProfileHash(options));
@@ -865,7 +836,7 @@ public final class RedisOpenSandboxClient
 
     private static SandboxException.SandboxConfigurationException missingIdentity() {
         return new SandboxException.SandboxConfigurationException(
-                "Redis OpenSandbox requires a resolved SandboxIsolationKey and agentId");
+                "Redis OpenSandbox requires a resolved SandboxWorkspaceKey");
     }
 
     private static OpenSandbox requireOpenSandbox(Sandbox sandbox) {

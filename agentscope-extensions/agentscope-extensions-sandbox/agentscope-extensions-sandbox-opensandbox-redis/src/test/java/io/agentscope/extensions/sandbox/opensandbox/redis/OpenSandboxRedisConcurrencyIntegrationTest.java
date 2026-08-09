@@ -35,6 +35,7 @@ import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.Sandbox;
 import io.agentscope.harness.agent.sandbox.SandboxIsolationKey;
 import io.agentscope.harness.agent.sandbox.SandboxState;
+import io.agentscope.harness.agent.sandbox.SandboxWorkspaceKey;
 import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import io.agentscope.harness.agent.sandbox.snapshot.SandboxSnapshotSpec;
 import java.time.Clock;
@@ -72,8 +73,9 @@ class OpenSandboxRedisConcurrencyIntegrationTest {
 
         String suffix = UUID.randomUUID().toString();
         String agentId = "redis-concurrency-" + suffix;
-        SandboxIsolationKey isolationKey = isolationKey("user-" + suffix, agentId);
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey, agentId);
+        SandboxWorkspaceKey workspaceKey =
+                SandboxWorkspaceKey.from(isolationKey("user-" + suffix, agentId), agentId);
+        String workspaceId = workspaceKey.getStableId();
         WorkspaceSpec workspace = workspace("/workspace/redis-concurrency-" + suffix);
         MutableClock clock = new MutableClock(Instant.parse("2026-08-09T00:00:00Z"));
         OpenSandboxRedisLifecycleOptions lifecycle = fastLifecycle();
@@ -129,16 +131,14 @@ class OpenSandboxRedisConcurrencyIntegrationTest {
                             () -> {
                                 borrowStart.await();
                                 return (RedisManagedOpenSandbox)
-                                        clientARef.create(
-                                                workspace, null, null, isolationKey, agentId);
+                                        clientARef.create(workspace, null, null, workspaceKey);
                             });
             Future<RedisManagedOpenSandbox> secondBorrow =
                     workers.submit(
                             () -> {
                                 borrowStart.await();
                                 return (RedisManagedOpenSandbox)
-                                        clientBRef.create(
-                                                workspace, null, null, isolationKey, agentId);
+                                        clientBRef.create(workspace, null, null, workspaceKey);
                             });
             borrowStart.countDown();
             first = firstBorrow.get(WAIT.toSeconds(), TimeUnit.SECONDS);

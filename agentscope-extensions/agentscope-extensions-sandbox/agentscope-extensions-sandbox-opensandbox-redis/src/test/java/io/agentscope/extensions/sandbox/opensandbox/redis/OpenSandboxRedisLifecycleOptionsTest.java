@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.harness.agent.IsolationScope;
 import io.agentscope.harness.agent.sandbox.SandboxIsolationKey;
+import io.agentscope.harness.agent.sandbox.SandboxWorkspaceKey;
 import java.time.Duration;
 import java.time.Instant;
 import org.junit.jupiter.api.Test;
@@ -99,9 +100,9 @@ class OpenSandboxRedisLifecycleOptionsTest {
         SandboxIsolationKey secondKey =
                 SandboxIsolationKey.resolve(IsolationScope.USER, second, "agent-a").orElseThrow();
 
-        String firstId = RedisOpenSandboxClient.workspaceId(firstKey, "agent-a");
-        String secondId = RedisOpenSandboxClient.workspaceId(secondKey, "agent-a");
-        String otherAgentId = RedisOpenSandboxClient.workspaceId(firstKey, "agent-b");
+        String firstId = SandboxWorkspaceKey.from(firstKey, "agent-a").getStableId();
+        String secondId = SandboxWorkspaceKey.from(secondKey, "agent-a").getStableId();
+        String otherAgentId = SandboxWorkspaceKey.from(firstKey, "agent-b").getStableId();
 
         assertEquals(firstId, secondId);
         assertNotEquals(firstId, otherAgentId);

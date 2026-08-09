@@ -30,6 +30,7 @@ import io.agentscope.extensions.sandbox.opensandbox.OpenSandboxState;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.Sandbox;
 import io.agentscope.harness.agent.sandbox.SandboxIsolationKey;
+import io.agentscope.harness.agent.sandbox.SandboxWorkspaceKey;
 import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import java.time.Duration;
 import java.time.Instant;
@@ -66,7 +67,8 @@ class OpenSandboxRedisRealServiceIntegrationTest {
         String agentId = "redis-real-service-" + suffix;
         SandboxIsolationKey isolationKey =
                 OpenSandboxRedisConcurrencyIntegrationTest.isolationKey("user-" + suffix, agentId);
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey, agentId);
+        SandboxWorkspaceKey workspaceKey = SandboxWorkspaceKey.from(isolationKey, agentId);
+        String workspaceId = workspaceKey.getStableId();
         WorkspaceSpec workspace =
                 OpenSandboxRedisConcurrencyIntegrationTest.workspace(
                         "/workspace/redis-real-service-" + suffix);
@@ -127,16 +129,12 @@ class OpenSandboxRedisRealServiceIntegrationTest {
             sweeper =
                     new OpenSandboxLifecycleSweeper(
                             remoteA, storeA, lifecycle, clock, sweepScheduler);
-            first =
-                    (RedisManagedOpenSandbox)
-                            clientA.create(workspace, null, null, isolationKey, agentId);
+            first = (RedisManagedOpenSandbox) clientA.create(workspace, null, null, workspaceKey);
             first.start();
             String originalSandboxId = ((OpenSandboxState) first.getState()).getSandboxId();
 
             stage = "create-second-handle";
-            second =
-                    (RedisManagedOpenSandbox)
-                            clientB.create(workspace, null, null, isolationKey, agentId);
+            second = (RedisManagedOpenSandbox) clientB.create(workspace, null, null, workspaceKey);
             second.start();
             assertEquals(originalSandboxId, ((OpenSandboxState) second.getState()).getSandboxId());
             assertNotEquals(first.leaseId(), second.leaseId());
@@ -231,9 +229,7 @@ class OpenSandboxRedisRealServiceIntegrationTest {
                     "PAUSED", remoteA.describe(originalSandboxId).getRemoteStatus().toUpperCase());
 
             stage = "resume-paused-original";
-            resumed =
-                    (RedisManagedOpenSandbox)
-                            clientA.create(workspace, null, null, isolationKey, agentId);
+            resumed = (RedisManagedOpenSandbox) clientA.create(workspace, null, null, workspaceKey);
             resumed.start();
             assertEquals(originalSandboxId, ((OpenSandboxState) resumed.getState()).getSandboxId());
             assertArrayEquals(payload, resumed.downloadFile(binaryPath));
@@ -247,8 +243,7 @@ class OpenSandboxRedisRealServiceIntegrationTest {
 
             stage = "restore-new-sandbox-from-snapshot";
             restored =
-                    (RedisManagedOpenSandbox)
-                            clientB.create(workspace, null, null, isolationKey, agentId);
+                    (RedisManagedOpenSandbox) clientB.create(workspace, null, null, workspaceKey);
             restored.start();
             String restoredSandboxId = ((OpenSandboxState) restored.getState()).getSandboxId();
             assertNotEquals(originalSandboxId, restoredSandboxId);
