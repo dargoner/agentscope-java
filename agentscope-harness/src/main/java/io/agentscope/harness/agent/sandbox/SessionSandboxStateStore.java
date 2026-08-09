@@ -41,6 +41,10 @@ public final class SessionSandboxStateStore {
         this.agentId = Objects.requireNonNull(agentId, "agentId must not be null");
     }
 
+    String agentId() {
+        return agentId;
+    }
+
     public Optional<String> load(SandboxIsolationKey key) throws IOException {
         try {
             String slotSid = slotSessionId(key);
