@@ -210,6 +210,64 @@ new OpenSandboxFilesystemSpec()
 
 API Key 应从环境变量或外部配置注入，不会写入可序列化的沙箱状态。OpenSandbox 适配器只接管沙箱生命周期、Shell 和文件传输；MCP 进程与连接仍运行在宿主侧。
 
+#### 使用 Redis 协调 OpenSandbox 集群生命周期
+
+需要跨应用副本稳定复用工作区时，引入 Redis 协调模块。它要求应用传入已经配置好的 `RedissonClient`；模块不会创建 Redis 连接，也不会读取 Redis 密码。
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-sandbox-opensandbox-redis</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+```java
+// 默认：http://localhost:8080、无 API key、USER 隔离、
+// idle TTL 60 分钟、sweep interval 5 分钟。
+RedisOpenSandboxFilesystemSpec filesystemSpec =
+        new RedisOpenSandboxFilesystemSpec(redissonClient);
+```
+
+control-plane 凭据是可选项，仅在环境变量非空时配置：
+
+```java
+OpenSandboxClientOptions openSandboxOptions = new OpenSandboxClientOptions();
+String endpoint = System.getenv("OPEN_SANDBOX_ENDPOINT");
+if (endpoint != null && !endpoint.isBlank()) {
+    openSandboxOptions.setEndpoint(endpoint);
+}
+String apiKey = System.getenv("OPEN_SANDBOX_API_KEY");
+if (apiKey != null && !apiKey.isBlank()) {
+    openSandboxOptions.setApiKey(apiKey);
+}
+
+OpenSandboxRedisLifecycleOptions lifecycleOptions =
+        new OpenSandboxRedisLifecycleOptions();
+WorkspaceSpec workspaceSpec = new WorkspaceSpec();
+workspaceSpec.setRoot("/workspace");
+
+filesystemSpec
+        .clientOptions(openSandboxOptions)
+        .lifecycleOptions(lifecycleOptions)
+        .workspaceSpec(workspaceSpec)
+        .isolationScope(IsolationScope.USER);
+```
+
+上面的 `redissonClient` 由应用创建和配置。`USER` 是默认隔离范围，使用 `userId + agentId` 得到稳定的工作区身份；如果其他共享边界更符合部署需求，也可选择 `SESSION`、`AGENT` 或 `GLOBAL`。OpenSandbox endpoint 和 API key 是 client 级凭据，在一个 `RedisOpenSandboxClient` 的整个生命周期内必须稳定；逐调用切换任一凭据都会 fail closed。
+
+image 与 entrypoint 构成工作区的 runtime profile，在该工作区存在期间也必须保持稳定。不同 profile 会 fail closed：应先显式 delete 工作区，再用新 profile 重新创建。delete 会清理历史原生快照并推进 tombstone，防止旧 generation 被重新发现。只在远端创建时生效的参数（例如 resource limits 和初始 metadata）不会在复用已有 sandbox 时重新应用。
+
+Redis lifecycle lock 只保护短暂的创建、恢复、暂停、快照、删除与元数据迁移，不覆盖整个 Turn，因此多个 Turn 和 Subagent 可以持有独立 lease 并行工作。spec 会预置官方 no-op `SandboxExecutionGuard` 与 `NoopSnapshotSpec` 标记，防止 `distributedStore(...)` 将其 full-Turn guard 或 tar snapshot 后端自动注入该原生快照模式；distributed store 仍可提供 agent state、task、messaging 等其他能力。此模式不要配置其他 `SandboxExecutionGuard`。并发写同一共享文件仍可能冲突；写入顺序有要求时应由应用协调。detached process 不会自行续租：需要它继续运行时，应保持活跃 Turn，或调整 lifecycle 参数。
+
+默认 idle TTL 为 60 分钟、每 5 分钟 sweep 一次、pause retention 为 5 分钟。eviction grace 与等待快照就绪的时长由 `OpenSandboxRedisLifecycleOptions` 控制（两者默认均为 5 分钟）。原生快照与 pause 完成后，远端沙箱按 `pauseRetention` 续期（默认 5 分钟），最终依据 OpenSandbox 的 `expiresAt` 回收。
+
+此模式使用 OpenSandbox **原生快照**，它会保存远端文件系统，因此可能包含源码、生成物、凭据或其他敏感文件。应为 OpenSandbox 服务配置相应的访问控制、加密、保留与删除策略。Redis 只保存工作区和快照 ID、生命周期元数据、删除 tombstone 与活跃 lease，不保存文件内容，也不保存 OpenSandbox API key。不要同时配置启用持久化的 tar `SandboxSnapshotSpec`；这里只接受 `null` 或 `NoopSnapshotSpec`。
+
+恢复时先尝试 current 原生快照，再尝试 previous 快照；两个已知快照都失败时会 fail closed，不会静默启动空工作区。Redis 元数据丢失时，client 会确定性发现匹配的 OpenSandbox 沙箱与原生快照并重建元数据；之前的显式删除由 tombstone 隔离，已删除 generation 不会复活。显式 delete 会先推进 tombstone，再清理远端资源。
+
+应用负责持有并关闭注入的 Redisson client。通过 `.client(...)` 注入的预构建 sandbox client、绕过 `HarnessAgent.builder().filesystem(...)` 直接使用的 client，以及通过逐调用 `SandboxContext` 传入的 client 均由调用方持有，agent 绝不会关闭它们。spec 构建默认 `RedisOpenSandboxClient` 时，该 client 由 agent 持有，并由 `HarnessAgent.close()` 只关闭一次，从而停止其 daemon sweeper scheduler。内部构建的 Redis client 会根据 `clientOptions` 创建 OpenSandbox SDK/control-plane 对象；当前没有单独关闭该对象的公开操作。关闭借用的 sandbox handle 会释放该 handle 的 lease。关闭 Redis client 或借用的 handle 都不会 shutdown Redisson。本模块不提供 MCP 集成，MCP 连接生命周期不在其范围内。
+
 ## 运行时镜像约束
 
 沙箱镜像（Docker 的 `image`、Kubernetes agent-sandbox 的运行时镜像等）由你指定，但**不是任意镜像都能用**。Harness 的文件工具（`read_file` / `write_file` / `edit_file` / `grep_files` / `glob_files` / `list_files`）和快照机制全部通过在沙箱内执行 POSIX shell 命令实现，镜像必须满足下面的契约，否则工具会以难以排查的方式失败。

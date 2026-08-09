@@ -16,6 +16,7 @@
 package io.agentscope.extensions.sandbox.opensandbox;
 
 import io.agentscope.harness.agent.sandbox.SandboxState;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -27,10 +28,15 @@ public class OpenSandboxState extends SandboxState {
 
     private String sandboxId;
     private boolean sandboxOwned = true;
-    private String image = "ubuntu:22.04";
-    private List<String> entrypoint = List.of("tail", "-f", "/dev/null");
-    private Map<String, String> resourceLimits = Map.of("cpu", "1", "memory", "2Gi");
+    private String image = OpenSandboxClientOptions.DEFAULT_IMAGE;
+    private List<String> entrypoint = List.of();
+    private Map<String, String> resourceLimits = Map.of();
     private int sandboxTimeoutSeconds = 600;
+    private String restoreSnapshotId;
+    private Map<String, String> metadata = Map.of();
+    private String remoteStatus;
+    private Instant remoteCreatedAt;
+    private Instant remoteExpiresAt;
 
     public String getSandboxId() {
         return sandboxId;
@@ -79,5 +85,45 @@ public class OpenSandboxState extends SandboxState {
 
     public void setSandboxTimeoutSeconds(int sandboxTimeoutSeconds) {
         this.sandboxTimeoutSeconds = sandboxTimeoutSeconds;
+    }
+
+    public String getRestoreSnapshotId() {
+        return restoreSnapshotId;
+    }
+
+    public void setRestoreSnapshotId(String restoreSnapshotId) {
+        this.restoreSnapshotId = restoreSnapshotId;
+    }
+
+    public Map<String, String> getMetadata() {
+        return Map.copyOf(metadata);
+    }
+
+    public void setMetadata(Map<String, String> metadata) {
+        this.metadata = metadata == null ? Map.of() : Map.copyOf(new LinkedHashMap<>(metadata));
+    }
+
+    public String getRemoteStatus() {
+        return remoteStatus;
+    }
+
+    public void setRemoteStatus(String remoteStatus) {
+        this.remoteStatus = remoteStatus;
+    }
+
+    public Instant getRemoteCreatedAt() {
+        return remoteCreatedAt;
+    }
+
+    public void setRemoteCreatedAt(Instant remoteCreatedAt) {
+        this.remoteCreatedAt = remoteCreatedAt;
+    }
+
+    public Instant getRemoteExpiresAt() {
+        return remoteExpiresAt;
+    }
+
+    public void setRemoteExpiresAt(Instant remoteExpiresAt) {
+        this.remoteExpiresAt = remoteExpiresAt;
     }
 }

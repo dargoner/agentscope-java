@@ -17,6 +17,10 @@ package io.agentscope.extensions.sandbox.opensandbox;
 
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import java.io.InputStream;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 
 /** Package-private boundary that keeps the provider testable without a remote service. */
 interface OpenSandboxSdk {
@@ -27,7 +31,66 @@ interface OpenSandboxSdk {
 
     void kill(String sandboxId, OpenSandboxClientOptions options) throws Exception;
 
+    default OpenSandboxState getInfo(String sandboxId, OpenSandboxClientOptions options)
+            throws Exception {
+        throw unsupported();
+    }
+
+    default List<OpenSandboxState> listByMetadata(
+            Map<String, String> metadata, OpenSandboxClientOptions options) throws Exception {
+        throw unsupported();
+    }
+
+    default void patchMetadata(
+            String sandboxId, Map<String, String> metadata, OpenSandboxClientOptions options)
+            throws Exception {
+        throw unsupported();
+    }
+
+    default Instant renew(String sandboxId, Duration duration, OpenSandboxClientOptions options)
+            throws Exception {
+        throw unsupported();
+    }
+
+    default void pause(String sandboxId, OpenSandboxClientOptions options) throws Exception {
+        throw unsupported();
+    }
+
+    default void resumeRemote(String sandboxId, OpenSandboxClientOptions options) throws Exception {
+        throw unsupported();
+    }
+
+    default String createSnapshot(String sandboxId, String name, OpenSandboxClientOptions options)
+            throws Exception {
+        throw unsupported();
+    }
+
+    default String waitForSnapshotReady(
+            String snapshotId, Duration readyTimeout, OpenSandboxClientOptions options)
+            throws Exception {
+        throw unsupported();
+    }
+
+    default Map<String, Instant> listReadySnapshotsByNamePrefix(
+            String namePrefix, OpenSandboxClientOptions options) throws Exception {
+        throw unsupported();
+    }
+
+    default Map<String, OpenSandboxClient.NativeSnapshot> listSnapshotDetailsByNamePrefix(
+            String namePrefix, OpenSandboxClientOptions options) throws Exception {
+        throw unsupported();
+    }
+
+    default void deleteSnapshot(String snapshotId, OpenSandboxClientOptions options)
+            throws Exception {
+        throw unsupported();
+    }
+
     boolean isNotFound(Throwable error);
+
+    private static UnsupportedOperationException unsupported() {
+        return new UnsupportedOperationException("OpenSandbox management operation is unavailable");
+    }
 
     interface Handle extends AutoCloseable {
         String id();

@@ -37,13 +37,37 @@ public class OpenSandbox extends AbstractBaseSandbox implements SandboxFileTrans
 
     @Override
     public void start() throws Exception {
-        ensureSandbox();
+        start(false);
+    }
+
+    /** Connects the recorded sandbox without falling back to creating a replacement. */
+    public void startExisting() throws Exception {
+        start(true);
+    }
+
+    private void start(boolean existingOnly) throws Exception {
+        if (existingOnly) {
+            ensureExistingSandbox();
+        } else {
+            ensureSandbox();
+        }
         try {
             super.start();
         } catch (Exception e) {
             closeHandle();
             throw e;
         }
+    }
+
+    private void ensureExistingSandbox() throws Exception {
+        if (handle != null) {
+            return;
+        }
+        if (isBlank(state.getSandboxId())) {
+            throw new SandboxException.SandboxConfigurationException(
+                    "Cannot connect an OpenSandbox without a sandbox ID");
+        }
+        assign(sdk.connect(state.getSandboxId(), options));
     }
 
     @Override
@@ -78,6 +102,11 @@ public class OpenSandbox extends AbstractBaseSandbox implements SandboxFileTrans
         if (failure != null) {
             throw failure;
         }
+    }
+
+    /** Closes this instance's SDK handle without changing the remote sandbox lifecycle. */
+    public void disconnect() throws Exception {
+        closeHandle();
     }
 
     @Override
@@ -124,7 +153,7 @@ public class OpenSandbox extends AbstractBaseSandbox implements SandboxFileTrans
 
     @Override
     protected void doSetupWorkspace() throws Exception {
-        checkedExec("mkdir -p " + shellQuote(getWorkspaceRoot()), getWorkspaceRoot(), 30);
+        checkedExec("mkdir -p " + shellQuote(getWorkspaceRoot()), "/", 30);
     }
 
     @Override
@@ -178,7 +207,10 @@ public class OpenSandbox extends AbstractBaseSandbox implements SandboxFileTrans
             if (!sdk.isNotFound(error)) {
                 throw error;
             }
-            state.setWorkspaceRootReady(false);
+            if (isBlank(state.getRestoreSnapshotId())) {
+                state.setWorkspaceRootReady(false);
+                state.setWorkspaceProjectionHash(null);
+            }
             assign(sdk.create(state, options));
         }
     }

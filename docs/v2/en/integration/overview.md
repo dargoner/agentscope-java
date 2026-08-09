@@ -43,6 +43,7 @@ Isolated code execution stores. Docker is built-in; the rest are standalone exte
 - [Daytona](../docs/harness/sandbox.md) — `agentscope-extensions-sandbox-daytona`
 - [E2B](../docs/harness/sandbox.md) — `agentscope-extensions-sandbox-e2b`
 - [OpenSandbox](../docs/harness/sandbox.md) — `agentscope-extensions-sandbox-opensandbox`
+- [OpenSandbox with Redis-coordinated clustered lifecycle](../docs/harness/sandbox.md#clustered-opensandbox-lifecycle-with-redis) — `agentscope-extensions-sandbox-opensandbox-redis`
 
 ## Memory
 

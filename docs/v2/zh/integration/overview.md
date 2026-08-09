@@ -43,6 +43,7 @@
 - [Daytona](../docs/harness/sandbox.md) — `agentscope-extensions-sandbox-daytona`
 - [E2B](../docs/harness/sandbox.md) — `agentscope-extensions-sandbox-e2b`
 - [OpenSandbox](../docs/harness/sandbox.md) — `agentscope-extensions-sandbox-opensandbox`
+- [使用 Redis 协调 OpenSandbox 集群生命周期](../docs/harness/sandbox.md#使用-redis-协调-opensandbox-集群生命周期) — `agentscope-extensions-sandbox-opensandbox-redis`
 
 ## 记忆（Memory）
 

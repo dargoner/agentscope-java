@@ -7,6 +7,7 @@ package io.agentscope.extensions.sandbox.opensandbox;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -34,6 +35,15 @@ class OpenSandboxTest {
     }
 
     @Test
+    void startCreatesWorkspaceFromExistingRootDirectory() throws Exception {
+        Fixture fixture = fixture();
+
+        fixture.sandbox.start();
+
+        assertEquals("/", fixture.sdk.handle.workingDirectories.get(0));
+    }
+
+    @Test
     void startRecreatesOnlyAfterExplicitNotFound() throws Exception {
         Fixture fixture = fixture();
         fixture.state.setSandboxId("gone");
@@ -57,6 +67,18 @@ class OpenSandboxTest {
     }
 
     @Test
+    void startExistingNeverRecreatesAfterNotFound() {
+        Fixture fixture = fixture();
+        fixture.state.setSandboxId("gone");
+        fixture.sdk.connectFailure = new NotFoundException();
+
+        assertThrows(NotFoundException.class, fixture.sandbox::startExisting);
+
+        assertEquals(1, fixture.sdk.connectCalls);
+        assertEquals(0, fixture.sdk.createCalls);
+    }
+
+    @Test
     void shutdownKillsOwnedSandboxByIdAfterHandleWasClosed() throws Exception {
         Fixture fixture = fixture();
         fixture.sandbox.start();
@@ -66,6 +88,56 @@ class OpenSandboxTest {
 
         assertEquals(1, fixture.sdk.handle.closeCalls);
         assertEquals(List.of("created-id"), fixture.sdk.killedIds);
+    }
+
+    @Test
+    void disconnectIsIdempotentAndOnlyClosesLocalHandle() throws Exception {
+        Fixture fixture = fixture();
+        fixture.sandbox.start();
+
+        fixture.sandbox.disconnect();
+        fixture.sandbox.disconnect();
+
+        assertEquals(1, fixture.sdk.handle.closeCalls);
+        assertTrue(fixture.sdk.killedIds.isEmpty());
+        assertTrue(fixture.sdk.handle.commands.stream().noneMatch(c -> c.contains("tar -cf")));
+    }
+
+    @Test
+    void createPassesMetadataAndNativeSnapshotToSdk() throws Exception {
+        Fixture fixture = fixture();
+        fixture.state.setRestoreSnapshotId("snapshot-1");
+        fixture.state.setMetadata(Map.of("agentscope.workspace-id", "workspace-1"));
+
+        fixture.sandbox.start();
+
+        assertEquals("snapshot-1", fixture.sdk.createdState.getRestoreSnapshotId());
+        assertEquals(
+                "workspace-1",
+                fixture.sdk.createdState.getMetadata().get("agentscope.workspace-id"));
+    }
+
+    @Test
+    void imageRecreateClearsProjectionHashButSnapshotRecreatePreservesIt() throws Exception {
+        Fixture image = fixture();
+        image.state.setSandboxId("gone-image");
+        image.state.setWorkspaceProjectionHash("old-hash");
+        image.sdk.connectFailure = new NotFoundException();
+
+        image.sandbox.start();
+
+        assertNull(image.state.getWorkspaceProjectionHash());
+
+        Fixture snapshot = fixture();
+        snapshot.state.setSandboxId("gone-snapshot");
+        snapshot.state.setRestoreSnapshotId("snapshot-1");
+        snapshot.state.setWorkspaceRootReady(true);
+        snapshot.state.setWorkspaceProjectionHash("snapshot-hash");
+        snapshot.sdk.connectFailure = new NotFoundException();
+
+        snapshot.sandbox.start();
+
+        assertEquals("snapshot-hash", snapshot.state.getWorkspaceProjectionHash());
     }
 
     @Test
@@ -125,12 +197,14 @@ class OpenSandboxTest {
         private int createCalls;
         private int connectCalls;
         private Exception connectFailure;
+        private OpenSandboxState createdState;
         private final List<String> killedIds = new ArrayList<>();
         private final RecordingHandle handle = new RecordingHandle();
 
         @Override
         public Handle create(OpenSandboxState state, OpenSandboxClientOptions options) {
             createCalls++;
+            createdState = state;
             return handle;
         }
 
@@ -154,6 +228,7 @@ class OpenSandboxTest {
 
     private static final class RecordingHandle implements OpenSandboxSdk.Handle {
         private final List<String> commands = new ArrayList<>();
+        private final List<String> workingDirectories = new ArrayList<>();
         private final Map<String, byte[]> files = new HashMap<>();
         private ExecResult nextResult = new ExecResult(0, "", "", false);
         private int closeCalls;
@@ -166,6 +241,7 @@ class OpenSandboxTest {
         @Override
         public ExecResult exec(String command, String workingDirectory, int timeoutSeconds) {
             commands.add(command);
+            workingDirectories.add(workingDirectory);
             ExecResult result = nextResult;
             nextResult = new ExecResult(0, "", "", false);
             return result;

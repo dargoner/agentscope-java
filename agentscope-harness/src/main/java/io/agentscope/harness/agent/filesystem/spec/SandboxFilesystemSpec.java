@@ -49,6 +49,54 @@ public abstract class SandboxFilesystemSpec {
 
     protected abstract SandboxClient<?> createClient();
 
+    /**
+     * Atomically materializes the context and its client-ownership decision.
+     *
+     * <p>Mutable specs are synchronized across client creation and the ownership hook so concurrent
+     * consumers cannot observe ownership state from another materialization.
+     */
+    public final synchronized Materialization materialize(Path hostWorkspaceRoot) {
+        SandboxClient<?> client =
+                Objects.requireNonNull(createClient(), "sandbox client is required");
+        boolean clientOwned = isClientOwned(client);
+        try {
+            WorkspaceSpec withProjection = buildWorkspaceSpecWithProjection(hostWorkspaceRoot);
+            SandboxContext context =
+                    SandboxContext.builder()
+                            .client(client)
+                            .clientOptions(clientOptions())
+                            .snapshotSpec(
+                                    snapshotSpecOverride != null
+                                            ? snapshotSpecOverride
+                                            : snapshotSpec())
+                            .workspaceSpec(withProjection)
+                            .isolationScope(isolationScope)
+                            .build();
+            return new Materialization(context, client, clientOwned);
+        } catch (RuntimeException | Error failure) {
+            closeAfterMaterializationFailure(client, clientOwned, failure);
+            throw failure;
+        }
+    }
+
+    /** Returns whether the exact client created by this materialization is runtime-owned. */
+    protected boolean isClientOwned(SandboxClient<?> client) {
+        return false;
+    }
+
+    /** Atomic result consumed by runtimes that need to manage the materialized client's lifecycle. */
+    public record Materialization(
+            SandboxContext context, SandboxClient<?> client, boolean clientOwned) {
+
+        public Materialization {
+            Objects.requireNonNull(context, "context");
+            Objects.requireNonNull(client, "client");
+            if (context.getClient() != client) {
+                throw new IllegalArgumentException("context client must match materialized client");
+            }
+        }
+    }
+
     protected abstract SandboxClientOptions clientOptions();
 
     protected abstract SandboxSnapshotSpec snapshotSpec();
@@ -108,20 +156,25 @@ public abstract class SandboxFilesystemSpec {
     }
 
     public final SandboxContext toSandboxContext(Path hostWorkspaceRoot) {
-        SandboxClient<?> client =
-                Objects.requireNonNull(createClient(), "sandbox client is required");
-        WorkspaceSpec withProjection = buildWorkspaceSpecWithProjection(hostWorkspaceRoot);
-        return SandboxContext.builder()
-                .client(client)
-                .clientOptions(clientOptions())
-                .snapshotSpec(snapshotSpecOverride != null ? snapshotSpecOverride : snapshotSpec())
-                .workspaceSpec(withProjection)
-                .isolationScope(isolationScope)
-                .build();
+        return materialize(hostWorkspaceRoot).context();
     }
 
     public final SandboxContext toSandboxContext() {
         return toSandboxContext(null);
+    }
+
+    private static void closeAfterMaterializationFailure(
+            SandboxClient<?> client, boolean clientOwned, Throwable failure) {
+        if (!clientOwned || !(client instanceof AutoCloseable closeable)) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (Throwable closeFailure) {
+            if (failure != closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+        }
     }
 
     private WorkspaceSpec buildWorkspaceSpecWithProjection(Path hostWorkspaceRoot) {

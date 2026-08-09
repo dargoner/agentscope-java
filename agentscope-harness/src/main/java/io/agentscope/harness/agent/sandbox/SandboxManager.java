@@ -109,7 +109,7 @@ public class SandboxManager {
                         if (sandboxContext.getWorkspaceSpec() != null) {
                             state.setWorkspaceSpec(sandboxContext.getWorkspaceSpec().copy());
                         }
-                        Sandbox sandbox = client.resume(state);
+                        Sandbox sandbox = client.resume(state, scopeKey.orElse(null), agentId);
                         return SandboxAcquireResult.selfManaged(sandbox, lease);
                     }
                 } catch (Exception e) {
@@ -135,7 +135,9 @@ public class SandboxManager {
                     typedClient.create(
                             spec,
                             sandboxContext.getSnapshotSpec(),
-                            sandboxContext.getClientOptions());
+                            sandboxContext.getClientOptions(),
+                            scopeKey.orElse(null),
+                            agentId);
             return SandboxAcquireResult.selfManaged(sandbox, lease);
 
         } catch (Exception e) {

@@ -127,6 +127,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Function;
@@ -170,6 +172,9 @@ public class HarnessAgent implements Agent, AutoCloseable {
     private final BiFunction<String, String, WorkspaceManager> workspaceFactory;
     private final WorkspaceIndex ownedWorkspaceIndex;
     private final SandboxContext defaultSandboxContext;
+    private final AutoCloseable ownedSandboxClient;
+    private final AtomicBoolean closeStarted = new AtomicBoolean();
+    private final CompletableFuture<Throwable> closeResult = new CompletableFuture<>();
     private final CompactionMiddleware compactionHook;
     private final SandboxLifecycleMiddleware sandboxLifecycleMw;
     private final List<AgentSkillRepository> skillRepositories;
@@ -202,6 +207,7 @@ public class HarnessAgent implements Agent, AutoCloseable {
             BiFunction<String, String, WorkspaceManager> workspaceFactory,
             WorkspaceIndex ownedWorkspaceIndex,
             SandboxContext defaultSandboxContext,
+            AutoCloseable ownedSandboxClient,
             CompactionMiddleware compactionHook,
             SandboxLifecycleMiddleware sandboxLifecycleMw,
             List<AgentSkillRepository> skillRepositories,
@@ -219,6 +225,7 @@ public class HarnessAgent implements Agent, AutoCloseable {
         this.workspaceFactory = workspaceFactory;
         this.ownedWorkspaceIndex = ownedWorkspaceIndex;
         this.defaultSandboxContext = defaultSandboxContext;
+        this.ownedSandboxClient = ownedSandboxClient;
         this.compactionHook = compactionHook;
         this.sandboxLifecycleMw = sandboxLifecycleMw;
         this.skillRepositories =
@@ -452,21 +459,65 @@ public class HarnessAgent implements Agent, AutoCloseable {
 
     @Override
     public void close() {
-        try {
-            // Drain fire-and-forget session/transcript mirrors so async workspace writes do not
-            // race with resource cleanup (e.g., temp workspace deletion in tests).
-            io.agentscope.harness.agent.memory.session.SessionTree.awaitMirrorQuiescence(
-                    5, java.util.concurrent.TimeUnit.SECONDS);
-            shutdownTaskRepository();
-        } finally {
+        if (closeStarted.compareAndSet(false, true)) {
+            Throwable failure = null;
             try {
-                if (ownedWorkspaceIndex != null) {
-                    ownedWorkspaceIndex.close();
-                }
+                failure = closeResources();
+            } catch (Throwable unexpected) {
+                failure = unexpected;
             } finally {
-                delegate.close();
+                closeResult.complete(failure);
             }
         }
+
+        rethrowCloseFailure(closeResult.join());
+    }
+
+    private Throwable closeResources() {
+        Throwable failure = null;
+        // Drain fire-and-forget session/transcript mirrors so async workspace writes do not
+        // race with resource cleanup (e.g., temp workspace deletion in tests).
+        failure =
+                closeAndAccumulate(
+                        failure,
+                        () ->
+                                io.agentscope.harness.agent.memory.session.SessionTree
+                                        .awaitMirrorQuiescence(
+                                                5, java.util.concurrent.TimeUnit.SECONDS));
+        failure = closeAndAccumulate(failure, this::shutdownTaskRepository);
+        failure = closeAndAccumulate(failure, ownedSandboxClient);
+        failure = closeAndAccumulate(failure, ownedWorkspaceIndex);
+        failure = closeAndAccumulate(failure, delegate);
+        return failure;
+    }
+
+    private static void rethrowCloseFailure(Throwable failure) {
+        if (failure instanceof RuntimeException runtimeException) {
+            throw runtimeException;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        if (failure != null) {
+            throw new IllegalStateException("Failed to close HarnessAgent", failure);
+        }
+    }
+
+    private static Throwable closeAndAccumulate(Throwable failure, AutoCloseable resource) {
+        if (resource == null) {
+            return failure;
+        }
+        try {
+            resource.close();
+        } catch (Throwable closeFailure) {
+            if (failure == null) {
+                return closeFailure;
+            }
+            if (failure != closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+        }
+        return failure;
     }
 
     private void shutdownTaskRepository() {
@@ -2212,6 +2263,16 @@ public class HarnessAgent implements Agent, AutoCloseable {
         }
 
         public HarnessAgent build() {
+            PendingSandboxClient pendingSandboxClient = new PendingSandboxClient();
+            try {
+                return build(pendingSandboxClient);
+            } catch (RuntimeException | Error failure) {
+                pendingSandboxClient.rollback(failure);
+                throw failure;
+            }
+        }
+
+        private HarnessAgent build(PendingSandboxClient pendingSandboxClient) {
             // Toolkit deep-copy: each agent gets its own toolkit so harness-registered tools and
             // user-registered tools never bleed across builds.
             Toolkit agentToolkit = this.toolkit.copy();
@@ -2304,6 +2365,7 @@ public class HarnessAgent implements Agent, AutoCloseable {
             // ---- Sandbox integration ----
             SandboxLifecycleMiddleware sandboxLifecycleMw = null;
             SandboxContext defaultSandboxContext = null;
+            AutoCloseable ownedSandboxClient = null;
             SandboxBackedFilesystem capturedSandboxFs = null;
             // bus/registry are process-scoped infrastructure; keep them on the pre-sandbox
             // filesystem so they are never routed through SandboxBackedFilesystem
@@ -2315,7 +2377,14 @@ public class HarnessAgent implements Agent, AutoCloseable {
                                 ? capturedSandboxFs
                                 : new RoutedSandboxFilesystem(capturedSandboxFs, filesystemRoutes);
 
-                defaultSandboxContext = sandboxFilesystemSpec.toSandboxContext(resolvedWorkspace);
+                SandboxFilesystemSpec.Materialization materialization =
+                        sandboxFilesystemSpec.materialize(resolvedWorkspace);
+                defaultSandboxContext = materialization.context();
+                if (materialization.clientOwned()
+                        && materialization.client() instanceof AutoCloseable closeable) {
+                    ownedSandboxClient = closeable;
+                    pendingSandboxClient.set(closeable);
+                }
 
                 if (isLocalSession(effectiveSession)) {
                     log.warn(
@@ -2803,24 +2872,56 @@ public class HarnessAgent implements Agent, AutoCloseable {
             ReActAgent delegate = inner.build();
             selfRef.set(delegate);
 
-            return new HarnessAgent(
-                    delegate,
-                    wsManager,
-                    workspaceFactoryFn,
-                    workspaceIndex,
-                    defaultSandboxContext,
-                    compactionHook,
-                    sandboxLifecycleMw,
-                    orderedSkillRepos,
-                    planModeManager,
-                    pendingSkillPromoter,
-                    pendingSkillUsageStore,
-                    pendingSkillCurator,
-                    pendingSkillAuditLog,
-                    memoryConfig,
-                    capturedSubagentMw,
-                    distributedStore,
-                    pathNormalizer);
+            HarnessAgent agent =
+                    new HarnessAgent(
+                            delegate,
+                            wsManager,
+                            workspaceFactoryFn,
+                            workspaceIndex,
+                            defaultSandboxContext,
+                            ownedSandboxClient,
+                            compactionHook,
+                            sandboxLifecycleMw,
+                            orderedSkillRepos,
+                            planModeManager,
+                            pendingSkillPromoter,
+                            pendingSkillUsageStore,
+                            pendingSkillCurator,
+                            pendingSkillAuditLog,
+                            memoryConfig,
+                            capturedSubagentMw,
+                            distributedStore,
+                            pathNormalizer);
+            pendingSandboxClient.transfer();
+            return agent;
+        }
+
+        private static final class PendingSandboxClient {
+
+            private AutoCloseable client;
+
+            private void set(AutoCloseable client) {
+                this.client = client;
+            }
+
+            private void transfer() {
+                client = null;
+            }
+
+            private void rollback(Throwable failure) {
+                if (client == null) {
+                    return;
+                }
+                try {
+                    client.close();
+                } catch (Throwable closeFailure) {
+                    if (failure != closeFailure) {
+                        failure.addSuppressed(closeFailure);
+                    }
+                } finally {
+                    client = null;
+                }
+            }
         }
     }
 }

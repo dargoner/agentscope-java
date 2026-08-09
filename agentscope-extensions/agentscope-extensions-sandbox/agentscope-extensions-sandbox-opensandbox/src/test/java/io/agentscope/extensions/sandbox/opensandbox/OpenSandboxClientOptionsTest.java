@@ -57,9 +57,14 @@ class OpenSandboxClientOptionsTest {
 
         assertEquals("opensandbox", options.getType());
         assertEquals("http://localhost:8080", options.getEndpoint());
-        assertEquals("ubuntu:22.04", options.getImage());
-        assertEquals(List.of("tail", "-f", "/dev/null"), options.getEntrypoint());
-        assertEquals(Map.of("cpu", "1", "memory", "2Gi"), options.getResourceLimits());
+        assertEquals(
+                "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/"
+                        + "code-interpreter:v1.1.0",
+                options.getImage());
+        assertEquals(List.of(), options.getEntrypoint());
+        assertEquals(Map.of(), options.getResourceLimits());
+        assertEquals(null, options.getRestoreSnapshotId());
+        assertEquals(Map.of(), options.getMetadata());
         assertEquals(600, options.getSandboxTimeoutSeconds());
         assertEquals(30, options.getReadyTimeoutSeconds());
         assertEquals(30, options.getRequestTimeoutSeconds());
@@ -73,7 +78,7 @@ class OpenSandboxClientOptionsTest {
         assertThrows(IllegalArgumentException.class, () -> options.setRequestTimeoutSeconds(-1));
         assertThrows(IllegalArgumentException.class, () -> options.setSandboxTimeoutSeconds(0));
         assertThrows(IllegalArgumentException.class, () -> options.setImage(" "));
-        assertThrows(IllegalArgumentException.class, () -> options.setEntrypoint(List.of()));
+        assertThrows(IllegalArgumentException.class, () -> options.setEntrypoint(List.of("")));
     }
 
     @Test
