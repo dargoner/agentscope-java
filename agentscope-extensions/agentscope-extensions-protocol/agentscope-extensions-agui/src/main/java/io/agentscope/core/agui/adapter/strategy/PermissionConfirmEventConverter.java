@@ -15,6 +15,14 @@
  */
 package io.agentscope.core.agui.adapter.strategy;
 
+import static io.agentscope.core.agui.AguiInterruptConstants.INTERRUPT_KIND_PERMISSION_CONFIRM;
+import static io.agentscope.core.agui.AguiInterruptConstants.METADATA_AGENTSCOPE_INTERRUPT_KIND;
+import static io.agentscope.core.agui.AguiInterruptConstants.METADATA_REPLY_ID;
+import static io.agentscope.core.agui.AguiInterruptConstants.METADATA_TOOL_CONTENT;
+import static io.agentscope.core.agui.AguiInterruptConstants.METADATA_TOOL_INPUT;
+import static io.agentscope.core.agui.AguiInterruptConstants.METADATA_TOOL_NAME;
+import static io.agentscope.core.agui.AguiInterruptConstants.TOOL_CALL_INTERRUPT_REASON;
+
 import io.agentscope.core.agui.event.AguiEvent;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.RequireUserConfirmEvent;
@@ -49,20 +57,22 @@ import java.util.Set;
  */
 final class PermissionConfirmEventConverter implements AgentEventConverter {
 
-    /** Interrupt reason used for permission-mode tool confirmations. */
-    static final String CONFIRM_INTERRUPT_REASON = "tool_confirmation";
-
-    /** Metadata key: the tool name. */
-    static final String METADATA_TOOL_NAME = "toolName";
-
-    /** Metadata key: the parsed tool arguments ({@code Map<String, Object>}). */
-    static final String METADATA_TOOL_INPUT = "toolInput";
-
-    /** Metadata key: the tool arguments serialized as a JSON-object string. */
-    static final String METADATA_TOOL_CONTENT = "toolContent";
-
-    /** Metadata key: the originating reply id. */
-    static final String METADATA_REPLY_ID = "replyId";
+    private static final Map<String, Object> CONFIRM_RESPONSE_SCHEMA =
+            Map.of(
+                    "type",
+                    "object",
+                    "properties",
+                    Map.of(
+                            "approved",
+                            Map.of("type", "boolean"),
+                            "editedArgs",
+                            Map.of(
+                                    "type",
+                                    "object",
+                                    "description",
+                                    "Full replacement of the tool args. Not merged.")),
+                    "required",
+                    List.of("approved"));
 
     @Override
     public Set<Class<? extends AgentEvent>> eventTypes() {
@@ -80,8 +90,12 @@ final class PermissionConfirmEventConverter implements AgentEventConverter {
             return;
         }
         for (ToolUseBlock toolUse : toolCalls) {
-            if (toolUse == null || isBlank(toolUse.getId())) {
+            if (toolUse == null) {
                 continue;
+            }
+            if (isBlank(toolUse.getId())) {
+                throw new IllegalStateException(
+                        "RequireUserConfirmEvent contains a tool call without a stable id");
             }
             context.addInterrupt(buildInterrupt(replyId, toolUse));
         }
@@ -97,15 +111,16 @@ final class PermissionConfirmEventConverter implements AgentEventConverter {
             metadata.put(METADATA_TOOL_INPUT, toolUse.getInput());
         }
         metadata.put(METADATA_TOOL_CONTENT, JsonUtils.resolveToolCallArgsJson(toolUse));
+        metadata.put(METADATA_AGENTSCOPE_INTERRUPT_KIND, INTERRUPT_KIND_PERMISSION_CONFIRM);
         if (!isBlank(replyId)) {
             metadata.put(METADATA_REPLY_ID, replyId);
         }
         return new AguiEvent.Interrupt(
                 interruptId(replyId, toolCallId),
-                CONFIRM_INTERRUPT_REASON,
+                TOOL_CALL_INTERRUPT_REASON,
                 confirmMessage(toolUse),
                 toolCallId,
-                null,
+                CONFIRM_RESPONSE_SCHEMA,
                 null,
                 Map.copyOf(metadata));
     }
