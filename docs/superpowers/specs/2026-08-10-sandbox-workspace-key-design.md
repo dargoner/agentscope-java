@@ -47,6 +47,8 @@ include `agentId`.
 - Do not move OpenSandbox lifecycle state, leases, generation handling, snapshots, metadata
   discovery, or sweeping into Harness.
 - Do not migrate or read the legacy SESSION state-slot format.
+- Do not change existing `SandboxIsolationKey` or sandbox-session logging. Logging hardening is a
+  separate concern from provider workspace identity.
 - Do not require other sandbox providers to implement workspace-key-aware behavior now.
 
 ## Architecture
@@ -87,8 +89,14 @@ remain equal because agent ID is diagnostic context rather than part of GLOBAL i
 `toString` includes the effective scope and stable ID only; it must not reveal raw user or session
 identifiers.
 
+For GLOBAL, `getAgentId()` identifies the current borrower for diagnostics only. A provider may
+record the most recent borrower's agent ID, but it must never use that value for workspace
+ownership, equality, authorization, or access control.
+
 The factory rejects a null isolation key and blank agent ID. For AGENT scope it also verifies that
-the isolation-key value equals `agentId`, preventing contradictory identities.
+the isolation-key value equals `agentId`, preventing contradictory identities. It rejects NUL in
+`agentId` and in the isolation-key value because NUL is the canonical format's field separator;
+allowing it inside a component would make distinct tuples produce the same canonical byte stream.
 
 ### Stable ID format
 
@@ -129,12 +137,14 @@ default Sandbox resume(SandboxState state, SandboxWorkspaceKey workspaceKey) {
 The original three-argument `create` and one-argument `resume` methods remain unchanged. Existing
 providers therefore keep their current behavior. The old identity-aware overloads accepting
 `SandboxIsolationKey` and `agentId` are removed; this feature is not in use and only the
-OpenSandbox Redis provider implements them in the repository.
+OpenSandbox Redis provider implements them in the repository. At design-review time, the commit
+that introduced those overloads is contained in no release tag or remote branch, so this
+replacement does not remove an API from a supported published artifact.
 
 ### `SandboxManager`
 
-For Harness-managed Priority 3 and Priority 4 acquisition, `SandboxManager` resolves
-`SandboxIsolationKey` once and derives `SandboxWorkspaceKey` once from it.
+For Harness-managed Priority 3 and Priority 4 acquisition, `SandboxManager` resolves one
+`SandboxIsolationKey` and derives the corresponding `SandboxWorkspaceKey` for the provider call.
 
 - The execution guard and `SessionSandboxStateStore` continue receiving `SandboxIsolationKey`.
 - Identity-aware sandbox client calls receive `SandboxWorkspaceKey`.
@@ -149,17 +159,27 @@ The last rule preserves provider behavior. OpenSandbox Redis continues to fail c
 original create method rather than creating an unowned distributed workspace, while providers that
 do not require a stable workspace identity continue normally.
 
+`SandboxManager` and `SessionSandboxStateStore` currently receive agent ID independently. The
+state store exposes its configured agent ID to the package, and the manager constructor must verify
+that it equals the manager's agent ID and reject a mismatch. This preserves one effective identity
+invariant even when callers construct these public classes directly rather than through
+`HarnessAgent`.
+
 ### `SessionSandboxStateStore`
 
 Change only the SESSION state-slot format:
 
 ```text
 old: sandbox:session:{sessionId}
-new: sandbox:session:{agentId}:{sessionId}
+new: sandbox:session:{SandboxWorkspaceKey.stableId}
 ```
 
 The new format makes two agents in the same session use independent persisted sandbox states, in
-agreement with `SandboxWorkspaceKey`. USER, AGENT, and GLOBAL formats keep their current behavior.
+agreement with `SandboxWorkspaceKey`. The state store derives the stable ID through
+`SandboxWorkspaceKey.from(isolationKey, configuredAgentId)`, so it uses the same canonical format as
+the sandbox client. The result is fixed-length, path-safe, does not expose the two raw components,
+and cannot become ambiguous when a component contains punctuation used by textual slot formats.
+USER, AGENT, and GLOBAL formats keep their current behavior.
 
 No legacy read, migration write, or legacy-key deletion is added because this feature has no
 current users.
@@ -210,7 +230,10 @@ lifecycle are different concerns and need not use the same backend key represent
 ## Error Handling
 
 - Null isolation keys and blank agent IDs are rejected when constructing a workspace key.
+- NUL in agent ID or the isolation-key value is rejected before canonicalization.
 - An AGENT key whose value differs from `agentId` is rejected.
+- A `SandboxManager` whose agent ID differs from its `SessionSandboxStateStore` agent ID is rejected
+  at construction time.
 - `SandboxWorkspaceKey.toString()` never logs raw user or session values.
 - The OpenSandbox Redis original create/resume methods continue to reject calls without a resolved
   workspace key.
@@ -247,7 +270,7 @@ Add `SandboxWorkspaceKeyTest` covering:
 - different agents, users, sessions, and scopes producing different keys where required;
 - GLOBAL producing one shared stable ID;
 - raw user and session identifiers absent from `stableId` and `toString`;
-- null, blank, and inconsistent AGENT inputs being rejected;
+- null, blank, NUL-containing, and inconsistent AGENT inputs being rejected;
 - equality and hash-code behavior.
 
 Update `SandboxManagerIsolationTest` covering:
@@ -255,12 +278,15 @@ Update `SandboxManagerIsolationTest` covering:
 - Priority 3 and Priority 4 passing the derived workspace key;
 - Priority 1 and Priority 2 bypassing workspace-key-aware methods;
 - missing isolation context using the original create method;
+- mismatched manager and state-store agent IDs being rejected;
 - default-method compatibility for providers that ignore workspace keys.
 
 Update `SessionSandboxStateStoreTest` covering:
 
 - two agents with the same session ID using different state slots;
 - SESSION round trips with the new key;
+- SESSION identifiers containing colons, path separators, Unicode, and long values still producing
+  one bounded, path-safe, unambiguous state-slot ID;
 - USER, AGENT, and GLOBAL behavior remaining unchanged;
 - state-slot IDs continuing to satisfy SQL-backed store path-character restrictions.
 
@@ -270,6 +296,8 @@ Update `SessionSandboxStateStoreTest` covering:
   `SandboxWorkspaceKey` fixed-vector tests and provider-consumption tests.
 - Verify the provider uses `getStableId()` without re-deriving identity.
 - Verify records retain the correct effective scope and agent ID.
+- Verify that GLOBAL record agent ID is treated as last-borrower diagnostics and is not part of
+  workspace identity or ownership.
 - Keep workspace record, lease, generation, idle/repair, metadata discovery, snapshot, deletion,
   orphan, and sweeping tests passing.
 - Keep missing-workspace-key fail-closed tests.
