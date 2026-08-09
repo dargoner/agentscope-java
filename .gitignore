@@ -101,3 +101,6 @@ agentscope-service/aistio/cover.out
 agentscope-service/aistio/coverage.*
 agentscope-service/aistio/.idea/
 agentscope-service/.dev-stack/
+
+# Local feature worktrees
+.worktrees/
