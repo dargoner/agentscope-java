@@ -95,7 +95,7 @@ public final class OpenSandboxWorkspaceStore implements AutoCloseable {
                     continue;
                 }
             } else {
-                record = readTree(tree, OpenSandboxWorkspaceRecord.class);
+                record = read(json, OpenSandboxWorkspaceRecord.class);
             }
             mergeSnapshotReferences(record.getWorkspaceId(), snapshotIds(record));
             return Optional.of(record);
@@ -319,7 +319,7 @@ public final class OpenSandboxWorkspaceStore implements AutoCloseable {
                         continue;
                     }
                 } else {
-                    actual = readTree(tree, OpenSandboxWorkspaceRecord.class);
+                    actual = read(json, OpenSandboxWorkspaceRecord.class);
                 }
                 replaceSnapshotReferencesLocked(required, snapshotIds(actual));
                 return;
@@ -416,8 +416,7 @@ public final class OpenSandboxWorkspaceStore implements AutoCloseable {
                 return;
             }
             replaceSnapshotReferencesLocked(
-                    workspaceId,
-                    snapshotIds(readTree(readTree(actual), OpenSandboxWorkspaceRecord.class)));
+                    workspaceId, snapshotIds(read(actual, OpenSandboxWorkspaceRecord.class)));
         } catch (RuntimeException reconciliationFailure) {
             if (primary == null) {
                 throw reconciliationFailure;

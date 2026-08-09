@@ -179,6 +179,22 @@ class OpenSandboxWorkspaceStoreTest {
     }
 
     @Test
+    void currentRecordRoundTripPreservesNanosecondPrecisionForCas() throws Exception {
+        OpenSandboxWorkspaceRecord record = record(4);
+        record.setLastAccessAt(Instant.ofEpochSecond(1_786_274_975L, 337_605_400L));
+        record.setUpdatedAt(Instant.ofEpochSecond(1_786_274_975L, 337_605_400L));
+        String json = new ObjectMapper().findAndRegisterModules().writeValueAsString(record);
+        when(bucket.get()).thenReturn(json);
+        when(bucket.compareAndSet(eq(json), any(String.class))).thenReturn(true);
+
+        OpenSandboxWorkspaceRecord loaded = store.load(WORKSPACE_ID).orElseThrow();
+        OpenSandboxWorkspaceRecord update = loaded.copy();
+        update.setDirty(true);
+
+        assertTrue(store.compareAndSet(loaded, update));
+    }
+
+    @Test
     void loadMigratesLegacyRecordWithoutRetainingWorkspaceSecrets() throws Exception {
         String legacyJson = legacyRecordJson(4, "FILE_SECRET_ALPHA", "ENV_SECRET_ALPHA");
         when(bucket.get()).thenReturn(legacyJson);

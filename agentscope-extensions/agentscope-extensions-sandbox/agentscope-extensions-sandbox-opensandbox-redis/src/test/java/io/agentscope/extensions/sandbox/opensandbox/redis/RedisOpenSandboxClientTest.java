@@ -258,8 +258,29 @@ class RedisOpenSandboxClientTest {
         assertEquals("runtime-b:latest", captured.getValue().getImage());
         assertEquals(List.of("/bin/runtime-b"), captured.getValue().getEntrypoint());
         assertEquals(
-                RedisOpenSandboxClient.runtimeProfileHash(runtime),
+                RedisOpenSandboxClient.metadataLabelHash(
+                        RedisOpenSandboxClient.runtimeProfileHash(runtime)),
                 captured.getValue().getMetadata().get("agentscope.runtime-profile"));
+    }
+
+    @Test
+    void createdSandboxMetadataUsesDockerLabelCompatibleHashValues() throws Exception {
+        OpenSandbox remote = remote("sandbox-1", workspace());
+        when(delegate.create(any(WorkspaceSpec.class), isNull(), any())).thenReturn(remote);
+
+        client.create(workspace(), null, options, isolationKey("user-111"), "agent-a");
+
+        ArgumentCaptor<OpenSandboxClientOptions> captured =
+                ArgumentCaptor.forClass(OpenSandboxClientOptions.class);
+        verify(delegate).create(any(WorkspaceSpec.class), isNull(), captured.capture());
+        Map<String, String> metadata = captured.getValue().getMetadata();
+        for (String key : List.of("agentscope.workspace-id", "agentscope.runtime-profile")) {
+            String value = metadata.get(key);
+            assertTrue(value.length() <= 63, () -> key + " exceeds the Docker label limit");
+            assertTrue(
+                    value.matches("[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?"),
+                    () -> key + " is not Docker label compatible: " + value);
+        }
     }
 
     @Test
@@ -275,7 +296,7 @@ class RedisOpenSandboxClientTest {
                                 "agentscope.owner",
                                 "opensandbox-redis",
                                 "agentscope.workspace-id",
-                                workspaceId)))
+                                RedisOpenSandboxClient.metadataLabelHash(workspaceId))))
                 .thenReturn(List.of(generationFour, laterGenerationFive, tieWinner));
         OpenSandbox handle = remote("sandbox-a", spec);
         when(delegate.resume(tieWinner)).thenReturn(handle);
@@ -1254,11 +1275,12 @@ class RedisOpenSandboxClientTest {
                         "agentscope.owner",
                         "opensandbox-redis",
                         "agentscope.workspace-id",
-                        workspaceId,
+                        RedisOpenSandboxClient.metadataLabelHash(workspaceId),
                         "agentscope.generation",
                         Long.toString(generation),
                         "agentscope.runtime-profile",
-                        RedisOpenSandboxClient.runtimeProfileHash(options)));
+                        RedisOpenSandboxClient.metadataLabelHash(
+                                RedisOpenSandboxClient.runtimeProfileHash(options))));
         info.setWorkspaceSpec(workspace());
         return info;
     }

@@ -35,6 +35,15 @@ class OpenSandboxTest {
     }
 
     @Test
+    void startCreatesWorkspaceFromExistingRootDirectory() throws Exception {
+        Fixture fixture = fixture();
+
+        fixture.sandbox.start();
+
+        assertEquals("/", fixture.sdk.handle.workingDirectories.get(0));
+    }
+
+    @Test
     void startRecreatesOnlyAfterExplicitNotFound() throws Exception {
         Fixture fixture = fixture();
         fixture.state.setSandboxId("gone");
@@ -219,6 +228,7 @@ class OpenSandboxTest {
 
     private static final class RecordingHandle implements OpenSandboxSdk.Handle {
         private final List<String> commands = new ArrayList<>();
+        private final List<String> workingDirectories = new ArrayList<>();
         private final Map<String, byte[]> files = new HashMap<>();
         private ExecResult nextResult = new ExecResult(0, "", "", false);
         private int closeCalls;
@@ -231,6 +241,7 @@ class OpenSandboxTest {
         @Override
         public ExecResult exec(String command, String workingDirectory, int timeoutSeconds) {
             commands.add(command);
+            workingDirectories.add(workingDirectory);
             ExecResult result = nextResult;
             nextResult = new ExecResult(0, "", "", false);
             return result;

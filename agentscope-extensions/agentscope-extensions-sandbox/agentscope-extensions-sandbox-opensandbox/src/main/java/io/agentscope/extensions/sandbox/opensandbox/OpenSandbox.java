@@ -153,7 +153,7 @@ public class OpenSandbox extends AbstractBaseSandbox implements SandboxFileTrans
 
     @Override
     protected void doSetupWorkspace() throws Exception {
-        checkedExec("mkdir -p " + shellQuote(getWorkspaceRoot()), getWorkspaceRoot(), 30);
+        checkedExec("mkdir -p " + shellQuote(getWorkspaceRoot()), "/", 30);
     }
 
     @Override

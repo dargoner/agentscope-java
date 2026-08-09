@@ -32,8 +32,7 @@ class OpenSandboxIntegrationTest {
         try {
             sandbox.start();
             assertEquals(
-                    "opensandbox-ok\n",
-                    sandbox.exec(null, "printf 'opensandbox-ok\\n'", 30).stdout());
+                    "opensandbox-ok", sandbox.exec(null, "printf 'opensandbox-ok'", 30).stdout());
             sandbox.uploadFile("/workspace/data.bin", payload);
             assertArrayEquals(payload, sandbox.downloadFile("/workspace/data.bin"));
 

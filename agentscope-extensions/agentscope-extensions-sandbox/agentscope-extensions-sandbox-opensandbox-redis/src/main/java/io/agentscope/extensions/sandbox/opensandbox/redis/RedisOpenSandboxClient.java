@@ -551,7 +551,7 @@ public final class RedisOpenSandboxClient
             OpenSandboxState winner = eligible.get(0);
             String discoveredProfile = winner.getMetadata().get("agentscope.runtime-profile");
             if (discoveredProfile != null
-                    && !discoveredProfile.equals(runtimeProfileHash(options))) {
+                    && !discoveredProfile.equals(metadataLabelHash(runtimeProfileHash(options)))) {
                 throw new SandboxException.SandboxConfigurationException(
                         "Discovered OpenSandbox runtime profile differs from the requested"
                                 + " profile");
@@ -710,10 +710,10 @@ public final class RedisOpenSandboxClient
         options.setRestoreSnapshotId(snapshotId);
         Map<String, String> metadata = new LinkedHashMap<>(options.getMetadata());
         metadata.put("agentscope.owner", "opensandbox-redis");
-        metadata.put("agentscope.workspace-id", workspaceId);
+        metadata.put("agentscope.workspace-id", metadataLabelHash(workspaceId));
         metadata.put("agentscope.generation", Long.toString(generation));
         metadata.put("agentscope.schema-version", Integer.toString(SCHEMA_VERSION));
-        metadata.put("agentscope.runtime-profile", runtimeProfileHash(options));
+        metadata.put("agentscope.runtime-profile", metadataLabelHash(runtimeProfileHash(options)));
         options.setMetadata(metadata);
         OpenSandbox remote = requireOpenSandbox(delegate.create(spec, null, options));
         try {
@@ -893,6 +893,21 @@ public final class RedisOpenSandboxClient
         }
     }
 
+    static String metadataLabelHash(String hash) {
+        requireText(hash, "hash");
+        if (isAsciiAlphanumeric(hash.charAt(0))
+                && isAsciiAlphanumeric(hash.charAt(hash.length() - 1))) {
+            return hash;
+        }
+        return "h-" + hash + "-0";
+    }
+
+    private static boolean isAsciiAlphanumeric(char value) {
+        return (value >= 'a' && value <= 'z')
+                || (value >= 'A' && value <= 'Z')
+                || (value >= '0' && value <= '9');
+    }
+
     private static String requireText(String value, String name) {
         Objects.requireNonNull(value, name);
         if (value.isBlank()) {
@@ -903,7 +918,10 @@ public final class RedisOpenSandboxClient
 
     private static Map<String, String> workspaceIdentity(String workspaceId) {
         return Map.of(
-                "agentscope.owner", "opensandbox-redis", "agentscope.workspace-id", workspaceId);
+                "agentscope.owner",
+                "opensandbox-redis",
+                "agentscope.workspace-id",
+                metadataLabelHash(workspaceId));
     }
 
     private void markDeletedRecordOrphans(OpenSandboxWorkspaceRecord record) {

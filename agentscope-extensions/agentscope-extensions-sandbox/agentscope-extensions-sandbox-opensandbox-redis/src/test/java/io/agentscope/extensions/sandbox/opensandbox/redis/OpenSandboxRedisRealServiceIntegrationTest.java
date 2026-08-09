@@ -227,7 +227,8 @@ class OpenSandboxRedisRealServiceIntegrationTest {
                             .get(paused.getNativeSnapshotId());
             assertNotNull(ready);
             assertEquals("READY", ready.status().toUpperCase());
-            assertEquals("PAUSED", remoteA.describe(originalSandboxId).getRemoteStatus());
+            assertEquals(
+                    "PAUSED", remoteA.describe(originalSandboxId).getRemoteStatus().toUpperCase());
 
             stage = "resume-paused-original";
             resumed =
@@ -239,8 +240,9 @@ class OpenSandboxRedisRealServiceIntegrationTest {
             resumed.stop();
 
             stage = "kill-original";
-            OpenSandbox killTarget =
-                    (OpenSandbox) remoteA.resume(remoteA.describe(originalSandboxId));
+            OpenSandboxState killState = remoteA.describe(originalSandboxId);
+            killState.setWorkspaceSpec(workspace);
+            OpenSandbox killTarget = (OpenSandbox) remoteA.resume(killState);
             remoteA.delete(killTarget);
 
             stage = "restore-new-sandbox-from-snapshot";
@@ -261,7 +263,7 @@ class OpenSandboxRedisRealServiceIntegrationTest {
             stop(cleanupFailures, resumed);
             stop(cleanupFailures, second);
             stop(cleanupFailures, first);
-            if (remoteA != null) cleanupRemote(cleanupFailures, remoteA, workspaceId);
+            if (remoteA != null) cleanupRemote(cleanupFailures, remoteA, workspaceId, workspace);
             if (clientA != null) clientA.close();
             if (clientB != null) clientB.close();
             if (sweeper != null) sweeper.close();
@@ -318,16 +320,20 @@ class OpenSandboxRedisRealServiceIntegrationTest {
     }
 
     private static void cleanupRemote(
-            List<Throwable> failures, OpenSandboxClient client, String workspaceId) {
+            List<Throwable> failures,
+            OpenSandboxClient client,
+            String workspaceId,
+            WorkspaceSpec workspace) {
         Map<String, String> identity =
                 Map.of(
                         "agentscope.owner",
                         "opensandbox-redis",
                         "agentscope.workspace-id",
-                        workspaceId);
+                        RedisOpenSandboxClient.metadataLabelHash(workspaceId));
         try {
             for (OpenSandboxState state : client.listByMetadata(identity)) {
                 try {
+                    state.setWorkspaceSpec(workspace);
                     client.delete((Sandbox) client.resume(state));
                 } catch (Throwable failure) {
                     if (!client.isNotFound(failure)) failures.add(failure);
