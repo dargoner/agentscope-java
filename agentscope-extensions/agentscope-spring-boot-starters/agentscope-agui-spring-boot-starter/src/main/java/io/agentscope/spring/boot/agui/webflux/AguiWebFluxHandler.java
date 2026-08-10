@@ -24,6 +24,7 @@ import io.agentscope.core.agui.event.AguiEvent;
 import io.agentscope.core.agui.model.RunAgentInput;
 import io.agentscope.core.agui.processor.AguiRequestProcessor;
 import io.agentscope.core.agui.registry.AguiAgentRegistry;
+import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.spring.boot.agui.common.AguiRuntimeContextRequest;
 import io.agentscope.spring.boot.agui.common.AguiRuntimeContextResolver;
 import io.agentscope.spring.boot.agui.common.DefaultAgentResolver;
@@ -95,6 +96,7 @@ public class AguiWebFluxHandler {
                                         ? builder.config
                                         : AguiAdapterConfig.defaultConfig())
                         .adapterFactory(builder.adapterFactory)
+                        .resumeStateStore(builder.resumeStateStore)
                         .build();
         this.encoder = new AguiEventEncoder();
         this.agentIdHeader =
@@ -158,6 +160,16 @@ public class AguiWebFluxHandler {
                                             ServerSentEvent.<String>builder()
                                                     .data(encoder.encodeToJson(event).trim())
                                                     .build())
+                            .onErrorResume(
+                                    error -> {
+                                        logger.error(
+                                                "Error during AG-UI run: {}", error.getMessage());
+                                        return createErrorEventStream(
+                                                threadId,
+                                                runId,
+                                                error.getMessage(),
+                                                !AguiRequestProcessor.isCoordinatorFailure(error));
+                                    })
                             // When client closes connection (cancels stream), interrupt the agent
                             .doOnCancel(
                                     () -> {
@@ -253,15 +265,28 @@ public class AguiWebFluxHandler {
      */
     private Flux<ServerSentEvent<String>> createErrorEventStream(
             String threadId, String runId, String errorMessage) {
+        return createErrorEventStream(threadId, runId, errorMessage, true);
+    }
+
+    private Flux<ServerSentEvent<String>> createErrorEventStream(
+            String threadId, String runId, String errorMessage, boolean includeFinished) {
+        String safeErrorMessage =
+                errorMessage != null ? errorMessage : "AG-UI request failed unexpectedly";
         String errorEvent =
                 encoder.encodeToJson(
-                                new AguiEvent.Raw(threadId, runId, Map.of("error", errorMessage)))
+                                new AguiEvent.Raw(
+                                        threadId, runId, Map.of("error", safeErrorMessage)))
                         .trim();
-        String finishEvent =
-                encoder.encodeToJson(new AguiEvent.RunFinished(threadId, runId)).trim();
-        return Flux.just(
-                ServerSentEvent.<String>builder().data(errorEvent).build(),
-                ServerSentEvent.<String>builder().data(finishEvent).build());
+        Flux<ServerSentEvent<String>> events =
+                Flux.just(ServerSentEvent.<String>builder().data(errorEvent).build());
+        if (includeFinished) {
+            String finishEvent =
+                    encoder.encodeToJson(new AguiEvent.RunFinished(threadId, runId)).trim();
+            events =
+                    events.concatWith(
+                            Flux.just(ServerSentEvent.<String>builder().data(finishEvent).build()));
+        }
+        return events;
     }
 
     /**
@@ -283,6 +308,7 @@ public class AguiWebFluxHandler {
         private String agentIdHeader;
         private AguiRuntimeContextResolver runtimeContextResolver;
         private AguiAgentAdapterFactory adapterFactory;
+        private AgentStateStore resumeStateStore;
 
         /**
          * Set the agent registry.
@@ -358,6 +384,12 @@ public class AguiWebFluxHandler {
          */
         public Builder adapterFactory(AguiAgentAdapterFactory adapterFactory) {
             this.adapterFactory = adapterFactory;
+            return this;
+        }
+
+        /** Set the versioned store used for distributed AG-UI resume coordination. */
+        public Builder resumeStateStore(AgentStateStore resumeStateStore) {
+            this.resumeStateStore = resumeStateStore;
             return this;
         }
 

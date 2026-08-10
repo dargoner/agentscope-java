@@ -21,7 +21,9 @@ import io.agentscope.core.agui.adapter.AguiAgentAdapterFactory;
 import io.agentscope.core.agui.adapter.strategy.AgentEventConverter;
 import io.agentscope.core.agui.adapter.strategy.AguiEventEnricher;
 import io.agentscope.core.agui.registry.AguiAgentRegistry;
+import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.spring.boot.agui.common.AguiProperties;
+import io.agentscope.spring.boot.agui.common.AguiResumeStateStoreResolver;
 import io.agentscope.spring.boot.agui.common.AguiRuntimeContextResolver;
 import io.agentscope.spring.boot.agui.common.ThreadSessionManager;
 import org.springframework.beans.factory.ObjectProvider;
@@ -87,7 +89,8 @@ public class AgentscopeAguiWebFluxAutoConfiguration {
             ObjectProvider<AgentEventConverter> eventConvertersProvider,
             ObjectProvider<AguiEventEnricher> eventEnrichersProvider,
             ObjectProvider<AguiRuntimeContextResolver> runtimeContextResolverProvider,
-            ObjectProvider<AguiAgentAdapterFactory> adapterFactoryProvider) {
+            ObjectProvider<AguiAgentAdapterFactory> adapterFactoryProvider,
+            ObjectProvider<AgentStateStore> stateStoreProvider) {
         AguiAdapterConfig config =
                 AguiAdapterConfig.builder()
                         .toolMergeMode(props.getDefaultToolMergeMode())
@@ -108,6 +111,7 @@ public class AgentscopeAguiWebFluxAutoConfiguration {
                 .agentIdHeader(props.getAgentIdHeader())
                 .runtimeContextResolver(runtimeContextResolverProvider.getIfAvailable())
                 .adapterFactory(adapterFactoryProvider.getIfAvailable())
+                .resumeStateStore(AguiResumeStateStoreResolver.resolve(props, stateStoreProvider))
                 .config(config)
                 .build();
     }

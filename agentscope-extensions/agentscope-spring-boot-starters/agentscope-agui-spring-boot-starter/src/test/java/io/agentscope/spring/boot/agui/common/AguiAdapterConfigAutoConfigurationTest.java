@@ -18,8 +18,10 @@ package io.agentscope.spring.boot.agui.common;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertIterableEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.agui.adapter.AguiAdapterConfig;
@@ -33,6 +35,8 @@ import io.agentscope.core.agui.registry.AguiAgentRegistry;
 import io.agentscope.core.event.AgentEndEvent;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentStartEvent;
+import io.agentscope.core.state.AgentStateStore;
+import io.agentscope.core.state.InMemoryAgentStateStore;
 import io.agentscope.spring.boot.agui.mvc.AgentscopeAguiMvcAutoConfiguration;
 import io.agentscope.spring.boot.agui.mvc.AguiMvcController;
 import io.agentscope.spring.boot.agui.webflux.AgentscopeAguiWebFluxAutoConfiguration;
@@ -86,6 +90,63 @@ class AguiAdapterConfigAutoConfigurationTest {
                     assertTrue(config.getEventConverters().isEmpty());
                     assertTrue(config.getEventEnrichers().isEmpty());
                 });
+    }
+
+    @Test
+    void defaultResumeCoordinationUsesPrivateInMemoryStore() {
+        mvcContextRunner.run(
+                ctx -> {
+                    Object processor =
+                            ReflectionTestUtils.getField(
+                                    ctx.getBean(AguiMvcController.class), "processor");
+                    Object coordinator =
+                            ReflectionTestUtils.getField(processor, "resumeCoordinator");
+                    Object store = ReflectionTestUtils.getField(coordinator, "stateStore");
+                    assertTrue(store instanceof InMemoryAgentStateStore);
+                });
+    }
+
+    @Test
+    void distributedResumeCoordinationUsesTheUniqueStoreBean() {
+        InMemoryAgentStateStore store = new InMemoryAgentStateStore();
+        mvcContextRunner
+                .withPropertyValues("agentscope.agui.resume.distributed-enabled=true")
+                .withBean(AgentStateStore.class, () -> store)
+                .run(
+                        ctx -> {
+                            Object processor =
+                                    ReflectionTestUtils.getField(
+                                            ctx.getBean(AguiMvcController.class), "processor");
+                            Object coordinator =
+                                    ReflectionTestUtils.getField(processor, "resumeCoordinator");
+                            assertSame(
+                                    store, ReflectionTestUtils.getField(coordinator, "stateStore"));
+                        });
+    }
+
+    @Test
+    void distributedResumeCoordinationFailsWithoutAStoreBean() {
+        mvcContextRunner
+                .withPropertyValues("agentscope.agui.resume.distributed-enabled=true")
+                .run(ctx -> assertNotNull(ctx.getStartupFailure()));
+    }
+
+    @Test
+    void distributedResumeCoordinationRejectsAmbiguousStores() {
+        mvcContextRunner
+                .withPropertyValues("agentscope.agui.resume.distributed-enabled=true")
+                .withBean("firstStore", AgentStateStore.class, InMemoryAgentStateStore::new)
+                .withBean("secondStore", AgentStateStore.class, InMemoryAgentStateStore::new)
+                .run(ctx -> assertNotNull(ctx.getStartupFailure()));
+    }
+
+    @Test
+    void distributedResumeCoordinationRejectsNonVersionedStore() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        mvcContextRunner
+                .withPropertyValues("agentscope.agui.resume.distributed-enabled=true")
+                .withBean(AgentStateStore.class, () -> store)
+                .run(ctx -> assertNotNull(ctx.getStartupFailure()));
     }
 
     @Test

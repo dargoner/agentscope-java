@@ -28,12 +28,110 @@ import io.agentscope.core.agui.event.AguiEventType;
 import io.agentscope.core.agui.model.AguiMessage;
 import io.agentscope.core.agui.model.AguiResume;
 import io.agentscope.core.agui.model.RunAgentInput;
+import io.agentscope.core.state.AgentStateStore;
+import io.agentscope.core.state.InMemoryAgentStateStore;
+import io.agentscope.core.state.State;
+import io.agentscope.core.util.JsonUtils;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /** Unit tests for AguiResumeCoordinator. */
 class AguiResumeCoordinatorTest {
+
+    @Test
+    void resumeStateRoundTripsNestedInterruptsAndOptionalFields() {
+        AguiEvent.Interrupt nested =
+                new AguiEvent.Interrupt(
+                        "interrupt-1",
+                        "tool_call",
+                        "confirm",
+                        "tool-call-1",
+                        Map.of("type", "object"),
+                        null,
+                        Map.of("raw", Map.of("enabled", true)));
+        AguiResumeState state =
+                new AguiResumeState(
+                        new AguiActiveRun("run-1", "lease-1", 1234L),
+                        Map.of("interrupt-1", nested));
+
+        AguiResumeState restored =
+                JsonUtils.getJsonCodec()
+                        .fromJson(JsonUtils.getJsonCodec().toJson(state), AguiResumeState.class);
+
+        assertEquals(state.activeRun(), restored.activeRun());
+        assertEquals(state.pendingInterrupts(), restored.pendingInterrupts());
+    }
+
+    @Test
+    void coordinatorsSharingStoreSharePendingInterrupts() {
+        InMemoryAgentStateStore store = new InMemoryAgentStateStore();
+        AguiResumeCoordinator first = new AguiResumeCoordinator(store);
+        AguiResumeCoordinator second = new AguiResumeCoordinator(store);
+
+        AguiResumeCoordinator.LeaseAcquisition acquisition = first.acquire(input("run-1"));
+        assertFalse(acquisition.isError());
+        first.completeRun(
+                acquisition.lease(), interruptedFinished("run-1", interrupt("interrupt-1")), false);
+
+        AguiResumeCoordinator.LeaseAcquisition resume =
+                second.acquire(
+                        RunAgentInput.builder()
+                                .threadId("thread-1")
+                                .runId("run-2")
+                                .resume(
+                                        List.of(
+                                                new AguiResume(
+                                                        "interrupt-1",
+                                                        AguiResume.STATUS_RESOLVED,
+                                                        Map.of("approved", true))))
+                                .build());
+        assertFalse(resume.isError());
+        assertEquals(
+                Map.of("interrupt-1", interrupt("interrupt-1")),
+                resume.lease().pendingInterrupts());
+    }
+
+    @Test
+    void expiredLeaseCanBeTakenOverButStaleOwnerCannotComplete() {
+        InMemoryAgentStateStore store = new InMemoryAgentStateStore();
+        MutableClock clock = new MutableClock(1_000L);
+        AguiResumeCoordinator first = new AguiResumeCoordinator(store, clock);
+        AguiResumeCoordinator second = new AguiResumeCoordinator(store, clock);
+
+        AguiResumeCoordinator.LeaseAcquisition firstRun = first.acquire(input("run-1"));
+        clock.advanceMillis(Duration.ofMinutes(10).toMillis() + 1L);
+        AguiResumeCoordinator.LeaseAcquisition takeover = second.acquire(input("run-2"));
+
+        assertFalse(takeover.isError());
+        assertTrue(
+                first.completeRun(
+                                firstRun.lease(),
+                                new AguiEvent.RunFinished("thread-1", "run-1"),
+                                false)
+                        .isError());
+        assertFalse(
+                second.completeRun(
+                                takeover.lease(),
+                                new AguiEvent.RunFinished("thread-1", "run-2"),
+                                false)
+                        .isError());
+    }
+
+    @Test
+    void rejectsNonVersionedStore() {
+        AgentStateStore store = new NonVersionedStore();
+        assertTrue(
+                org.junit.jupiter.api.Assertions.assertThrows(
+                                IllegalArgumentException.class,
+                                () -> new AguiResumeCoordinator(store))
+                        .getMessage()
+                        .contains("versioning"));
+    }
 
     @Test
     void validateRejectsNewInputWhenThreadHasOpenInterrupts() {
@@ -282,5 +380,64 @@ class AguiResumeCoordinatorTest {
 
     private static RunAgentInput input(String runId) {
         return RunAgentInput.builder().threadId("thread-1").runId(runId).build();
+    }
+
+    private static final class MutableClock extends Clock {
+        private long millis;
+
+        private MutableClock(long millis) {
+            this.millis = millis;
+        }
+
+        private void advanceMillis(long amount) {
+            millis += amount;
+        }
+
+        @Override
+        public ZoneOffset getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(java.time.ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return Instant.ofEpochMilli(millis);
+        }
+    }
+
+    private static final class NonVersionedStore implements AgentStateStore {
+        @Override
+        public void save(String u, String s, String k, State v) {}
+
+        @Override
+        public void save(String u, String s, String k, List<? extends State> v) {}
+
+        @Override
+        public <T extends State> java.util.Optional<T> get(
+                String u, String s, String k, Class<T> t) {
+            return java.util.Optional.empty();
+        }
+
+        @Override
+        public <T extends State> List<T> getList(String u, String s, String k, Class<T> t) {
+            return List.of();
+        }
+
+        @Override
+        public boolean exists(String u, String s) {
+            return false;
+        }
+
+        @Override
+        public void delete(String u, String s) {}
+
+        @Override
+        public java.util.Set<String> listSessionIds(String u) {
+            return java.util.Set.of();
+        }
     }
 }
