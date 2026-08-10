@@ -41,6 +41,10 @@ public final class SessionSandboxStateStore {
         this.agentId = Objects.requireNonNull(agentId, "agentId must not be null");
     }
 
+    String agentId() {
+        return agentId;
+    }
+
     public Optional<String> load(SandboxIsolationKey key) throws IOException {
         try {
             String slotSid = slotSessionId(key);
@@ -91,7 +95,8 @@ public final class SessionSandboxStateStore {
     private String slotSessionId(SandboxIsolationKey key) {
         IsolationScope scope = key.getScope();
         return switch (scope) {
-            case SESSION -> "sandbox:session:" + key.getValue();
+            case SESSION ->
+                    "sandbox:session:" + SandboxWorkspaceKey.from(key, agentId).getStableId();
             case USER -> "sandbox:user:" + agentId + ":" + key.getValue();
             case AGENT -> "sandbox:agent:" + agentId;
             case GLOBAL -> "sandbox:global";

@@ -47,6 +47,7 @@ import io.agentscope.harness.agent.IsolationScope;
 import io.agentscope.harness.agent.sandbox.Sandbox;
 import io.agentscope.harness.agent.sandbox.SandboxException;
 import io.agentscope.harness.agent.sandbox.SandboxIsolationKey;
+import io.agentscope.harness.agent.sandbox.SandboxWorkspaceKey;
 import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import io.agentscope.harness.agent.sandbox.layout.FileEntry;
 import java.time.Clock;
@@ -132,13 +133,16 @@ class RedisOpenSandboxClientTest {
 
         RedisManagedOpenSandbox first =
                 (RedisManagedOpenSandbox)
-                        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+                        client.create(spec, null, options, workspaceKey("user-1"));
         RedisManagedOpenSandbox second =
                 (RedisManagedOpenSandbox)
-                        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+                        client.create(spec, null, options, workspaceKey("user-1"));
 
         assertNotEquals(first.leaseId(), second.leaseId());
         assertEquals(first.workspaceId(), second.workspaceId());
+        assertEquals(workspaceKey("user-1").getStableId(), record.get().getWorkspaceId());
+        assertEquals(IsolationScope.USER.name(), record.get().getIsolationScope());
+        assertEquals("agent-a", record.get().getAgentId());
         verify(delegate, times(1)).create(any(WorkspaceSpec.class), isNull(), any());
         verify(delegate, times(1)).resume(any(OpenSandboxState.class));
         verify(firstRemote).start();
@@ -148,6 +152,32 @@ class RedisOpenSandboxClientTest {
         verify(store, times(2)).putLease(leases.capture(), eq(lifecycle.getActiveLeaseTtl()));
         assertNotEquals(
                 leases.getAllValues().get(0).leaseId(), leases.getAllValues().get(1).leaseId());
+    }
+
+    @Test
+    void globalWorkspaceIsSharedAcrossAgentsAndRecordsLastBorrower() throws Exception {
+        WorkspaceSpec spec = workspace();
+        OpenSandbox firstRemote = remote("sandbox-1", spec);
+        OpenSandbox secondHandle = remote("sandbox-1", spec);
+        OpenSandboxState firstState = (OpenSandboxState) firstRemote.getState();
+        when(delegate.create(any(WorkspaceSpec.class), isNull(), any())).thenReturn(firstRemote);
+        when(delegate.deserializeState("serialized-state")).thenReturn(firstState);
+        when(delegate.resume(any(OpenSandboxState.class))).thenReturn(secondHandle);
+        when(delegate.describe("sandbox-1")).thenReturn(info("sandbox-1", "RUNNING"));
+
+        SandboxWorkspaceKey firstKey = globalWorkspaceKey("agent-a");
+        SandboxWorkspaceKey secondKey = globalWorkspaceKey("agent-b");
+        RedisManagedOpenSandbox first =
+                (RedisManagedOpenSandbox) client.create(spec, null, options, firstKey);
+        RedisManagedOpenSandbox second =
+                (RedisManagedOpenSandbox) client.create(spec, null, options, secondKey);
+
+        assertEquals(firstKey.getStableId(), secondKey.getStableId());
+        assertEquals(first.workspaceId(), second.workspaceId());
+        assertEquals(IsolationScope.GLOBAL.name(), record.get().getIsolationScope());
+        assertEquals("agent-b", record.get().getAgentId());
+        verify(delegate, times(1)).create(any(WorkspaceSpec.class), isNull(), any());
+        verify(delegate, times(1)).resume(any(OpenSandboxState.class));
     }
 
     @Test
@@ -161,7 +191,7 @@ class RedisOpenSandboxClientTest {
         when(delegate.deserializeState("serialized-state")).thenReturn(handleState);
         when(delegate.resume(any(OpenSandboxState.class))).thenReturn(handle);
 
-        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+        client.create(spec, null, options, workspaceKey("user-1"));
 
         verify(delegate, times(1)).resumeRemote("sandbox-1");
         verify(handle).startExisting();
@@ -186,7 +216,7 @@ class RedisOpenSandboxClientTest {
         when(delegate.create(any(WorkspaceSpec.class), isNull(), any()))
                 .thenReturn(current, previous);
 
-        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+        client.create(spec, null, options, workspaceKey("user-1"));
 
         ArgumentCaptor<OpenSandboxClientOptions> attempts =
                 ArgumentCaptor.forClass(OpenSandboxClientOptions.class);
@@ -211,7 +241,7 @@ class RedisOpenSandboxClientTest {
         when(delegate.deserializeState("serialized-state")).thenReturn(handleState);
         when(delegate.resume(any(OpenSandboxState.class))).thenReturn(handle);
 
-        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+        client.create(spec, null, options, workspaceKey("user-1"));
 
         verify(delegate, never()).resumeRemote(any());
         verify(handle).startExisting();
@@ -228,13 +258,7 @@ class RedisOpenSandboxClientTest {
         SandboxException.SandboxConfigurationException error =
                 assertThrows(
                         SandboxException.SandboxConfigurationException.class,
-                        () ->
-                                client.create(
-                                        workspace(),
-                                        null,
-                                        tenant,
-                                        isolationKey("user-1"),
-                                        "agent-a"));
+                        () -> client.create(workspace(), null, tenant, workspaceKey("user-1")));
 
         assertFalse(error.getMessage().contains("secret-token-a"));
         assertFalse(error.getMessage().contains("secret-token-b"));
@@ -250,7 +274,7 @@ class RedisOpenSandboxClientTest {
         OpenSandbox remote = remote("sandbox-1", workspace());
         when(delegate.create(any(WorkspaceSpec.class), isNull(), any())).thenReturn(remote);
 
-        client.create(workspace(), null, runtime, isolationKey("user-1"), "agent-a");
+        client.create(workspace(), null, runtime, workspaceKey("user-1"));
 
         ArgumentCaptor<OpenSandboxClientOptions> captured =
                 ArgumentCaptor.forClass(OpenSandboxClientOptions.class);
@@ -268,7 +292,7 @@ class RedisOpenSandboxClientTest {
         OpenSandbox remote = remote("sandbox-1", workspace());
         when(delegate.create(any(WorkspaceSpec.class), isNull(), any())).thenReturn(remote);
 
-        client.create(workspace(), null, options, isolationKey("user-111"), "agent-a");
+        client.create(workspace(), null, options, workspaceKey("user-111"));
 
         ArgumentCaptor<OpenSandboxClientOptions> captured =
                 ArgumentCaptor.forClass(OpenSandboxClientOptions.class);
@@ -286,7 +310,7 @@ class RedisOpenSandboxClientTest {
     @Test
     void missingRecordDiscoversDeterministicWinnerAndDefersDuplicateCleanup() throws Exception {
         WorkspaceSpec spec = workspace();
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         OpenSandboxState generationFour = discovered("sandbox-z", workspaceId, 4, NOW);
         OpenSandboxState laterGenerationFive =
                 discovered("sandbox-b", workspaceId, 5, NOW.plusSeconds(20));
@@ -301,7 +325,7 @@ class RedisOpenSandboxClientTest {
         OpenSandbox handle = remote("sandbox-a", spec);
         when(delegate.resume(tieWinner)).thenReturn(handle);
 
-        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+        client.create(spec, null, options, workspaceKey("user-1"));
 
         verify(handle).startExisting();
         verify(store).markOrphanSandbox(workspaceId, "sandbox-z", NOW);
@@ -315,7 +339,7 @@ class RedisOpenSandboxClientTest {
     @Test
     void missingRecordRecoversLatestTwoReadySnapshotsByDeterministicPrefix() throws Exception {
         WorkspaceSpec spec = workspace();
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         Map<String, NativeSnapshot> snapshots = new LinkedHashMap<>();
         snapshots.put(
                 "snapshot-old", snapshot(workspaceId, "snapshot-old", 1, NOW.minusSeconds(20)));
@@ -333,7 +357,7 @@ class RedisOpenSandboxClientTest {
         when(delegate.create(any(WorkspaceSpec.class), isNull(), any()))
                 .thenReturn(current, previous);
 
-        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+        client.create(spec, null, options, workspaceKey("user-1"));
 
         ArgumentCaptor<OpenSandboxClientOptions> attempts =
                 ArgumentCaptor.forClass(OpenSandboxClientOptions.class);
@@ -350,7 +374,7 @@ class RedisOpenSandboxClientTest {
     @Test
     void missingRecordRecoversSnapshotCreatedAboveHistoricalTombstone() throws Exception {
         WorkspaceSpec spec = workspace();
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         when(store.deletedThroughGeneration(workspaceId)).thenReturn(1L);
         when(delegate.listByMetadata(any())).thenReturn(List.of());
         when(delegate.listNativeSnapshotDetailsByNamePrefix(
@@ -368,7 +392,7 @@ class RedisOpenSandboxClientTest {
         OpenSandbox restored = remote("sandbox-restored", spec);
         when(delegate.create(any(WorkspaceSpec.class), isNull(), any())).thenReturn(restored);
 
-        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+        client.create(spec, null, options, workspaceKey("user-1"));
 
         ArgumentCaptor<OpenSandboxClientOptions> createOptions =
                 ArgumentCaptor.forClass(OpenSandboxClientOptions.class);
@@ -383,7 +407,7 @@ class RedisOpenSandboxClientTest {
     @Test
     void missingRecordUsesHighestEligibleSnapshotGeneration() throws Exception {
         WorkspaceSpec spec = workspace();
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         when(delegate.listByMetadata(any())).thenReturn(List.of());
         when(delegate.listNativeSnapshotDetailsByNamePrefix(
                         OpenSandboxLifecycleSweeper.snapshotNamePrefix(workspaceId)))
@@ -400,7 +424,7 @@ class RedisOpenSandboxClientTest {
         OpenSandbox restored = remote("sandbox-restored", spec);
         when(delegate.create(any(WorkspaceSpec.class), isNull(), any())).thenReturn(restored);
 
-        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+        client.create(spec, null, options, workspaceKey("user-1"));
 
         ArgumentCaptor<OpenSandboxClientOptions> createOptions =
                 ArgumentCaptor.forClass(OpenSandboxClientOptions.class);
@@ -413,7 +437,7 @@ class RedisOpenSandboxClientTest {
     @Test
     void missingRecordRejectsNegativeSnapshotGenerationBeforeRemoteCreate() {
         WorkspaceSpec spec = workspace();
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         when(delegate.listByMetadata(any())).thenReturn(List.of());
         when(delegate.listNativeSnapshotDetailsByNamePrefix(
                         OpenSandboxLifecycleSweeper.snapshotNamePrefix(workspaceId)))
@@ -425,9 +449,7 @@ class RedisOpenSandboxClientTest {
         SandboxException.SandboxRuntimeException error =
                 assertThrows(
                         SandboxException.SandboxRuntimeException.class,
-                        () ->
-                                client.create(
-                                        spec, null, options, isolationKey("user-1"), "agent-a"));
+                        () -> client.create(spec, null, options, workspaceKey("user-1")));
 
         assertEquals("Invalid OpenSandbox generation", error.getMessage());
         verify(delegate, never()).create(any(), any(), any());
@@ -436,7 +458,7 @@ class RedisOpenSandboxClientTest {
     @Test
     void missingRecordRejectsGenerationOverflowBeforeRemoteCreate() {
         WorkspaceSpec spec = workspace();
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         when(store.deletedThroughGeneration(workspaceId)).thenReturn(Long.MAX_VALUE);
         when(delegate.listByMetadata(any())).thenReturn(List.of());
         when(delegate.listNativeSnapshotDetailsByNamePrefix(any())).thenReturn(Map.of());
@@ -444,9 +466,7 @@ class RedisOpenSandboxClientTest {
         SandboxException.SandboxRuntimeException error =
                 assertThrows(
                         SandboxException.SandboxRuntimeException.class,
-                        () ->
-                                client.create(
-                                        spec, null, options, isolationKey("user-1"), "agent-a"));
+                        () -> client.create(spec, null, options, workspaceKey("user-1")));
 
         assertEquals("Invalid OpenSandbox generation", error.getMessage());
         verify(delegate, never()).create(any(), any(), any());
@@ -455,15 +475,13 @@ class RedisOpenSandboxClientTest {
     @Test
     void missingRecordRejectsNegativeTombstoneBeforeRemoteDiscovery() {
         WorkspaceSpec spec = workspace();
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         when(store.deletedThroughGeneration(workspaceId)).thenReturn(-1L);
 
         SandboxException.SandboxRuntimeException error =
                 assertThrows(
                         SandboxException.SandboxRuntimeException.class,
-                        () ->
-                                client.create(
-                                        spec, null, options, isolationKey("user-1"), "agent-a"));
+                        () -> client.create(spec, null, options, workspaceKey("user-1")));
 
         assertEquals("Invalid OpenSandbox generation", error.getMessage());
         verify(delegate, never()).listByMetadata(any());
@@ -475,7 +493,7 @@ class RedisOpenSandboxClientTest {
     @Test
     void missingRecordFailsClosedWhenBothDiscoveredSnapshotsFail() throws Exception {
         WorkspaceSpec spec = workspace();
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         when(delegate.listByMetadata(any())).thenReturn(List.of());
         when(delegate.listNativeSnapshotDetailsByNamePrefix(
                         OpenSandboxLifecycleSweeper.snapshotNamePrefix(workspaceId)))
@@ -498,7 +516,7 @@ class RedisOpenSandboxClientTest {
 
         assertThrows(
                 SandboxException.SandboxRuntimeException.class,
-                () -> client.create(spec, null, options, isolationKey("user-1"), "agent-a"));
+                () -> client.create(spec, null, options, workspaceKey("user-1")));
 
         verify(delegate, times(2)).create(any(), isNull(), any());
     }
@@ -515,7 +533,7 @@ class RedisOpenSandboxClientTest {
         OpenSandboxState requested = new OpenSandboxState();
         requested.setWorkspaceSpec(spec);
 
-        client.resume(requested, isolationKey("user-1"), "agent-a");
+        client.resume(requested, workspaceKey("user-1"));
 
         verify(delegate).describe("sandbox-1");
         verify(delegate).resume(any(OpenSandboxState.class));
@@ -527,7 +545,7 @@ class RedisOpenSandboxClientTest {
 
         assertThrows(
                 SandboxException.SandboxRuntimeException.class,
-                () -> client.create(workspace(), null, options, isolationKey("user-1"), "agent-a"));
+                () -> client.create(workspace(), null, options, workspaceKey("user-1")));
 
         verify(delegate, never()).create(any(), any(), any());
         verify(delegate, never()).resumeRemote(any());
@@ -552,7 +570,7 @@ class RedisOpenSandboxClientTest {
         when(delegate.create(any(WorkspaceSpec.class), isNull(), any()))
                 .thenReturn(current, previous);
 
-        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+        client.create(spec, null, options, workspaceKey("user-1"));
 
         ArgumentCaptor<OpenSandboxClientOptions> attempts =
                 ArgumentCaptor.forClass(OpenSandboxClientOptions.class);
@@ -591,9 +609,7 @@ class RedisOpenSandboxClientTest {
         SandboxException.SandboxRuntimeException error =
                 assertThrows(
                         SandboxException.SandboxRuntimeException.class,
-                        () ->
-                                client.create(
-                                        spec, null, options, isolationKey("user-1"), "agent-a"));
+                        () -> client.create(spec, null, options, workspaceKey("user-1")));
 
         assertSame(startFailure, error.getCause());
         assertTrue(List.of(startFailure.getSuppressed()).contains(cleanupFailure));
@@ -627,7 +643,7 @@ class RedisOpenSandboxClientTest {
 
         assertThrows(
                 SandboxException.SandboxRuntimeException.class,
-                () -> client.create(spec, null, options, isolationKey("user-1"), "agent-a"));
+                () -> client.create(spec, null, options, workspaceKey("user-1")));
 
         ArgumentCaptor<OpenSandboxClientOptions> attempts =
                 ArgumentCaptor.forClass(OpenSandboxClientOptions.class);
@@ -656,7 +672,7 @@ class RedisOpenSandboxClientTest {
 
         assertThrows(
                 SandboxException.SandboxRuntimeException.class,
-                () -> client.create(spec, null, options, isolationKey("user-1"), "agent-a"));
+                () -> client.create(spec, null, options, workspaceKey("user-1")));
 
         verify(delegate, never()).create(any(), any(), any());
     }
@@ -673,7 +689,7 @@ class RedisOpenSandboxClientTest {
 
         assertThrows(
                 SandboxException.SandboxRuntimeException.class,
-                () -> client.create(spec, null, options, isolationKey("user-1"), "agent-a"));
+                () -> client.create(spec, null, options, workspaceKey("user-1")));
 
         verify(delegate, never()).create(any(), any(), any());
         assertEquals(1, record.get().getGeneration());
@@ -691,8 +707,7 @@ class RedisOpenSandboxClientTest {
                                                 io.agentscope.harness.agent.sandbox.snapshot
                                                         .SandboxSnapshot.class),
                                 options,
-                                isolationKey("user-1"),
-                                "agent-a"));
+                                workspaceKey("user-1")));
     }
 
     @Test
@@ -707,7 +722,7 @@ class RedisOpenSandboxClientTest {
         when(store.activeLeases(any(), anyLong())).thenReturn(List.of());
         RedisManagedOpenSandbox managed =
                 (RedisManagedOpenSandbox)
-                        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+                        client.create(spec, null, options, workspaceKey("user-1"));
 
         managed.start();
         managed.stop();
@@ -812,7 +827,7 @@ class RedisOpenSandboxClientTest {
 
         assertThrows(
                 IllegalStateException.class,
-                () -> client.create(spec, null, options, isolationKey("user-1"), "agent-a"));
+                () -> client.create(spec, null, options, workspaceKey("user-1")));
 
         assertEquals("sandbox-1", record.get().getSandboxId());
         verify(remote).disconnect();
@@ -828,7 +843,7 @@ class RedisOpenSandboxClientTest {
         when(delegate.create(any(WorkspaceSpec.class), isNull(), any())).thenReturn(remote);
         when(delegate.serializeState(any())).thenReturn("TOP_SECRET_SERIALIZED_STATE");
 
-        client.create(secretSpec, null, options, isolationKey("user-1"), "agent-a");
+        client.create(secretSpec, null, options, workspaceKey("user-1"));
 
         String json =
                 new com.fasterxml.jackson.databind.ObjectMapper()
@@ -849,7 +864,7 @@ class RedisOpenSandboxClientTest {
         when(store.activeLeases(any(), anyLong())).thenReturn(List.of());
         RedisManagedOpenSandbox managed =
                 (RedisManagedOpenSandbox)
-                        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+                        client.create(spec, null, options, workspaceKey("user-1"));
         doThrow(new IllegalStateException("redis unavailable"))
                 .doNothing()
                 .when(store)
@@ -877,7 +892,7 @@ class RedisOpenSandboxClientTest {
         when(store.activeLeases(any(), anyLong())).thenReturn(List.of());
         RedisManagedOpenSandbox managed =
                 (RedisManagedOpenSandbox)
-                        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+                        client.create(spec, null, options, workspaceKey("user-1"));
         managed.start();
 
         managed.stop();
@@ -978,7 +993,7 @@ class RedisOpenSandboxClientTest {
         when(store.activeLeases(any(), anyLong())).thenReturn(List.of());
         RedisManagedOpenSandbox managed =
                 (RedisManagedOpenSandbox)
-                        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+                        client.create(spec, null, options, workspaceKey("user-1"));
 
         managed.shutdown();
         client.delete(managed);
@@ -1022,11 +1037,11 @@ class RedisOpenSandboxClientTest {
         when(store.activeLeases(any(), anyLong())).thenReturn(List.of());
         RedisManagedOpenSandbox first =
                 (RedisManagedOpenSandbox)
-                        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+                        client.create(spec, null, options, workspaceKey("user-1"));
 
         first.shutdown();
         client.delete(first);
-        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+        client.create(spec, null, options, workspaceKey("user-1"));
 
         assertEquals(2, record.get().getGeneration());
         ArgumentCaptor<OpenSandboxClientOptions> creates =
@@ -1046,7 +1061,7 @@ class RedisOpenSandboxClientTest {
         when(store.isSnapshotReferenced("snapshot-shared")).thenReturn(true);
         RedisManagedOpenSandbox managed =
                 (RedisManagedOpenSandbox)
-                        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+                        client.create(spec, null, options, workspaceKey("user-1"));
         record.get().setNativeSnapshotId("snapshot-shared");
 
         managed.shutdown();
@@ -1084,7 +1099,7 @@ class RedisOpenSandboxClientTest {
 
     @Test
     void explicitDeleteFencesSnapshotCatalogBeforeMissingWorkspaceCanRecover() throws Exception {
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         OpenSandbox stale = remote("sandbox-1", workspace());
         OpenSandboxActiveLease lease =
                 new OpenSandboxActiveLease("lease", workspaceId, 1, "node", NOW, NOW);
@@ -1113,7 +1128,7 @@ class RedisOpenSandboxClientTest {
         when(delegate.create(any(WorkspaceSpec.class), isNull(), any())).thenReturn(fresh);
 
         client.delete(managed);
-        client.create(workspace(), null, options, isolationKey("user-1"), "agent-a");
+        client.create(workspace(), null, options, workspaceKey("user-1"));
 
         verify(store).advanceDeletedThroughGeneration(workspaceId, 2);
         verify(store, times(2)).markOrphanSnapshot(workspaceId, "snapshot-generation-2", NOW);
@@ -1127,7 +1142,7 @@ class RedisOpenSandboxClientTest {
 
     @Test
     void explicitDeleteUsesHigherConcurrentTombstoneForCleanup() throws Exception {
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         OpenSandbox stale = remote("sandbox-1", workspace());
         OpenSandboxActiveLease lease =
                 new OpenSandboxActiveLease("lease", workspaceId, 1, "node", NOW, NOW);
@@ -1150,7 +1165,7 @@ class RedisOpenSandboxClientTest {
 
     @Test
     void explicitDeleteRejectsMalformedSnapshotGenerationBeforeSideEffects() throws Exception {
-        String workspaceId = RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a");
+        String workspaceId = workspaceKey("user-1").getStableId();
         OpenSandbox stale = remote("sandbox-1", workspace());
         OpenSandboxActiveLease lease =
                 new OpenSandboxActiveLease("lease", workspaceId, 1, "node", NOW, NOW);
@@ -1221,7 +1236,7 @@ class RedisOpenSandboxClientTest {
         when(store.activeLeases(any(), anyLong())).thenReturn(List.of());
         RedisManagedOpenSandbox managed =
                 (RedisManagedOpenSandbox)
-                        client.create(spec, null, options, isolationKey("user-1"), "agent-a");
+                        client.create(spec, null, options, workspaceKey("user-1"));
         managed.start();
 
         IllegalStateException error =
@@ -1249,8 +1264,7 @@ class RedisOpenSandboxClientTest {
 
     private OpenSandboxWorkspaceRecord persistedRecord(WorkspaceSpec spec, String status) {
         OpenSandboxWorkspaceRecord persisted = new OpenSandboxWorkspaceRecord();
-        persisted.setWorkspaceId(
-                RedisOpenSandboxClient.workspaceId(isolationKey("user-1"), "agent-a"));
+        persisted.setWorkspaceId(workspaceKey("user-1").getStableId());
         persisted.setSandboxId("sandbox-1");
         persisted.setRuntimeImage(options.getImage());
         persisted.setRuntimeProfileHash(RedisOpenSandboxClient.runtimeProfileHash(options));
@@ -1307,5 +1321,15 @@ class RedisOpenSandboxClientTest {
         RuntimeContext context =
                 RuntimeContext.builder().userId(userId).sessionId("session-1").build();
         return SandboxIsolationKey.resolve(IsolationScope.USER, context, "agent-a").orElseThrow();
+    }
+
+    private static SandboxWorkspaceKey workspaceKey(String userId) {
+        return SandboxWorkspaceKey.from(isolationKey(userId), "agent-a");
+    }
+
+    private static SandboxWorkspaceKey globalWorkspaceKey(String agentId) {
+        SandboxIsolationKey isolationKey =
+                SandboxIsolationKey.resolve(IsolationScope.GLOBAL, null, agentId).orElseThrow();
+        return SandboxWorkspaceKey.from(isolationKey, agentId);
     }
 }

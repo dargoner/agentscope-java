@@ -44,8 +44,7 @@ public interface SandboxClient<O extends SandboxClientOptions> {
             WorkspaceSpec workspaceSpec,
             SandboxSnapshotSpec snapshotSpec,
             O options,
-            SandboxIsolationKey isolationKey,
-            String agentId) {
+            SandboxWorkspaceKey workspaceKey) {
         return create(workspaceSpec, snapshotSpec, options);
     }
 
@@ -59,7 +58,7 @@ public interface SandboxClient<O extends SandboxClientOptions> {
      *
      * <p>The default implementation preserves compatibility with existing clients.
      */
-    default Sandbox resume(SandboxState state, SandboxIsolationKey isolationKey, String agentId) {
+    default Sandbox resume(SandboxState state, SandboxWorkspaceKey workspaceKey) {
         return resume(state);
     }
 
