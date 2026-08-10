@@ -212,6 +212,11 @@ semantics aligned.
 - CAS retry exhaustion produces a distinct coordination-conflict error.
 - Loss of lease ownership terminates the old event stream and prevents terminal state writes.
 - Failure to persist terminal state prevents a successful `RunFinished` from being forwarded.
+- Transport adapters must preserve that fail-closed rule: when a run-owned terminal transition,
+  lease renewal, or lease-fencing check fails, MVC and WebFlux must emit the error (if the
+  connection is still writable) and close without fabricating a `RunFinished`. Their generic
+  request/stream error helpers must distinguish these coordinator failures from pre-acquisition
+  input/agent-resolution errors, for which the existing error lifecycle may remain unchanged.
 - Failure during post-terminal fallback release is logged; natural expiry recovers the key.
 - Resume validation errors retain their existing messages and behavior where practical.
 
@@ -264,8 +269,12 @@ storage writes.
 - Acquire only when the returned `Flux` is subscribed.
 - Inject the pending snapshot into `RuntimeContext` after acquisition.
 - Keep the lease renewed during a long run.
+- Renewal ticks are serialized (a slow store call cannot overlap the next tick), and the renewal
+  publisher is cancelled on completion, error, cancellation, or lease loss.
 - Terminate the stream when lease ownership is lost.
 - Persist terminal state before forwarding `RunFinished`.
+- Do not forward a fabricated `RunFinished` when terminal persistence or lease fencing fails; verify
+  MVC and WebFlux error paths preserve this distinction.
 - Release ownership on completion, error, cancellation, and subscription-time failure.
 - Keep blocking coordinator operations off the caller/event-loop thread.
 
@@ -282,6 +291,10 @@ The AG-UI module tests the contract against `InMemoryAgentStateStore` and CAS-co
 MySQL, and PostgreSQL do not require AG-UI-specific implementations; their existing
 `AgentStateStore` CAS contract tests remain the storage-level verification. No cross-module test
 dependency on a Redis client is added to the AG-UI module.
+
+The aggregate state must also round-trip through the serialization behavior of each supported
+`AgentStateStore`; at minimum, tests cover nested `AguiEvent.Interrupt` records, including optional
+and raw fields, rather than relying only on the in-memory implementation.
 
 ## Acceptance Criteria
 
