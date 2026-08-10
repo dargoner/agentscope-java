@@ -164,6 +164,8 @@ public class AguiRequestProcessor {
 
                                     AguiResumeCoordinator.LeaseHandle lease = acquisition.lease();
                                     Sinks.Empty<Void> terminalSignal = Sinks.empty();
+                                    AtomicBoolean terminalPersisted = new AtomicBoolean(false);
+                                    AtomicBoolean releaseAttempted = new AtomicBoolean(false);
                                     try {
                                         RunAgentInput effectiveInput = input;
                                         if (agentResolver.hasMemory(threadId)) {
@@ -201,8 +203,13 @@ public class AguiRequestProcessor {
                                                                                 lease,
                                                                                 event,
                                                                                 runErrorSeen.get(),
-                                                                                terminalSignal))
-                                                        .concatWith(releaseBeforeComplete(lease))
+                                                                                terminalSignal,
+                                                                                terminalPersisted))
+                                                        .concatWith(
+                                                                releaseBeforeComplete(
+                                                                        lease,
+                                                                        terminalPersisted,
+                                                                        releaseAttempted))
                                                         .doFinally(
                                                                 signal ->
                                                                         terminalSignal
@@ -210,7 +217,15 @@ public class AguiRequestProcessor {
                                         Flux<AguiEvent> renewal =
                                                 renewalStream(lease, terminalSignal);
                                         return Flux.merge(agentEvents, renewal)
-                                                .doFinally(signal -> releaseAsync(lease));
+                                                .doFinally(
+                                                        signal -> {
+                                                            if (!terminalPersisted.get()
+                                                                    && releaseAttempted
+                                                                            .compareAndSet(
+                                                                                    false, true)) {
+                                                                releaseAsync(lease);
+                                                            }
+                                                        });
                                     } catch (Throwable error) {
                                         releaseAsync(lease);
                                         return processorErrorEvents(input, error);
@@ -225,7 +240,8 @@ public class AguiRequestProcessor {
             AguiResumeCoordinator.LeaseHandle lease,
             AguiEvent event,
             boolean runErrorSeen,
-            Sinks.Empty<Void> terminalSignal) {
+            Sinks.Empty<Void> terminalSignal,
+            AtomicBoolean terminalPersisted) {
         if (!(event instanceof AguiEvent.RunFinished finished)) {
             return Flux.just(event);
         }
@@ -236,6 +252,7 @@ public class AguiRequestProcessor {
                             if (result.isError()) {
                                 return Flux.error(new LeaseLostException(result.message()));
                             }
+                            terminalPersisted.set(true);
                             terminalSignal.tryEmitEmpty();
                             return Flux.just(event);
                         });
@@ -277,11 +294,20 @@ public class AguiRequestProcessor {
                         error -> logger.debug("Failed to release AG-UI run lease", error));
     }
 
-    private Flux<AguiEvent> releaseBeforeComplete(AguiResumeCoordinator.LeaseHandle lease) {
-        return Mono.fromCallable(() -> resumeCoordinator.releaseRun(lease))
-                .subscribeOn(Schedulers.boundedElastic())
-                .onErrorResume(error -> Mono.empty())
-                .thenMany(Flux.empty());
+    private Flux<AguiEvent> releaseBeforeComplete(
+            AguiResumeCoordinator.LeaseHandle lease,
+            AtomicBoolean terminalPersisted,
+            AtomicBoolean releaseAttempted) {
+        return Flux.defer(
+                () -> {
+                    if (terminalPersisted.get() || !releaseAttempted.compareAndSet(false, true)) {
+                        return Flux.empty();
+                    }
+                    return Mono.fromCallable(() -> resumeCoordinator.releaseRun(lease))
+                            .subscribeOn(Schedulers.boundedElastic())
+                            .onErrorResume(error -> Mono.empty())
+                            .thenMany(Flux.empty());
+                });
     }
 
     private Flux<AguiEvent> coordinatorErrorEvents(RunAgentInput input, Throwable error) {
