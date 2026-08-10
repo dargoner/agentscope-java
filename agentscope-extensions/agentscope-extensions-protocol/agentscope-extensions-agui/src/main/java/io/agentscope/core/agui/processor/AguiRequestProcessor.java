@@ -23,12 +23,17 @@ import io.agentscope.core.agui.adapter.AguiAgentAdapterFactory;
 import io.agentscope.core.agui.event.AguiEvent;
 import io.agentscope.core.agui.model.AguiMessage;
 import io.agentscope.core.agui.model.RunAgentInput;
+import io.agentscope.core.state.AgentStateStore;
+import io.agentscope.core.state.InMemoryAgentStateStore;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
 
 /**
  * Core processor for AG-UI requests.
@@ -60,6 +65,18 @@ public class AguiRequestProcessor {
 
     private static final Logger logger = LoggerFactory.getLogger(AguiRequestProcessor.class);
 
+    /** Returns whether an error means a run-owned coordination transition failed. */
+    public static boolean isCoordinatorFailure(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof LeaseLostException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
     private final AgentResolver agentResolver;
     private final AguiAdapterConfig config;
     private final AguiAgentAdapterFactory adapterFactory;
@@ -73,7 +90,13 @@ public class AguiRequestProcessor {
                 builder.adapterFactory != null
                         ? builder.adapterFactory
                         : AguiAgentAdapterFactory.defaultFactory();
-        this.resumeCoordinator = new AguiResumeCoordinator();
+        this.resumeCoordinator =
+                new AguiResumeCoordinator(
+                        builder.resumeStateStore != null
+                                ? builder.resumeStateStore
+                                : new InMemoryAgentStateStore(),
+                        java.time.Clock.systemUTC(),
+                        this.config.getRunTimeout());
     }
 
     /**
@@ -126,58 +149,159 @@ public class AguiRequestProcessor {
 
         Flux<AguiEvent> events =
                 Flux.defer(
-                        () -> {
-                            AguiResumeCoordinator.ResumeContractResult beginResult =
-                                    resumeCoordinator.beginRun(input);
-                            if (beginResult.isError()) {
-                                return Flux.fromIterable(
-                                        resumeCoordinator.contractErrorEvents(
-                                                input, beginResult.message()));
-                            }
+                                () -> {
+                                    AguiResumeCoordinator.LeaseAcquisition acquisition;
+                                    try {
+                                        acquisition = resumeCoordinator.acquire(input);
+                                    } catch (Throwable error) {
+                                        return coordinatorErrorEvents(input, error);
+                                    }
+                                    if (acquisition.isError()) {
+                                        return Flux.fromIterable(
+                                                resumeCoordinator.contractErrorEvents(
+                                                        input, acquisition.message()));
+                                    }
 
-                            try {
-                                // Determine effective input based on server-side memory
-                                RunAgentInput effectiveInput = input;
-                                if (agentResolver.hasMemory(threadId)) {
-                                    logger.debug(
-                                            "Using server-side memory for thread {}, extracting"
-                                                    + " latest user message",
-                                            threadId);
-                                    effectiveInput = extractLatestUserMessage(input);
-                                }
+                                    AguiResumeCoordinator.LeaseHandle lease = acquisition.lease();
+                                    Sinks.Empty<Void> terminalSignal = Sinks.empty();
+                                    try {
+                                        RunAgentInput effectiveInput = input;
+                                        if (agentResolver.hasMemory(threadId)) {
+                                            logger.debug(
+                                                    "Using server-side memory for thread {},"
+                                                            + " extracting latest user message",
+                                                    threadId);
+                                            effectiveInput = extractLatestUserMessage(input);
+                                        }
 
-                                RuntimeContext effectiveRuntimeContext =
-                                        resumeCoordinator.addResumeInterrupts(
-                                                input, runtimeContext);
-
-                                // Create adapter and run
-                                AguiAgentAdapter adapter = adapterFactory.create(agent, config);
-                                AtomicBoolean runErrorSeen = new AtomicBoolean(false);
-                                return Objects.requireNonNull(
-                                                adapter.run(
-                                                        effectiveInput, effectiveRuntimeContext),
-                                                "adapter event stream is null")
-                                        .doOnNext(
-                                                event -> {
-                                                    if (event instanceof AguiEvent.RunError) {
-                                                        runErrorSeen.set(true);
-                                                    }
-                                                    resumeCoordinator.trackPendingInterrupts(
-                                                            threadId,
-                                                            runId,
-                                                            event,
-                                                            runErrorSeen.get());
-                                                })
-                                        .doFinally(
-                                                signalType ->
-                                                        resumeCoordinator.finishRun(
-                                                                threadId, runId));
-                            } catch (Throwable error) {
-                                resumeCoordinator.finishRun(threadId, runId);
-                                return processorErrorEvents(input, error);
-                            }
-                        });
+                                        RuntimeContext effectiveRuntimeContext =
+                                                resumeCoordinator.addResumeInterrupts(
+                                                        input, runtimeContext, lease);
+                                        AguiAgentAdapter adapter =
+                                                adapterFactory.create(agent, config);
+                                        AtomicBoolean runErrorSeen = new AtomicBoolean(false);
+                                        Flux<AguiEvent> agentEvents =
+                                                Objects.requireNonNull(
+                                                                adapter.run(
+                                                                        effectiveInput,
+                                                                        effectiveRuntimeContext),
+                                                                "adapter event stream is null")
+                                                        .doOnNext(
+                                                                event -> {
+                                                                    if (event
+                                                                            instanceof
+                                                                            AguiEvent.RunError) {
+                                                                        runErrorSeen.set(true);
+                                                                    }
+                                                                })
+                                                        .concatMap(
+                                                                event ->
+                                                                        terminalEvent(
+                                                                                input,
+                                                                                lease,
+                                                                                event,
+                                                                                runErrorSeen.get(),
+                                                                                terminalSignal))
+                                                        .concatWith(releaseBeforeComplete(lease))
+                                                        .doFinally(
+                                                                signal ->
+                                                                        terminalSignal
+                                                                                .tryEmitEmpty());
+                                        Flux<AguiEvent> renewal =
+                                                renewalStream(lease, terminalSignal);
+                                        return Flux.merge(agentEvents, renewal)
+                                                .doFinally(signal -> releaseAsync(lease));
+                                    } catch (Throwable error) {
+                                        releaseAsync(lease);
+                                        return processorErrorEvents(input, error);
+                                    }
+                                })
+                        .subscribeOn(Schedulers.boundedElastic());
         return new ProcessResult(agent, events);
+    }
+
+    private Flux<AguiEvent> terminalEvent(
+            RunAgentInput input,
+            AguiResumeCoordinator.LeaseHandle lease,
+            AguiEvent event,
+            boolean runErrorSeen,
+            Sinks.Empty<Void> terminalSignal) {
+        if (!(event instanceof AguiEvent.RunFinished finished)) {
+            return Flux.just(event);
+        }
+        return Mono.fromCallable(() -> resumeCoordinator.completeRun(lease, finished, runErrorSeen))
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMapMany(
+                        result -> {
+                            if (result.isError()) {
+                                return Flux.error(new LeaseLostException(result.message()));
+                            }
+                            terminalSignal.tryEmitEmpty();
+                            return Flux.just(event);
+                        });
+    }
+
+    private Flux<AguiEvent> renewalStream(
+            AguiResumeCoordinator.LeaseHandle lease, Sinks.Empty<Void> terminalSignal) {
+        long intervalMillis = Math.max(1L, Math.min(leaseDurationMillis() / 3L, 30_000L));
+        return Flux.interval(java.time.Duration.ofMillis(intervalMillis))
+                .concatMap(
+                        ignored ->
+                                Mono.fromCallable(() -> resumeCoordinator.renewRun(lease))
+                                        .subscribeOn(Schedulers.boundedElastic())
+                                        .flatMapMany(
+                                                result -> {
+                                                    if (result.isError()) {
+                                                        return Flux.error(
+                                                                new LeaseLostException(
+                                                                        result.message()));
+                                                    }
+                                                    return Flux.empty();
+                                                }))
+                .takeUntilOther(terminalSignal.asMono())
+                .cast(AguiEvent.class);
+    }
+
+    private long leaseDurationMillis() {
+        java.time.Duration timeout = config.getRunTimeout();
+        return Math.max(
+                java.time.Duration.ofMinutes(1).toMillis(),
+                timeout != null ? timeout.toMillis() : java.time.Duration.ofMinutes(10).toMillis());
+    }
+
+    private void releaseAsync(AguiResumeCoordinator.LeaseHandle lease) {
+        Mono.fromCallable(() -> resumeCoordinator.releaseRun(lease))
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe(
+                        ignored -> {},
+                        error -> logger.debug("Failed to release AG-UI run lease", error));
+    }
+
+    private Flux<AguiEvent> releaseBeforeComplete(AguiResumeCoordinator.LeaseHandle lease) {
+        return Mono.fromCallable(() -> resumeCoordinator.releaseRun(lease))
+                .subscribeOn(Schedulers.boundedElastic())
+                .onErrorResume(error -> Mono.empty())
+                .thenMany(Flux.empty());
+    }
+
+    private Flux<AguiEvent> coordinatorErrorEvents(RunAgentInput input, Throwable error) {
+        String message =
+                error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
+        return Flux.just(
+                new AguiEvent.RunStarted(input.getThreadId(), input.getRunId(), null, input),
+                new AguiEvent.RunError(
+                        input.getThreadId(),
+                        input.getRunId(),
+                        message,
+                        "AGUI_COORDINATION_ERROR",
+                        System.currentTimeMillis(),
+                        null));
+    }
+
+    private static final class LeaseLostException extends RuntimeException {
+        private LeaseLostException(String message) {
+            super(message);
+        }
     }
 
     private Flux<AguiEvent> processorErrorEvents(RunAgentInput input, Throwable error) {
@@ -314,6 +438,7 @@ public class AguiRequestProcessor {
         private AgentResolver agentResolver;
         private AguiAdapterConfig config;
         private AguiAgentAdapterFactory adapterFactory;
+        private AgentStateStore resumeStateStore;
 
         /**
          * Set the agent resolver.
@@ -345,6 +470,12 @@ public class AguiRequestProcessor {
          */
         public Builder adapterFactory(AguiAgentAdapterFactory adapterFactory) {
             this.adapterFactory = adapterFactory;
+            return this;
+        }
+
+        /** Set the versioned store used for distributed AG-UI resume coordination. */
+        public Builder resumeStateStore(AgentStateStore resumeStateStore) {
+            this.resumeStateStore = resumeStateStore;
             return this;
         }
 
