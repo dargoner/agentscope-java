@@ -25,6 +25,7 @@ import io.agentscope.core.agui.model.AguiMessage;
 import io.agentscope.core.agui.model.RunAgentInput;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.core.state.InMemoryAgentStateStore;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -159,7 +160,9 @@ public class AguiRequestProcessor {
                                     if (acquisition.isError()) {
                                         return Flux.fromIterable(
                                                 resumeCoordinator.contractErrorEvents(
-                                                        input, acquisition.message()));
+                                                        input,
+                                                        acquisition.message(),
+                                                        config.isEmitRunFinishedAfterError()));
                                     }
 
                                     AguiResumeCoordinator.LeaseHandle lease = acquisition.lease();
@@ -333,16 +336,20 @@ public class AguiRequestProcessor {
     private Flux<AguiEvent> processorErrorEvents(RunAgentInput input, Throwable error) {
         String errorMessage =
                 error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
-        return Flux.just(
-                new AguiEvent.RunStarted(input.getThreadId(), input.getRunId(), null, input),
+        List<AguiEvent> events = new ArrayList<>();
+        events.add(new AguiEvent.RunStarted(input.getThreadId(), input.getRunId(), null, input));
+        events.add(
                 new AguiEvent.RunError(
                         input.getThreadId(),
                         input.getRunId(),
                         errorMessage,
                         mapErrorCode(error),
                         System.currentTimeMillis(),
-                        null),
-                new AguiEvent.RunFinished(input.getThreadId(), input.getRunId()));
+                        null));
+        if (config.isEmitRunFinishedAfterError()) {
+            events.add(new AguiEvent.RunFinished(input.getThreadId(), input.getRunId()));
+        }
+        return Flux.fromIterable(events);
     }
 
     private static String mapErrorCode(Throwable error) {

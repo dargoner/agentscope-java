@@ -27,6 +27,7 @@ import io.agentscope.core.state.InMemoryAgentStateStore;
 import io.agentscope.core.state.VersionedState;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -246,17 +247,31 @@ final class AguiResumeCoordinator {
         }
     }
 
-    List<AguiEvent> contractErrorEvents(RunAgentInput input, String message) {
-        return List.of(
-                new AguiEvent.RunStarted(input.getThreadId(), input.getRunId(), null, input),
+    /**
+     * Build the AG-UI error lifecycle used when the resume contract is violated.
+     *
+     * @param input The invalid run input
+     * @param message The validation error message
+     * @param emitRunFinishedAfterError true to append {@code RUN_FINISHED} after {@code RUN_ERROR}
+     *     for legacy clients
+     * @return The protocol error lifecycle events
+     */
+    List<AguiEvent> contractErrorEvents(
+            RunAgentInput input, String message, boolean emitRunFinishedAfterError) {
+        List<AguiEvent> events = new ArrayList<>();
+        events.add(new AguiEvent.RunStarted(input.getThreadId(), input.getRunId(), null, input));
+        events.add(
                 new AguiEvent.RunError(
                         input.getThreadId(),
                         input.getRunId(),
                         message,
                         CONTRACT_ERROR_CODE,
                         System.currentTimeMillis(),
-                        null),
-                new AguiEvent.RunFinished(input.getThreadId(), input.getRunId()));
+                        null));
+        if (emitRunFinishedAfterError) {
+            events.add(new AguiEvent.RunFinished(input.getThreadId(), input.getRunId()));
+        }
+        return List.copyOf(events);
     }
 
     private ResumeContractResult validateAgainst(
