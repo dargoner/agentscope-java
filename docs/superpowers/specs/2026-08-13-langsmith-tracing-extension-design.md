@@ -2,8 +2,9 @@
 
 ## Status
 
-Approved direction: extend AgentScope Java tracing through a vendor-neutral OpenTelemetry
-lifecycle API, then provide LangSmith support as an optional extension.
+Reviewed direction: extend AgentScope Java tracing through a vendor-neutral OpenTelemetry
+lifecycle API, then provide LangSmith support as an optional extension. The review covers public
+API compatibility, repository conventions, failure semantics, and measurable test coverage.
 
 ## Context
 
@@ -74,33 +75,51 @@ public enum OtelTracingOperation {
 }
 ```
 
+### `OtelTracingOutcome`
+
+The terminal outcome is explicit so handlers can distinguish cancellation from successful
+completion without inspecting implementation-specific span state:
+
+```java
+public enum OtelTracingOutcome {
+    COMPLETED,
+    ERROR,
+    CANCELLED
+}
+```
+
 ### `OtelTracingContext`
 
-One context instance is created for each span. It contains:
+One context instance is created for each span subscription. It contains:
 
 - the mutable OpenTelemetry `Span`;
 - `OtelTracingOperation`;
 - the `Agent` and call-scoped `RuntimeContext`;
-- exactly one typed input: `AgentInput`, `ModelCallInput`, or `ActingInput`;
+- exactly one input: `AgentInput`, `ModelCallInput`, or `ActingInput`;
 - a per-invocation concurrent state map for lifecycle handlers.
 
 The class uses package-private static factories so invalid operation/input combinations cannot be
-constructed. It exposes nullable typed getters because the operation enum is the discriminator:
+constructed. Input access is class-based so adding a future operation does not require another
+public getter on the context. State access uses explicit names to avoid confusion with
+`RuntimeContext` attributes:
 
 ```java
 public Span getSpan();
 public OtelTracingOperation getOperation();
 public Agent getAgent();
 public RuntimeContext getRuntimeContext();
-public AgentInput getAgentInput();
-public ModelCallInput getModelCallInput();
-public ActingInput getActingInput();
-public void put(Object key, Object value);
-public <T> T get(Object key, Class<T> type);
+public <T> T getInput(Class<T> inputType);
+public void putState(Object key, Object value);
+public <T> T getState(Object key, Class<T> type);
+public void removeState(Object key);
 ```
 
-Object keys prevent state collisions between independent handlers. Passing `null` as a value
-removes the entry.
+`getInput` and `getState` return `null` when the requested type does not match, following the
+existing typed `RuntimeContext` convention. Object keys prevent state collisions between
+independent handlers. Keys, types, and stored values are non-null; removal is explicit.
+
+`RuntimeContext` may be null because the current middleware contract and existing tests allow it.
+Every built-in and extension handler must handle that case.
 
 ### `OtelTracingHandler`
 
@@ -118,7 +137,7 @@ public interface OtelTracingHandler {
 
     default void onError(OtelTracingContext context, Throwable error) {}
 
-    default void onStop(OtelTracingContext context) {}
+    default void onStop(OtelTracingContext context, OtelTracingOutcome outcome) {}
 }
 ```
 
@@ -129,16 +148,22 @@ span.start
 handler.onStart
 zero or more handler.onEvent calls
 handler.onError (error path only)
-handler.onStop
+handler.onStop(context, outcome)
 span.end
 ```
 
-Each handler callback is isolated with `try/catch`. A failing handler produces a warning containing
-the handler class and lifecycle phase, then dispatch continues to the remaining handlers. It never
-changes the result of the agent operation.
+Each handler callback, including `supports`, is isolated with `try/catch`. A failing callback
+produces a warning containing the handler class and lifecycle phase, then dispatch continues to the
+remaining handlers. A failed `supports` call is treated as `false`. Handler failures never change
+the result of the agent operation.
 
 `supports` is evaluated once when the tracing context is created. The resulting handler list is
 stored on that context so a stateful decision cannot change during the stream.
+
+Synchronous exceptions from `next.apply(input)` follow the same `ERROR` lifecycle as asynchronous
+publisher failures. The dispatcher records the exception, calls `onError`, calls `onStop` once, and
+ends the span before rethrowing. This closes an existing span-leak edge case without changing the
+exception observed by callers.
 
 ### `OtelTracingOptions`
 
@@ -186,8 +211,10 @@ OtelTracingMiddleware.builder()
         .build();
 ```
 
-Null handlers are rejected at construction time. The middleware stores an immutable defensive copy
-of the handler list.
+The builder follows existing repository conventions: `Objects.requireNonNull` validation,
+immutable defensive copies through `List.copyOf`, fluent methods returning the same builder, and a
+public no-argument constructor retained for compatibility. Null options, handlers, handler
+collections, or collection elements are rejected at construction time.
 
 ## Standard Content Encoding
 
@@ -204,7 +231,21 @@ Content is serialized only when its corresponding option is enabled.
 - Tool output is accumulated per tool call from tool-result events.
 - Empty or unavailable content does not produce an attribute.
 
+The current acting middleware intentionally creates one span for a batch of tool calls. To avoid
+silently losing content while keeping that existing span model:
+
+- a single tool call serializes its argument object and result directly;
+- multiple tool calls serialize an ordered JSON array whose entries contain call ID, name, and the
+  corresponding arguments or result;
+- the encoding remains valid JSON and deterministic, but the documentation calls out that the
+  multi-call value is an AgentScope batching convention rather than a one-call-per-span semantic
+  convention.
+
 Serialization failures are logged and omit only the affected content attribute.
+
+Content capture is implemented as an internal core recorder that runs before application handlers.
+Literal attribute names are isolated in one package-private constants class, avoiding a runtime
+dependency on incubating semantic-convention artifacts while those attributes remain unstable.
 
 ## LangSmith Extension
 
@@ -244,21 +285,32 @@ AgentScope session IDs are intentionally metadata. The handler does not automati
 fields for project/experiment session routing. Applications may add them explicitly through the
 metadata/customization API when that routing is intended.
 
-Configuration supports static tags and metadata plus per-call metadata:
+Configuration supports static tags and string metadata plus per-call string metadata:
 
 ```java
 LangSmithTracingHandler.builder()
         .tags(List.of("production", "agentscope"))
         .metadata(Map.of("service", "customer-support"))
         .metadataProvider(
-                context -> Map.of("tenant_id", context.get("tenantId")))
+                context -> {
+                    RuntimeContext runtimeContext = context.getRuntimeContext();
+                    String tenantId =
+                            runtimeContext != null
+                                    ? runtimeContext.get("tenantId", String.class)
+                                    : null;
+                    return tenantId != null ? Map.of("tenant_id", tenantId) : Map.of();
+                })
         .build();
 ```
 
-Static tags are written to the root agent span only to avoid duplicating tags on every child run.
-Metadata is written to all supported spans so model and tool runs remain independently filterable.
-Null keys and values from a provider are ignored. Provider failures are isolated by the core
-handler dispatcher.
+Tags and metadata are written to all supported spans. This is deterministic for nested agents and
+for traces with a non-AgentScope parent; it avoids exposing an unreliable notion of "root" in the
+first public API. Model and tool runs therefore remain independently filterable.
+
+Metadata precedence is safe defaults, then static metadata, then provider metadata. Applications
+can deliberately override the defaults. Static configuration rejects blank keys, blank tags, and
+null values at build time. Invalid dynamic entries are ignored because they are produced during an
+active agent call. Provider failures are isolated by the core handler dispatcher.
 
 ### OTLP transport
 
@@ -280,14 +332,16 @@ normal OpenTelemetry concerns.
 - Existing middleware status and exception recording behavior is preserved.
 - `onError` runs after the span records the operation error and before `onStop`.
 - Cancellation does not call `onError`; it retains the existing `cancelled` span status and calls
-  `onStop` before ending the span.
+  `onStop(context, CANCELLED)` before ending the span.
 - `onStop` runs at most once, guarded by the same atomic end guard as the span.
 - Handler exceptions never replace application exceptions.
+- A cold tracing publisher creates a fresh span, tracing context, state map, and supported-handler
+  snapshot for every subscription.
 
 ## Backward Compatibility
 
-- Existing `new OtelTracingMiddleware()` callers receive byte-for-byte-equivalent default
-  telemetry: no prompt, completion, or tool content.
+- Existing `new OtelTracingMiddleware()` callers receive equivalent default telemetry: no prompt,
+  completion, or tool content.
 - Existing span names and structural attributes do not change.
 - Existing Reactor hook registration remains idempotent.
 - No new runtime dependency is added to `agentscope-core`.
@@ -298,25 +352,65 @@ normal OpenTelemetry concerns.
 Core tests use `InMemorySpanExporter` and cover:
 
 - the existing constructor and default attributes;
-- handler lifecycle order for success, error, and cancellation;
-- handler filtering through `supports`;
-- callback exception isolation;
+- handler lifecycle and event delivery for agent, model, and tool operations;
+- lifecycle order for success, asynchronous error, synchronous `next.apply` failure, and
+  cancellation;
+- handler filtering plus exceptions from `supports` and every callback phase;
+- ordering across multiple handlers and exactly-once terminal callbacks;
+- a fresh span and state map for repeated subscriptions;
 - per-span state isolation under concurrent calls;
+- builder null validation and immutable defensive copies;
 - content attributes absent by default;
 - each content flag independently enabling only its attributes;
-- streaming model output and multiple tool results being accumulated correctly;
+- text, thinking, tool-use, textual tool-result, safe media-reference, and omitted-base64 encoding;
+- streaming model output and single- and multi-tool results being accumulated correctly;
+- empty, missing, and serialization-failure paths;
 - parent-child relationships remaining correct across Reactor thread hops.
 
 LangSmith extension tests cover:
 
 - operation-to-kind mapping;
 - safe default metadata mapping;
-- root-only tags;
-- static and per-call metadata merging;
+- tags on each supported span;
+- static and per-call metadata merging and precedence;
 - absence of `langsmith.trace.session_id` and `langsmith.trace.session_name` by default;
-- null and provider failure handling.
+- builder validation, invalid dynamic entries, null runtime context, and provider failure handling;
+- no mutation of `GlobalOpenTelemetry` and no network traffic.
 
 No test sends network traffic to LangSmith.
+
+### Coverage gates
+
+The root build currently generates JaCoCo reports but does not enforce a repository-wide threshold.
+This change will not add a global gate that could fail unrelated modules. Instead, implementation
+acceptance requires:
+
+- at least 90% line coverage and 80% branch coverage for every new public tracing class;
+- at least 90% branch coverage for the lifecycle dispatcher and content serializer, where most
+  defects are conditional or terminal-state defects;
+- 100% line coverage for `LangSmithTracingHandler`;
+- no decrease in `agentscope-core` aggregate line or branch coverage from the pre-change baseline.
+
+As a review reference, running only the existing `OtelTracingMiddlewareTest` currently covers 84%
+of that middleware's lines and 50% of its branches. This targeted result is not the aggregate
+baseline, but it confirms that lifecycle edge cases need substantially more branch coverage.
+
+The implementation handoff records the exact JaCoCo counters and the commands used to produce
+them. Spotless, module tests, and aggregate tests for affected reactor modules must all pass.
+
+## Code and API Conventions
+
+- Java 17 and the repository's Spotless AOSP Google Java Format configuration are authoritative.
+- Every new Java file includes the repository Apache 2.0 header; every public type and public method
+  has useful Javadoc and valid doclint.
+- Imports are explicit and unused imports are removed; wildcard imports are forbidden.
+- Public configuration objects are immutable, builders validate eagerly, and mutable collections
+  are never retained or exposed.
+- Tests use JUnit 5, descriptive method names consistent with the existing tracing test, and no
+  timing sleeps when a latch or deterministic Reactor assertion can be used.
+- Core code depends only on vendor-neutral OpenTelemetry APIs already present in
+  `agentscope-core`. The LangSmith module follows the repository's optional/provided core dependency
+  convention and adds no LangSmith SDK or exporter dependency.
 
 ## Documentation
 
