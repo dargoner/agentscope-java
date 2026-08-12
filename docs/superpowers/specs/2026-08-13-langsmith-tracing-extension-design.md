@@ -154,8 +154,9 @@ span.end
 
 Each handler callback, including `supports`, is isolated with `try/catch`. A failing callback
 produces a warning containing the handler class and lifecycle phase, then dispatch continues to the
-remaining handlers. A failed `supports` call is treated as `false`. Handler failures never change
-the result of the agent operation.
+remaining handlers. A failed `supports` call is treated as `false`. Ordinary handler failures never
+change the result of the agent operation. JVM/Reactor fatal errors are rethrown through
+`Exceptions.throwIfFatal` and are never swallowed.
 
 `supports` is evaluated once when the tracing context is created. The resulting handler list is
 stored on that context so a stateful decision cannot change during the stream.
@@ -255,6 +256,9 @@ The optional Maven module is:
 agentscope-extensions/agentscope-extensions-langsmith
 ```
 
+The module is also registered in the official AgentScope BOM and as an optional dependency of
+`agentscope-all`, following existing extension publication conventions.
+
 Package:
 
 ```text
@@ -334,7 +338,8 @@ normal OpenTelemetry concerns.
 - Cancellation does not call `onError`; it retains the existing `cancelled` span status and calls
   `onStop(context, CANCELLED)` before ending the span.
 - `onStop` runs at most once, guarded by the same atomic end guard as the span.
-- Handler exceptions never replace application exceptions.
+- Non-fatal handler exceptions never replace application exceptions; JVM/Reactor fatal errors are
+  rethrown.
 - A cold tracing publisher creates a fresh span, tracing context, state map, and supported-handler
   snapshot for every subscription.
 
