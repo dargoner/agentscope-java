@@ -28,6 +28,7 @@ import io.agentscope.core.event.ModelCallEndEvent;
 import io.agentscope.core.event.RequestStopEvent;
 import io.agentscope.core.event.ToolCallEndEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
@@ -159,6 +160,36 @@ class ReActAgentNewLoopE2ETest {
         @Override
         public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
             return Mono.just(ToolResultBlock.error("probe failed"));
+        }
+    }
+
+    private static final class MetadataTool extends ToolBase {
+        MetadataTool(String name) {
+            super(
+                    name,
+                    "returns metadata",
+                    AlwaysAllowTool.schema(),
+                    true,
+                    true,
+                    false,
+                    null,
+                    false,
+                    false);
+        }
+
+        @Override
+        public Mono<PermissionDecision> checkPermissions(
+                Map<String, Object> input, PermissionContextState ctx) {
+            return Mono.just(PermissionDecision.allow("ok"));
+        }
+
+        @Override
+        public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            Object q = param.getInput() == null ? "" : param.getInput().get("query");
+            return Mono.just(
+                    ToolResultBlock.of(
+                            TextBlock.builder().text("meta:" + q).build(),
+                            Map.of("source", "meta_tool", "query", q)));
         }
     }
 
@@ -393,5 +424,47 @@ class ReActAgentNewLoopE2ETest {
         assertEquals(1L, events.stream().filter(ToolResultEndEvent.class::isInstance).count());
         assertTrue(events.get(0) instanceof AgentStartEvent);
         assertTrue(events.get(events.size() - 1) instanceof AgentEndEvent);
+    }
+
+    @Test
+    void toolResultMetadataPropagatesToEvents() {
+        ScriptedModel model =
+                new ScriptedModel(
+                        List.of(
+                                () -> Flux.just(toolUseResponse("c1", "meta", "alpha")),
+                                () -> Flux.just(textResponse("done"))));
+        Toolkit tk = new Toolkit();
+        tk.registerAgentTool(new MetadataTool("meta"));
+
+        ReActAgent agent =
+                ReActAgent.builder()
+                        .name("asst")
+                        .sysPrompt("you are helpful")
+                        .model(model)
+                        .toolkit(tk)
+                        .build();
+
+        List<AgentEvent> events =
+                agent.streamEvents(
+                                List.of(
+                                        Msg.builder()
+                                                .role(MsgRole.USER)
+                                                .textContent("run meta tool")
+                                                .build()))
+                        .collectList()
+                        .block();
+        assertNotNull(events);
+
+        Map<String, Object> expected = Map.of("source", "meta_tool", "query", "alpha");
+
+        events.stream()
+                .filter(ToolResultEndEvent.class::isInstance)
+                .map(ToolResultEndEvent.class::cast)
+                .forEach(e -> assertEquals(expected, e.getMetadata()));
+
+        events.stream()
+                .filter(ToolResultTextDeltaEvent.class::isInstance)
+                .map(ToolResultTextDeltaEvent.class::cast)
+                .forEach(e -> assertEquals(expected, e.getMetadata()));
     }
 }
