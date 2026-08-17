@@ -64,7 +64,8 @@ class WorkspaceContextMiddlewareSandboxTest {
         assertNotNull(prompt);
         assertTrue(prompt.contains("Sandbox root: /custom/root"));
         assertTrue(prompt.contains("container id: sbox-1"));
-        assertTrue(prompt.contains("upload/download tools"));
+        assertTrue(prompt.contains("no mechanism for moving files across the boundary"));
+        assertFalse(prompt.contains("upload/download tools"));
         assertTrue(prompt.contains("AGENTS.md defines persona"));
         assertEquals(RC, fs.workspaceRootContext);
     }
