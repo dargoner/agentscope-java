@@ -77,6 +77,7 @@ public class AguiMvcController {
     private final AguiEventEncoder encoder;
     private final String agentIdHeader;
     private final long sseTimeout;
+    private final boolean interruptOnDisconnect;
     private final ExecutorService executorService;
     private final AguiRuntimeContextResolver runtimeContextResolver;
 
@@ -100,6 +101,7 @@ public class AguiMvcController {
         this.agentIdHeader =
                 builder.agentIdHeader != null ? builder.agentIdHeader : DEFAULT_AGENT_ID_HEADER;
         this.sseTimeout = builder.sseTimeout > 0 ? builder.sseTimeout : 600000L;
+        this.interruptOnDisconnect = builder.interruptOnDisconnect;
         this.executorService = Executors.newCachedThreadPool();
         this.runtimeContextResolver = builder.runtimeContextResolver;
     }
@@ -172,13 +174,11 @@ public class AguiMvcController {
                     Disposable subscription = null;
                     try {
                         // Process request - returns both agent and event stream
+                        RuntimeContext runtimeContext =
+                                resolveRuntimeContext(input, headerAgentId, pathAgentId, request);
                         AguiRequestProcessor.ProcessResult result =
                                 processor.process(
-                                        input,
-                                        headerAgentId,
-                                        pathAgentId,
-                                        resolveRuntimeContext(
-                                                input, headerAgentId, pathAgentId, request));
+                                        input, headerAgentId, pathAgentId, runtimeContext);
 
                         // Set up callbacks for client disconnect handling
                         // using the same agent instance from the result
@@ -186,20 +186,35 @@ public class AguiMvcController {
                                 () -> logger.debug("SSE connection completed for run {}", runId));
                         emitter.onTimeout(
                                 () -> {
-                                    logger.info(
-                                            "SSE connection timed out for run {}, interrupting"
-                                                    + " agent",
-                                            runId);
-                                    result.agent().interrupt();
+                                    if (interruptOnDisconnect) {
+                                        logger.info(
+                                                "SSE connection timed out for run {}, interrupting"
+                                                        + " agent",
+                                                runId);
+                                        result.interrupt(threadId, runtimeContext);
+                                    } else {
+                                        logger.info(
+                                                "SSE connection timed out for run {}, agent"
+                                                        + " continues running",
+                                                runId);
+                                    }
                                 });
                         emitter.onError(
                                 (ex) -> {
-                                    logger.info(
-                                            "SSE connection error for run {}: {}, interrupting"
-                                                    + " agent",
-                                            runId,
-                                            ex.getMessage());
-                                    result.agent().interrupt();
+                                    if (interruptOnDisconnect) {
+                                        logger.info(
+                                                "SSE connection error for run {}: {}, interrupting"
+                                                        + " agent",
+                                                runId,
+                                                ex.getMessage());
+                                        result.interrupt(threadId, runtimeContext);
+                                    } else {
+                                        logger.info(
+                                                "SSE connection error for run {}: {}, agent"
+                                                        + " continues running",
+                                                runId,
+                                                ex.getMessage());
+                                    }
                                 });
 
                         // Subscribe to event stream from the same result
@@ -353,6 +368,7 @@ public class AguiMvcController {
         private boolean serverSideMemory = false;
         private String agentIdHeader;
         private long sseTimeout = 600000L;
+        private boolean interruptOnDisconnect = true;
         private AguiRuntimeContextResolver runtimeContextResolver;
         private AguiAgentAdapterFactory adapterFactory;
         private AgentStateStore resumeStateStore;
@@ -420,6 +436,17 @@ public class AguiMvcController {
          */
         public Builder sseTimeout(long sseTimeout) {
             this.sseTimeout = sseTimeout;
+            return this;
+        }
+
+        /**
+         * Set whether to interrupt the agent when the client disconnects.
+         *
+         * @param interruptOnDisconnect whether to interrupt the agent
+         * @return This builder
+         */
+        public Builder interruptOnDisconnect(boolean interruptOnDisconnect) {
+            this.interruptOnDisconnect = interruptOnDisconnect;
             return this;
         }
 

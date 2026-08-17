@@ -40,6 +40,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  *     enable-reasoning: false
  *     emit-token-usage: false
  *     emit-run-finished-after-error: false
+ *     interrupt-on-disconnect: true
  * </pre>
  */
 @ConfigurationProperties(prefix = "agentscope.agui")
@@ -127,6 +128,9 @@ public class AguiProperties {
 
     /** Resume-specific options. */
     private final ResumeProperties resume = new ResumeProperties();
+
+    /** Whether to interrupt the agent when the client disconnects. */
+    private boolean interruptOnDisconnect = true;
 
     public String getPathPrefix() {
         return pathPrefix;
@@ -287,5 +291,13 @@ public class AguiProperties {
         public void setDistributedEnabled(boolean distributedEnabled) {
             this.distributedEnabled = distributedEnabled;
         }
+    }
+
+    public boolean isInterruptOnDisconnect() {
+        return interruptOnDisconnect;
+    }
+
+    public void setInterruptOnDisconnect(boolean interruptOnDisconnect) {
+        this.interruptOnDisconnect = interruptOnDisconnect;
     }
 }
