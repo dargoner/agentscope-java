@@ -22,9 +22,14 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.test.MockModel;
 import io.agentscope.core.agent.test.TestConstants;
+import io.agentscope.core.event.AgentEndEvent;
+import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.hook.Hook;
 import io.agentscope.core.hook.HookEvent;
 import io.agentscope.core.hook.PostReasoningEvent;
@@ -65,6 +70,88 @@ class ReActAgentStructuredOutputTest {
     @BeforeEach
     void setUp() {
         toolkit = new Toolkit();
+    }
+
+    @Test
+    void streamEventsWithJsonSchemaEmitsStructuredAgentResult() {
+        Map<String, Object> toolInput =
+                Map.of(
+                        "response",
+                        Map.of(
+                                "location",
+                                "San Francisco",
+                                "temperature",
+                                "72°F",
+                                "condition",
+                                "Sunny"));
+        MockModel mockModel =
+                new MockModel(
+                        msgs -> {
+                            boolean hasToolResults =
+                                    msgs.stream().anyMatch(m -> m.getRole() == MsgRole.TOOL);
+                            if (!hasToolResults) {
+                                return List.of(
+                                        ChatResponse.builder()
+                                                .id("msg_1")
+                                                .content(
+                                                        List.of(
+                                                                ToolUseBlock.builder()
+                                                                        .id("call_123")
+                                                                        .name("generate_response")
+                                                                        .input(toolInput)
+                                                                        .content(
+                                                                                JsonUtils
+                                                                                        .getJsonCodec()
+                                                                                        .toJson(
+                                                                                                toolInput))
+                                                                        .build()))
+                                                .usage(new ChatUsage(10, 20, 30))
+                                                .build());
+                            }
+                            return List.of(
+                                    ChatResponse.builder()
+                                            .id("msg_2")
+                                            .content(
+                                                    List.of(
+                                                            TextBlock.builder()
+                                                                    .text("Response generated")
+                                                                    .build()))
+                                            .usage(new ChatUsage(5, 10, 15))
+                                            .build());
+                        });
+        ReActAgent agent =
+                ReActAgent.builder()
+                        .name("weather-agent")
+                        .sysPrompt("You are a weather assistant")
+                        .model(mockModel)
+                        .toolkit(toolkit)
+                        .build();
+        ObjectNode schema = JsonNodeFactory.instance.objectNode();
+        schema.put("type", "object");
+        ObjectNode properties = schema.putObject("properties");
+        properties.putObject("location").put("type", "string");
+        properties.putObject("temperature").put("type", "string");
+        properties.putObject("condition").put("type", "string");
+        schema.putArray("required").add("location").add("temperature").add("condition");
+        Msg inputMsg =
+                Msg.builder()
+                        .name("user")
+                        .role(MsgRole.USER)
+                        .content(TextBlock.builder().text("What's the weather?").build())
+                        .build();
+
+        List<AgentEvent> events =
+                agent.streamEvents(List.of(inputMsg), schema, RuntimeContext.empty())
+                        .collectList()
+                        .block();
+
+        assertNotNull(events);
+        assertTrue(events.get(events.size() - 2) instanceof AgentResultEvent);
+        assertTrue(events.get(events.size() - 1) instanceof AgentEndEvent);
+        AgentResultEvent resultEvent = (AgentResultEvent) events.get(events.size() - 2);
+        assertEquals(
+                Map.of("location", "San Francisco", "temperature", "72°F", "condition", "Sunny"),
+                resultEvent.getResult().getStructuredData(false));
     }
 
     @Test

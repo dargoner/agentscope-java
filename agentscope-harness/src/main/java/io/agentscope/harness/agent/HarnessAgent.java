@@ -886,6 +886,16 @@ public class HarnessAgent implements Agent, AutoCloseable {
         return streamEvents(List.of(msg), ctx);
     }
 
+    /** Stream structured-output events for a single message and Java output class. */
+    public Flux<AgentEvent> streamEvents(Msg msg, Class<?> structuredModel, RuntimeContext ctx) {
+        return streamEvents(List.of(msg), structuredModel, ctx);
+    }
+
+    /** Stream structured-output events for a single message and JSON Schema. */
+    public Flux<AgentEvent> streamEvents(Msg msg, JsonNode schema, RuntimeContext ctx) {
+        return streamEvents(List.of(msg), schema, ctx);
+    }
+
     /**
      * @deprecated Use {@link #streamEvents(String, RuntimeContext)} with explicit runtime context.
      */
@@ -904,6 +914,17 @@ public class HarnessAgent implements Agent, AutoCloseable {
      */
     public Flux<AgentEvent> streamEvents(String text, RuntimeContext ctx) {
         return streamEvents(new UserMessage(text), ctx);
+    }
+
+    /** Stream structured-output events for plain text input and a Java output class. */
+    public Flux<AgentEvent> streamEvents(
+            String text, Class<?> structuredModel, RuntimeContext ctx) {
+        return streamEvents(new UserMessage(text), structuredModel, ctx);
+    }
+
+    /** Stream structured-output events for plain text input and a JSON Schema. */
+    public Flux<AgentEvent> streamEvents(String text, JsonNode schema, RuntimeContext ctx) {
+        return streamEvents(new UserMessage(text), schema, ctx);
     }
 
     /**
@@ -925,6 +946,36 @@ public class HarnessAgent implements Agent, AutoCloseable {
         RuntimeContext effective =
                 ensureSessionDefaults(ctx != null ? ctx : RuntimeContext.empty());
         return wrappedStreamEvents(effective, () -> delegate.streamEvents(msgs, effective));
+    }
+
+    /**
+     * Stream fine-grained events and constrain the final result to the supplied Java class.
+     *
+     * @param msgs input messages
+     * @param structuredModel class defining the structured output
+     * @param ctx runtime context to propagate into the call
+     * @return event stream ending with a structured {@link io.agentscope.core.event.AgentResultEvent}
+     */
+    public Flux<AgentEvent> streamEvents(
+            List<Msg> msgs, Class<?> structuredModel, RuntimeContext ctx) {
+        RuntimeContext effective =
+                ensureSessionDefaults(ctx != null ? ctx : RuntimeContext.empty());
+        return wrappedStreamEvents(
+                effective, () -> delegate.streamEvents(msgs, structuredModel, effective));
+    }
+
+    /**
+     * Stream fine-grained events and constrain the final result to the supplied JSON Schema.
+     *
+     * @param msgs input messages
+     * @param schema JSON Schema defining the structured output
+     * @param ctx runtime context to propagate into the call
+     * @return event stream ending with a structured {@link io.agentscope.core.event.AgentResultEvent}
+     */
+    public Flux<AgentEvent> streamEvents(List<Msg> msgs, JsonNode schema, RuntimeContext ctx) {
+        RuntimeContext effective =
+                ensureSessionDefaults(ctx != null ? ctx : RuntimeContext.empty());
+        return wrappedStreamEvents(effective, () -> delegate.streamEvents(msgs, schema, effective));
     }
 
     @Override

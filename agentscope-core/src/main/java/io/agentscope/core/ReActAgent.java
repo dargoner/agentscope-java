@@ -1153,6 +1153,40 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
     }
 
     /**
+     * Stream fine-grained {@link AgentEvent}s and constrain the final result to the supplied Java
+     * class.
+     *
+     * <p>The stream ends with an {@link AgentResultEvent} whose {@link Msg} carries the validated
+     * structured output in its metadata.
+     *
+     * @param msgs input messages
+     * @param structuredOutputClass class defining the structured output
+     * @param context runtime context to propagate into the call
+     * @return event stream covering the full agent invocation lifecycle
+     */
+    public Flux<AgentEvent> streamEvents(
+            List<Msg> msgs, Class<?> structuredOutputClass, RuntimeContext context) {
+        return buildAgentStream(msgs, context, messages -> doCall(messages, structuredOutputClass));
+    }
+
+    /**
+     * Stream fine-grained {@link AgentEvent}s and constrain the final result to the supplied JSON
+     * Schema.
+     *
+     * <p>The stream ends with an {@link AgentResultEvent} whose {@link Msg} carries the validated
+     * structured output in its metadata.
+     *
+     * @param msgs input messages
+     * @param outputSchema JSON Schema defining the structured output
+     * @param context runtime context to propagate into the call
+     * @return event stream covering the full agent invocation lifecycle
+     */
+    public Flux<AgentEvent> streamEvents(
+            List<Msg> msgs, JsonNode outputSchema, RuntimeContext context) {
+        return buildAgentStream(msgs, context, messages -> doCall(messages, outputSchema));
+    }
+
+    /**
      * Stream fine-grained {@link AgentEvent}s for a single input message with a caller-supplied
      * {@link RuntimeContext}.
      *
@@ -1162,6 +1196,17 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
      */
     public Flux<AgentEvent> streamEvents(Msg msg, RuntimeContext context) {
         return streamEvents(List.of(msg), context);
+    }
+
+    /** Stream structured-output events for a single input message and Java output class. */
+    public Flux<AgentEvent> streamEvents(
+            Msg msg, Class<?> structuredOutputClass, RuntimeContext context) {
+        return streamEvents(List.of(msg), structuredOutputClass, context);
+    }
+
+    /** Stream structured-output events for a single input message and JSON Schema. */
+    public Flux<AgentEvent> streamEvents(Msg msg, JsonNode outputSchema, RuntimeContext context) {
+        return streamEvents(List.of(msg), outputSchema, context);
     }
 
     /**
@@ -1184,6 +1229,18 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
      */
     public Flux<AgentEvent> streamEvents(String text, RuntimeContext context) {
         return streamEvents(new UserMessage(text), context);
+    }
+
+    /** Stream structured-output events for plain text input and a Java output class. */
+    public Flux<AgentEvent> streamEvents(
+            String text, Class<?> structuredOutputClass, RuntimeContext context) {
+        return streamEvents(new UserMessage(text), structuredOutputClass, context);
+    }
+
+    /** Stream structured-output events for plain text input and a JSON Schema. */
+    public Flux<AgentEvent> streamEvents(
+            String text, JsonNode outputSchema, RuntimeContext context) {
+        return streamEvents(new UserMessage(text), outputSchema, context);
     }
 
     // ==================== Protected API ====================
