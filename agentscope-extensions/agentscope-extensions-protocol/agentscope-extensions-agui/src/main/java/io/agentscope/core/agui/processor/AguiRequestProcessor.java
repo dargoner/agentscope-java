@@ -24,6 +24,8 @@ import io.agentscope.core.agui.adapter.AguiAgentAdapterFactory;
 import io.agentscope.core.agui.event.AguiEvent;
 import io.agentscope.core.agui.model.AguiMessage;
 import io.agentscope.core.agui.model.RunAgentInput;
+import io.agentscope.core.agui.runtime.AguiRuntimeContextRequest;
+import io.agentscope.core.agui.runtime.AguiRuntimeContextResolver;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.core.state.InMemoryAgentStateStore;
 import java.util.ArrayList;
@@ -58,9 +60,11 @@ import reactor.core.scheduler.Schedulers;
  *     .config(AguiAdapterConfig.defaultConfig())
  *     .build();
  *
- * ProcessResult result = processor.process(input, headerAgentId, pathAgentId);
+ * AguiRuntimeContextRequest<?> request = AguiRuntimeContextRequest.builder()
+ *         .input(input)
+ *         .build();
+ * ProcessResult result = processor.process(request);
  * Flux<AguiEvent> events = result.events();
- * Agent agent = result.agent(); // For interrupt handling
  * }</pre>
  */
 public class AguiRequestProcessor {
@@ -83,6 +87,7 @@ public class AguiRequestProcessor {
     private final AguiAdapterConfig config;
     private final AguiAgentAdapterFactory adapterFactory;
     private final AguiResumeCoordinator resumeCoordinator;
+    private final AguiRuntimeContextResolver runtimeContextResolver;
 
     private AguiRequestProcessor(Builder builder) {
         this.agentResolver =
@@ -99,6 +104,7 @@ public class AguiRequestProcessor {
                                 : new InMemoryAgentStateStore(),
                         java.time.Clock.systemUTC(),
                         this.config.getRunTimeout());
+        this.runtimeContextResolver = builder.runtimeContextResolver;
     }
 
     /**
@@ -108,8 +114,10 @@ public class AguiRequestProcessor {
      *
      * @param agent The resolved agent instance
      * @param events The event stream
+     * @param runtimeContext The resolved caller-provided runtime context, may be null
      */
-    public record ProcessResult(Agent agent, Flux<AguiEvent> events) {
+    public record ProcessResult(
+            Agent agent, Flux<AguiEvent> events, RuntimeContext runtimeContext) {
 
         /**
          * Interrupt this request's active session.
@@ -120,9 +128,8 @@ public class AguiRequestProcessor {
          * session.
          *
          * @param threadId The AG-UI thread id for this request
-         * @param runtimeContext The caller-provided runtime context, may be null
          */
-        public void interrupt(String threadId, RuntimeContext runtimeContext) {
+        public void interrupt(String threadId) {
             if (agent instanceof ReActAgent reActAgent) {
                 RuntimeContext interruptContext =
                         RuntimeContext.builder(runtimeContext).sessionId(threadId).build();
@@ -136,32 +143,22 @@ public class AguiRequestProcessor {
     /**
      * Process an AG-UI request and return the result containing agent and event stream.
      *
-     * @param input The run agent input
-     * @param headerAgentId The agent ID from HTTP header (may be null)
-     * @param pathAgentId The agent ID from URL path variable (may be null)
+     * <p>The {@link AguiRuntimeContextResolver} (if configured on this processor) is invoked with
+     * the given request to obtain a caller-provided {@link RuntimeContext}. That context is copied
+     * and enriched by {@link AguiAgentAdapter}, so callers can provide custom attributes without
+     * replacing the standard AG-UI metadata.
+     *
+     * @param request The AG-UI request context carrying input, agent IDs, transport details and the
+     *     native request
      * @return A ProcessResult containing the agent and event stream
      */
-    public ProcessResult process(RunAgentInput input, String headerAgentId, String pathAgentId) {
-        return process(input, headerAgentId, pathAgentId, null);
-    }
+    public ProcessResult process(AguiRuntimeContextRequest<?> request) {
+        RunAgentInput input = request.getInput();
+        String headerAgentId = request.getHeaderAgentId();
+        String pathAgentId = request.getPathAgentId();
+        RuntimeContext runtimeContext =
+                runtimeContextResolver != null ? runtimeContextResolver.resolve(request) : null;
 
-    /**
-     * Process an AG-UI request with caller-provided runtime context and return the result.
-     *
-     * <p>The runtime context is copied and enriched by {@link AguiAgentAdapter}; callers can
-     * provide custom attributes without replacing the standard AG-UI metadata.
-     *
-     * @param input The run agent input
-     * @param headerAgentId The agent ID from HTTP header (may be null)
-     * @param pathAgentId The agent ID from URL path variable (may be null)
-     * @param runtimeContext Optional caller-provided runtime context
-     * @return A ProcessResult containing the agent and event stream
-     */
-    public ProcessResult process(
-            RunAgentInput input,
-            String headerAgentId,
-            String pathAgentId,
-            RuntimeContext runtimeContext) {
         String threadId = input.getThreadId();
         String runId = input.getRunId();
 
@@ -258,7 +255,7 @@ public class AguiRequestProcessor {
                                     }
                                 })
                         .subscribeOn(Schedulers.boundedElastic());
-        return new ProcessResult(agent, events);
+        return new ProcessResult(agent, events, runtimeContext);
     }
 
     private Flux<AguiEvent> terminalEvent(
@@ -495,6 +492,7 @@ public class AguiRequestProcessor {
         private AguiAdapterConfig config;
         private AguiAgentAdapterFactory adapterFactory;
         private AgentStateStore resumeStateStore;
+        private AguiRuntimeContextResolver runtimeContextResolver;
 
         /**
          * Set the agent resolver.
@@ -532,6 +530,18 @@ public class AguiRequestProcessor {
         /** Set the versioned store used for distributed AG-UI resume coordination. */
         public Builder resumeStateStore(AgentStateStore resumeStateStore) {
             this.resumeStateStore = resumeStateStore;
+            return this;
+        }
+
+        /**
+         * Set the runtime context resolver invoked for each request to produce a caller-provided
+         * {@link RuntimeContext}. Optional; when null, no caller context is attached.
+         *
+         * @param runtimeContextResolver The resolver used for each request
+         * @return This builder
+         */
+        public Builder runtimeContextResolver(AguiRuntimeContextResolver runtimeContextResolver) {
+            this.runtimeContextResolver = runtimeContextResolver;
             return this;
         }
 

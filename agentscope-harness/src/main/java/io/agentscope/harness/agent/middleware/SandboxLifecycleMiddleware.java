@@ -35,7 +35,8 @@ import org.slf4j.LoggerFactory;
  *   <li>Read {@link SandboxContext} from the current {@link RuntimeContext}</li>
  *   <li>Acquire a session via {@link SandboxManager}</li>
  *   <li>Start the session (4-branch workspace init)</li>
- *   <li>Inject the live session into the {@link SandboxBackedFilesystem} proxy</li>
+ *   <li>Bind the live session on the per-call {@link RuntimeContext} for the
+ *       {@link SandboxBackedFilesystem} proxy to resolve</li>
  * </ol>
  *
  * <h2>doFinally</h2>
@@ -43,11 +44,16 @@ import org.slf4j.LoggerFactory;
  *   <li>Persist sandbox session state via {@link SandboxManager} and
  *       {@link io.agentscope.harness.agent.sandbox.SessionSandboxStateStore}</li>
  *   <li>Release the session via {@link SandboxManager} (stop + optional shutdown)</li>
- *   <li>Clear the session reference from the filesystem proxy</li>
+ *   <li>Clear this call's session binding from the {@link RuntimeContext}</li>
  * </ol>
  *
  * <p>Post-call failures (persist, release) are logged but do not propagate — this ensures
  * the agent call result is always returned to the caller even if sandbox cleanup fails.
+ *
+ * <p>The sandbox is bound <em>per call</em> on the invocation's {@link RuntimeContext} rather than
+ * on a shared agent-level slot: distinct {@code (userId, sessionId)} sessions run in parallel on
+ * the same agent bean, so a shared slot would let concurrent calls corrupt each other's binding
+ * (issue #2490).
  */
 public class SandboxLifecycleMiddleware implements HarnessRuntimeMiddleware {
 
@@ -135,7 +141,11 @@ public class SandboxLifecycleMiddleware implements HarnessRuntimeMiddleware {
             Sandbox sandbox = result.getSandbox();
             try {
                 sandbox.start();
+                // RuntimeContext is the concurrency-safe binding for this exact invocation.
+                ctx.put(SandboxAcquireResult.class, result);
+                // Keep the session map and legacy field for callers that cannot propagate it.
                 filesystemProxy.bindSandbox(sessionKey, sandbox);
+                filesystemProxy.setSandbox(sandbox);
                 SandboxAcquireResult previous = acquireResults.putIfAbsent(sessionKey, result);
                 if (previous != null) {
                     // Same-session serialization is enforced above this middleware (ReActAgent
@@ -156,7 +166,10 @@ public class SandboxLifecycleMiddleware implements HarnessRuntimeMiddleware {
                         sandbox.getState() != null ? sandbox.getState().getSessionId() : "?",
                         sessionKey);
             } catch (Exception e) {
+                ctx.put(SandboxAcquireResult.class, null);
+                acquireResults.remove(sessionKey, result);
                 filesystemProxy.unbindSandbox(sessionKey);
+                filesystemProxy.clearSandboxIfCurrent(sandbox);
                 try {
                     sandboxManager.release(result);
                 } catch (Exception releaseErr) {
@@ -183,11 +196,25 @@ public class SandboxLifecycleMiddleware implements HarnessRuntimeMiddleware {
      * the agent call result is always delivered to the caller.
      */
     private void doRelease(RuntimeContext ctx) {
-        String sessionKey = ctx != null ? SandboxBindingKey.resolve(ctx) : null;
-        SandboxAcquireResult result = sessionKey != null ? acquireResults.remove(sessionKey) : null;
+        if (ctx == null) {
+            return;
+        }
+        String sessionKey = SandboxBindingKey.resolve(ctx);
+        // Prefer the binding established by this exact invocation. The map remains a compatibility
+        // fallback for older callers that did not preserve RuntimeContext state.
+        SandboxAcquireResult result = ctx.get(SandboxAcquireResult.class);
+        if (result == null && sessionKey != null) {
+            result = acquireResults.remove(sessionKey);
+        } else if (result != null && sessionKey != null) {
+            acquireResults.remove(sessionKey, result);
+        }
         if (result == null) {
             return;
         }
+        ctx.put(SandboxAcquireResult.class, null);
+        // Compare-and-clear the fallback field so a releasing call never nulls a concurrent
+        // sibling's binding (issue #2490); it only clears the field when it still points here.
+        filesystemProxy.clearSandboxIfCurrent(result.getSandbox());
         SandboxContext sandboxContext = ctx.get(SandboxContext.class);
         try {
             sandboxManager.persistState(result, sandboxContext, ctx);

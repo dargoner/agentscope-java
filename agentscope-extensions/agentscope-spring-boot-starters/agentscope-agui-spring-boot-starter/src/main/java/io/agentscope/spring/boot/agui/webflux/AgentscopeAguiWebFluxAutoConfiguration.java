@@ -21,10 +21,11 @@ import io.agentscope.core.agui.adapter.AguiAgentAdapterFactory;
 import io.agentscope.core.agui.adapter.strategy.AgentEventConverter;
 import io.agentscope.core.agui.adapter.strategy.AguiEventEnricher;
 import io.agentscope.core.agui.registry.AguiAgentRegistry;
+import io.agentscope.core.agui.runtime.AguiRequestBodyParser;
+import io.agentscope.core.agui.runtime.AguiRuntimeContextResolver;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.spring.boot.agui.common.AguiProperties;
 import io.agentscope.spring.boot.agui.common.AguiResumeStateStoreResolver;
-import io.agentscope.spring.boot.agui.common.AguiRuntimeContextResolver;
 import io.agentscope.spring.boot.agui.common.ThreadSessionManager;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -73,6 +74,21 @@ public class AgentscopeAguiWebFluxAutoConfiguration {
     }
 
     /**
+     * Creates the default AG-UI request body parser bean.
+     *
+     * <p>The parser decodes request bodies with AgentScope's Jackson 2 codec so that Spring Boot
+     * 4's Jackson 3 converters do not touch AG-UI's Jackson 2-annotated models. Applications can
+     * override this bean to customize request body parsing.
+     *
+     * @return A new AguiRequestBodyParser
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public AguiRequestBodyParser aguiRequestBodyParser() {
+        return new AguiRequestBodyParser();
+    }
+
+    /**
      * Creates the AG-UI WebFlux handler bean.
      *
      * @param registry The agent registry
@@ -90,7 +106,8 @@ public class AgentscopeAguiWebFluxAutoConfiguration {
             ObjectProvider<AguiEventEnricher> eventEnrichersProvider,
             ObjectProvider<AguiRuntimeContextResolver> runtimeContextResolverProvider,
             ObjectProvider<AguiAgentAdapterFactory> adapterFactoryProvider,
-            ObjectProvider<AgentStateStore> stateStoreProvider) {
+            ObjectProvider<AgentStateStore> stateStoreProvider,
+            AguiRequestBodyParser requestBodyParser) {
         AguiAdapterConfig config =
                 AguiAdapterConfig.builder()
                         .toolMergeMode(props.getDefaultToolMergeMode())
@@ -114,6 +131,7 @@ public class AgentscopeAguiWebFluxAutoConfiguration {
                 .runtimeContextResolver(runtimeContextResolverProvider.getIfAvailable())
                 .adapterFactory(adapterFactoryProvider.getIfAvailable())
                 .resumeStateStore(AguiResumeStateStoreResolver.resolve(props, stateStoreProvider))
+                .requestBodyParser(requestBodyParser)
                 .config(config)
                 .build();
     }

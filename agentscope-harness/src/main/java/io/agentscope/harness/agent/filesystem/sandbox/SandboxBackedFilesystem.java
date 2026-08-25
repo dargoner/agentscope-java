@@ -22,6 +22,7 @@ import io.agentscope.harness.agent.filesystem.model.FileDownloadResponse;
 import io.agentscope.harness.agent.filesystem.model.FileUploadResponse;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.Sandbox;
+import io.agentscope.harness.agent.sandbox.SandboxAcquireResult;
 import io.agentscope.harness.agent.sandbox.SandboxAware;
 import io.agentscope.harness.agent.sandbox.SandboxBindingKey;
 import io.agentscope.harness.agent.sandbox.SandboxException;
@@ -46,9 +47,17 @@ import org.slf4j.LoggerFactory;
 /**
  * A {@link BaseSandboxFilesystem} that delegates execution to a live {@link Sandbox}.
  *
- * <p>Stable proxy created at agent build time. A sandbox is bound per session key on each call via
- * {@link io.agentscope.harness.agent.middleware.SandboxLifecycleMiddleware}, allowing a single
- * proxy instance to serve concurrent sessions without cross-user contamination.
+ * <p>Stable proxy created once per agent bean. The live {@link Sandbox} for a call is bound
+ * <em>per-call</em> on the invocation's {@link RuntimeContext} by {@link
+ * io.agentscope.harness.agent.middleware.SandboxLifecycleMiddleware} and resolved here via {@link
+ * #requireSandbox(RuntimeContext)} — this per-call binding takes precedence and is what keeps
+ * concurrent distinct-session calls on the same agent bean isolated (issue #2490). The legacy
+ * {@code volatile sandbox} field is retained only as a best-effort fallback for context-free
+ * internal callers that resolve the filesystem with a shared empty {@link RuntimeContext} (e.g.
+ * {@link io.agentscope.harness.agent.bus.WorkspaceMessageBus}, which carries no per-call binding).
+ * The middleware still maintains that field via {@link #setSandbox} on acquire and {@link
+ * #clearSandboxIfCurrent} on release, so it remains last-writer-wins under concurrency and must not
+ * be relied on for isolation.
  */
 public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements SandboxAware {
 
@@ -57,6 +66,7 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
     private final String fsId;
     // per-call sandbox bindings; key is "userId/sessionId" (aligned with ReActAgent.slotKey)
     private final ConcurrentHashMap<String, Sandbox> activeSandboxes = new ConcurrentHashMap<>();
+    private volatile Sandbox sandbox;
 
     public SandboxBackedFilesystem() {
         this.fsId = "sandbox-" + UUID.randomUUID().toString().substring(0, 8);
@@ -65,6 +75,11 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
     @Override
     public void bindSandbox(String sessionKey, Sandbox sandbox) {
         activeSandboxes.put(sessionKey, sandbox);
+    }
+
+    @Override
+    public synchronized void setSandbox(Sandbox sandbox) {
+        this.sandbox = sandbox;
     }
 
     @Override
@@ -78,14 +93,31 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
     }
 
     @Override
+    public Sandbox getSandbox() {
+        return sandbox;
+    }
+
+    /**
+     * Clears the fallback {@code sandbox} field only if it still points at {@code expected}. Used by
+     * {@link io.agentscope.harness.agent.middleware.SandboxLifecycleMiddleware} on release so a
+     * finishing call never nulls a concurrent sibling call's fallback binding (issue #2490).
+     *
+     * @param expected the sandbox this call bound at acquire time
+     */
+    public synchronized void clearSandboxIfCurrent(Sandbox expected) {
+        if (this.sandbox == expected) {
+            this.sandbox = null;
+        }
+    }
+
+    @Override
     public String id() {
         return fsId;
     }
 
     @Override
     public String getWorkspaceRoot(RuntimeContext runtimeContext) {
-        String key = SandboxBindingKey.resolve(runtimeContext);
-        Sandbox active = key != null ? getSandbox(key) : null;
+        Sandbox active = resolveSandbox(runtimeContext);
         return active != null ? active.getWorkspaceRoot() : "/workspace";
     }
 
@@ -217,16 +249,40 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
         return results;
     }
 
-    private Sandbox requireSandbox(RuntimeContext rc) {
-        String key = rc != null ? SandboxBindingKey.resolve(rc) : null;
-        Sandbox s = key != null ? getSandbox(key) : null;
+    /**
+     * Resolves the {@link Sandbox} bound to the current call, preferring the per-call binding
+     * carried on {@code runtimeContext} (concurrency-safe under parallel distinct-session calls,
+     * issue #2490), then the session-key binding, and finally the legacy {@code sandbox} field for
+     * direct {@link #setSandbox} callers that do not thread a per-call context.
+     */
+    private Sandbox requireSandbox(RuntimeContext runtimeContext) {
+        Sandbox s = resolveSandbox(runtimeContext);
         if (s == null) {
+            String key = runtimeContext != null ? SandboxBindingKey.resolve(runtimeContext) : null;
             throw new SandboxException.SandboxConfigurationException(
                     "No active sandbox for session '"
                             + key
                             + "' — sandbox filesystem used outside of a call context");
         }
         return s;
+    }
+
+    private Sandbox resolveSandbox(RuntimeContext runtimeContext) {
+        Sandbox resolved = null;
+        if (runtimeContext != null) {
+            SandboxAcquireResult bound = runtimeContext.get(SandboxAcquireResult.class);
+            if (bound != null) {
+                resolved = bound.getSandbox();
+            }
+        }
+        if (resolved == null && runtimeContext != null) {
+            String key = SandboxBindingKey.resolve(runtimeContext);
+            resolved = key != null ? getSandbox(key) : null;
+        }
+        if (resolved == null) {
+            resolved = sandbox;
+        }
+        return resolved;
     }
 
     private String shellSingleQuote(String s) {
