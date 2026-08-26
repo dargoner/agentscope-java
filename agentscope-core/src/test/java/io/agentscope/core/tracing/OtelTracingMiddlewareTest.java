@@ -17,6 +17,7 @@ package io.agentscope.core.tracing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -77,7 +78,7 @@ class OtelTracingMiddlewareTest {
                         .addSpanProcessor(SimpleSpanProcessor.create(spanExporter))
                         .build();
         OpenTelemetrySdk.builder().setTracerProvider(tracerProvider).buildAndRegisterGlobal();
-        middleware = new OtelTracingMiddleware();
+        middleware = new OtelTracingMiddleware(true);
     }
 
     @AfterEach
@@ -449,7 +450,41 @@ class OtelTracingMiddlewareTest {
         assertTrue(outputMessagesJson.contains("\"type\":\"tool_call\""));
         assertTrue(outputMessagesJson.contains("\"id\":\"call-1\""));
         assertTrue(outputMessagesJson.contains("\"name\":\"lookup\""));
-        assertTrue(outputMessagesJson.contains("{\\\"term\\\":\\\"AgentScope\\\"}"));
+        assertTrue(outputMessagesJson.contains("\"arguments\":{\"term\":\"AgentScope\"}"));
+    }
+
+    @Test
+    void defaultMiddleware_doesNotRecordMessageContent() {
+        OtelTracingMiddleware defaultMiddleware = new OtelTracingMiddleware();
+        Agent agent = stubAgent("privacy-agent", "agent-111");
+        ModelCallInput input =
+                new ModelCallInput(
+                        List.of(new UserMessage("secret input")),
+                        null,
+                        null,
+                        new StubModel("gpt-4o"));
+
+        defaultMiddleware
+                .onModelCall(
+                        agent,
+                        null,
+                        input,
+                        in ->
+                                Flux.just(
+                                        new TextBlockDeltaEvent("reply-1", "text", "secret output"),
+                                        new ModelCallEndEvent("reply-1", null)))
+                .collectList()
+                .block();
+
+        var attributes = spanExporter.getFinishedSpanItems().get(0).getAttributes();
+        assertNull(
+                attributes.get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(
+                                "gen_ai.input.messages")));
+        assertNull(
+                attributes.get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(
+                                "gen_ai.output.messages")));
     }
 
     @Test

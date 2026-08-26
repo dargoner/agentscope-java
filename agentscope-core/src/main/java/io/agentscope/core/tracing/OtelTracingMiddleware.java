@@ -128,9 +128,22 @@ public class OtelTracingMiddleware implements MiddlewareBase {
 
     private static final String OPERATION_CHAT = "chat";
 
+    private final boolean recordContent;
+
     private static volatile boolean hookRegistered = false;
 
     public OtelTracingMiddleware() {
+        this(false);
+    }
+
+    /**
+     * Creates an OpenTelemetry middleware.
+     *
+     * @param recordContent whether to record input/output message content on spans; disabled by
+     *     default because message content may contain sensitive data
+     */
+    public OtelTracingMiddleware(boolean recordContent) {
+        this.recordContent = recordContent;
         if (!hookRegistered) {
             synchronized (OtelTracingMiddleware.class) {
                 if (!hookRegistered) {
@@ -247,24 +260,28 @@ public class OtelTracingMiddleware implements MiddlewareBase {
 
                     Context otelCtx = span.storeInContext(parentContext);
                     AtomicReference<Boolean> ended = new AtomicReference<>(false);
-                    StringBuilder completionText = new StringBuilder();
-                    StringBuilder completionReasoning = new StringBuilder();
-                    Map<String, ToolCallAccumulator> toolCallAccumulators = new LinkedHashMap<>();
+                    StringBuilder completionText = recordContent ? new StringBuilder() : null;
+                    StringBuilder completionReasoning = recordContent ? new StringBuilder() : null;
+                    Map<String, ToolCallAccumulator> toolCallAccumulators =
+                            recordContent ? new LinkedHashMap<>() : null;
 
                     return ContextPropagationOperator.runWithContext(
                             next.apply(input)
                                     .doOnNext(
                                             event -> {
-                                                if (event instanceof TextBlockDeltaEvent tde
+                                                if (recordContent
+                                                        && event instanceof TextBlockDeltaEvent tde
                                                         && tde.getDelta() != null) {
                                                     completionText.append(tde.getDelta());
-                                                } else if (event
+                                                } else if (recordContent
+                                                        && event
                                                                 instanceof
                                                                 ThinkingBlockDeltaEvent tde
                                                         && tde.getDelta() != null) {
                                                     completionReasoning.append(tde.getDelta());
-                                                } else if (event
-                                                        instanceof ToolCallDeltaEvent tde) {
+                                                } else if (recordContent
+                                                        && event
+                                                                instanceof ToolCallDeltaEvent tde) {
                                                     getToolCallAccumulator(
                                                                     toolCallAccumulators,
                                                                     tde.getToolCallId(),
@@ -274,8 +291,8 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                                     setModelResponseAttributes(
                                                             span,
                                                             mce,
-                                                            completionText.toString(),
-                                                            completionReasoning.toString(),
+                                                            completionText,
+                                                            completionReasoning,
                                                             toolCallAccumulators);
                                                 }
                                             })
@@ -416,22 +433,24 @@ public class OtelTracingMiddleware implements MiddlewareBase {
     private void setModelRequestAttributes(SpanBuilder spanBuilder, ModelCallInput input) {
         setGenerationOptionAttributes(spanBuilder, input.options());
 
-        String inputMessages = serializeInputMessages(input.messages());
-        if (inputMessages != null) {
-            spanBuilder.setAttribute(GEN_AI_INPUT_MESSAGES, inputMessages);
-        }
+        if (recordContent) {
+            String inputMessages = serializeInputMessages(input.messages());
+            if (inputMessages != null) {
+                spanBuilder.setAttribute(GEN_AI_INPUT_MESSAGES, inputMessages);
+            }
 
-        String toolDefinitions = serializeToolDefinitions(input.tools());
-        if (toolDefinitions != null) {
-            spanBuilder.setAttribute(GEN_AI_TOOL_DEFINITIONS, toolDefinitions);
+            String toolDefinitions = serializeToolDefinitions(input.tools());
+            if (toolDefinitions != null) {
+                spanBuilder.setAttribute(GEN_AI_TOOL_DEFINITIONS, toolDefinitions);
+            }
         }
     }
 
     private void setModelResponseAttributes(
             Span span,
             ModelCallEndEvent event,
-            String completionText,
-            String completionReasoning,
+            StringBuilder completionText,
+            StringBuilder completionReasoning,
             Map<String, ToolCallAccumulator> toolCallAccumulators) {
         if (event.getUsage() != null) {
             var usage = event.getUsage();
@@ -439,10 +458,13 @@ public class OtelTracingMiddleware implements MiddlewareBase {
             span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, (long) usage.getOutputTokens());
         }
 
-        String outputMessages =
-                serializeOutputMessages(completionText, completionReasoning, toolCallAccumulators);
-        if (outputMessages != null) {
-            span.setAttribute(GEN_AI_OUTPUT_MESSAGES, outputMessages);
+        if (recordContent) {
+            String outputMessages =
+                    serializeOutputMessages(
+                            completionText, completionReasoning, toolCallAccumulators);
+            if (outputMessages != null) {
+                span.setAttribute(GEN_AI_OUTPUT_MESSAGES, outputMessages);
+            }
         }
     }
 
@@ -500,20 +522,22 @@ public class OtelTracingMiddleware implements MiddlewareBase {
     }
 
     private String serializeOutputMessages(
-            String completionText,
-            String completionReasoning,
+            StringBuilder completionText,
+            StringBuilder completionReasoning,
             Map<String, ToolCallAccumulator> toolCallAccumulators) {
         List<MessagePart> parts = new ArrayList<>();
-        if (completionReasoning != null && !completionReasoning.isEmpty()) {
-            parts.add(new ReasoningPart(completionReasoning));
+        if (completionReasoning != null && completionReasoning.length() > 0) {
+            parts.add(new ReasoningPart(completionReasoning.toString()));
         }
-        if (completionText != null && !completionText.isEmpty()) {
-            parts.add(new TextPart(completionText));
+        if (completionText != null && completionText.length() > 0) {
+            parts.add(new TextPart(completionText.toString()));
         }
         for (ToolCallAccumulator toolCall : toolCallAccumulators.values()) {
             parts.add(
                     new ToolCallRequestPart(
-                            toolCall.id, toolCall.name, toolCall.arguments.toString()));
+                            toolCall.id,
+                            toolCall.name,
+                            parseJsonOrString(toolCall.arguments.toString())));
         }
         if (parts.isEmpty()) {
             return null;
@@ -577,6 +601,17 @@ public class OtelTracingMiddleware implements MiddlewareBase {
             return JsonUtils.getJsonCodec().toJson(value);
         } catch (Exception ignored) {
             return null;
+        }
+    }
+
+    private Object parseJsonOrString(String value) {
+        if (value == null || value.isBlank()) {
+            return value;
+        }
+        try {
+            return JsonUtils.getJsonCodec().fromJson(value, Object.class);
+        } catch (Exception ignored) {
+            return value;
         }
     }
 
