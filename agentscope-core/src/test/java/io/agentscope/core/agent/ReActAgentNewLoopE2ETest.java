@@ -467,4 +467,39 @@ class ReActAgentNewLoopE2ETest {
                 .map(ToolResultTextDeltaEvent.class::cast)
                 .forEach(e -> assertEquals(expected, e.getMetadata()));
     }
+
+    @Test
+    void streamEventsRestoresEmitterWhenActingContextLosesEventKeys() {
+        ScriptedModel model =
+                new ScriptedModel(
+                        List.of(
+                                () -> Flux.just(toolUseResponse("c1", "search", "alpha")),
+                                () -> Flux.just(textResponse("done"))));
+        Toolkit tk = new Toolkit();
+        tk.registerAgentTool(new AlwaysAllowTool("search"));
+
+        ReActAgent agent =
+                ReActAgent.builder()
+                        .name("asst")
+                        .sysPrompt("you are helpful")
+                        .model(model)
+                        .toolkit(tk)
+                        .middleware(new StripToolEventContextMiddleware())
+                        .build();
+
+        List<AgentEvent> events =
+                agent.streamEvents(
+                                List.of(
+                                        Msg.builder()
+                                                .role(MsgRole.USER)
+                                                .textContent("find alpha")
+                                                .build()))
+                        .collectList()
+                        .block();
+
+        assertNotNull(events);
+        assertEquals(1L, events.stream().filter(ToolResultEndEvent.class::isInstance).count());
+        assertTrue(events.get(0) instanceof AgentStartEvent);
+        assertTrue(events.get(events.size() - 1) instanceof AgentEndEvent);
+    }
 }

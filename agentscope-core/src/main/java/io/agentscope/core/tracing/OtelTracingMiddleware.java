@@ -193,6 +193,7 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                     .doOnNext(
                                             event -> {
                                                 if (event instanceof AgentStartEvent rse
+                                                        && rse.getSource() == null
                                                         && rse.getReplyId() != null) {
                                                     span.setAttribute(
                                                             "agentscope.agent.reply_id",
