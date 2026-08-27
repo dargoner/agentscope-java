@@ -25,15 +25,19 @@ import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.Event;
 import io.agentscope.core.agent.StreamOptions;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.event.AgentStartEvent;
 import io.agentscope.core.event.ModelCallEndEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.ThinkingBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
+import io.agentscope.core.event.ToolResultDataDeltaEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.core.message.AssistantMessage;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.SystemMessage;
+import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultMessage;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
@@ -169,6 +173,64 @@ class OtelTracingMiddlewareTest {
                         .get(
                                 io.opentelemetry.api.common.AttributeKey.stringKey(
                                         "agentscope.agent.reply_id")));
+    }
+
+    @Test
+    void onAgent_recordsInputAndOutputMessagesWhenContentEnabled() {
+        Agent agent = stubAgent("content-agent", "agent-content");
+        AgentInput input = new AgentInput(List.of(new UserMessage("agent input")));
+
+        middleware
+                .onAgent(
+                        agent,
+                        null,
+                        input,
+                        in -> Flux.just(new AgentResultEvent(new AssistantMessage("agent output"))))
+                .collectList()
+                .block();
+
+        var attributes = spanExporter.getFinishedSpanItems().get(0).getAttributes();
+        String inputMessages =
+                attributes.get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(
+                                "gen_ai.input.messages"));
+        String outputMessages =
+                attributes.get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(
+                                "gen_ai.output.messages"));
+        assertNotNull(inputMessages);
+        assertTrue(inputMessages.contains("agent input"));
+        assertNotNull(outputMessages);
+        assertTrue(outputMessages.contains("agent output"));
+        assertTrue(outputMessages.contains("\"role\":\"assistant\""));
+    }
+
+    @Test
+    void onAgent_defaultMiddlewareDoesNotRecordContent() {
+        OtelTracingMiddleware defaultMiddleware = new OtelTracingMiddleware();
+        Agent agent = stubAgent("privacy-agent", "agent-private");
+
+        defaultMiddleware
+                .onAgent(
+                        agent,
+                        null,
+                        new AgentInput(List.of(new UserMessage("secret input"))),
+                        in ->
+                                Flux.just(
+                                        new AgentResultEvent(
+                                                new AssistantMessage("secret output"))))
+                .collectList()
+                .block();
+
+        var attributes = spanExporter.getFinishedSpanItems().get(0).getAttributes();
+        assertNull(
+                attributes.get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(
+                                "gen_ai.input.messages")));
+        assertNull(
+                attributes.get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(
+                                "gen_ai.output.messages")));
     }
 
     @Test
@@ -555,6 +617,136 @@ class OtelTracingMiddlewareTest {
     }
 
     @Test
+    void onActing_recordsToolArgumentsAndTextResultWhenContentEnabled() {
+        Agent agent = stubAgent("tool-content-agent", "agent-tool-content");
+        ToolUseBlock toolCall =
+                ToolUseBlock.builder()
+                        .id("call-content")
+                        .name("search")
+                        .input(Map.of("query", "AgentScope"))
+                        .build();
+        ActingInput input = new ActingInput(List.of(toolCall));
+
+        middleware
+                .onActing(
+                        agent,
+                        null,
+                        input,
+                        in ->
+                                Flux.just(
+                                        new ToolResultTextDeltaEvent(
+                                                "reply-1", "call-content", "search", "AgentScope "),
+                                        new ToolResultTextDeltaEvent(
+                                                "reply-1",
+                                                "call-content",
+                                                "search",
+                                                "documentation"),
+                                        new ToolResultEndEvent(
+                                                "reply-1",
+                                                "call-content",
+                                                "search",
+                                                ToolResultState.SUCCESS)))
+                .collectList()
+                .block();
+
+        var attributes = spanExporter.getFinishedSpanItems().get(0).getAttributes();
+        String arguments =
+                attributes.get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(
+                                "gen_ai.tool.call.arguments"));
+        String result =
+                attributes.get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(
+                                "gen_ai.tool.call.result"));
+        assertNotNull(arguments);
+        assertTrue(arguments.contains("\"query\":\"AgentScope\""));
+        assertNotNull(result);
+        assertTrue(result.contains("AgentScope documentation"));
+        assertTrue(result.contains("\"text\":\"AgentScope documentation\""));
+    }
+
+    @Test
+    void onActing_recordsDataResultWhenContentEnabled() {
+        Agent agent = stubAgent("tool-data-agent", "agent-tool-data");
+        ToolUseBlock toolCall =
+                ToolUseBlock.builder().id("call-data").name("lookup").input(Map.of()).build();
+        ActingInput input = new ActingInput(List.of(toolCall));
+
+        middleware
+                .onActing(
+                        agent,
+                        null,
+                        input,
+                        in ->
+                                Flux.just(
+                                        new ToolResultDataDeltaEvent(
+                                                "reply-1",
+                                                "call-data",
+                                                "lookup",
+                                                TextBlock.builder().text("data result").build()),
+                                        new ToolResultEndEvent(
+                                                "reply-1",
+                                                "call-data",
+                                                "lookup",
+                                                ToolResultState.SUCCESS)))
+                .collectList()
+                .block();
+
+        String result =
+                spanExporter
+                        .getFinishedSpanItems()
+                        .get(0)
+                        .getAttributes()
+                        .get(
+                                io.opentelemetry.api.common.AttributeKey.stringKey(
+                                        "gen_ai.tool.call.result"));
+        assertNotNull(result);
+        assertTrue(result.contains("data result"));
+    }
+
+    @Test
+    void onActing_defaultMiddlewareDoesNotRecordToolContent() {
+        OtelTracingMiddleware defaultMiddleware = new OtelTracingMiddleware();
+        Agent agent = stubAgent("private-tool-agent", "agent-private-tool");
+        ToolUseBlock toolCall =
+                ToolUseBlock.builder()
+                        .id("call-private")
+                        .name("search")
+                        .input(Map.of("query", "secret"))
+                        .build();
+
+        defaultMiddleware
+                .onActing(
+                        agent,
+                        null,
+                        new ActingInput(List.of(toolCall)),
+                        in ->
+                                Flux.just(
+                                        new ToolResultTextDeltaEvent(
+                                                "reply-1",
+                                                "call-private",
+                                                "search",
+                                                "secret result"),
+                                        new ToolResultEndEvent(
+                                                "reply-1",
+                                                "call-private",
+                                                "search",
+                                                ToolResultState.SUCCESS)))
+                .collectList()
+                .block();
+
+        var attributes = spanExporter.getFinishedSpanItems().get(0).getAttributes();
+        assertNull(
+                attributes.get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(
+                                "gen_ai.tool.call.arguments")));
+        assertNull(
+                attributes.get(
+                        io.opentelemetry.api.common.AttributeKey.stringKey(
+                                "gen_ai.tool.call.result")));
+    }
+
+    @Test
     void nestedSpans_linkedAsParentAndChild() {
         Agent agent = stubAgent("nest-agent", "agent-100");
         AgentInput agentIn = new AgentInput(List.of());
@@ -714,7 +906,21 @@ class OtelTracingMiddlewareTest {
         ToolResultEndEvent r2 =
                 new ToolResultEndEvent("reply-1", "call-b", "calc", ToolResultState.SUCCESS);
 
-        middleware.onActing(agent, null, input, in -> Flux.just(r1, r2)).collectList().block();
+        middleware
+                .onActing(
+                        agent,
+                        null,
+                        input,
+                        in ->
+                                Flux.just(
+                                        new ToolResultTextDeltaEvent(
+                                                "reply-1", "call-a", "search", "search result"),
+                                        r1,
+                                        new ToolResultTextDeltaEvent(
+                                                "reply-1", "call-b", "calc", "calc result"),
+                                        r2))
+                .collectList()
+                .block();
 
         List<SpanData> spans = spanExporter.getFinishedSpanItems();
         assertEquals(1, spans.size());
@@ -728,6 +934,25 @@ class OtelTracingMiddlewareTest {
         assertNotNull(callIds);
         assertTrue(callIds.contains("call-a"));
         assertTrue(callIds.contains("call-b"));
+        String arguments =
+                spans.get(0)
+                        .getAttributes()
+                        .get(
+                                io.opentelemetry.api.common.AttributeKey.stringKey(
+                                        "gen_ai.tool.call.arguments"));
+        String toolResults =
+                spans.get(0)
+                        .getAttributes()
+                        .get(
+                                io.opentelemetry.api.common.AttributeKey.stringKey(
+                                        "gen_ai.tool.call.result"));
+        assertNotNull(arguments);
+        assertTrue(arguments.contains("call-a"));
+        assertTrue(arguments.contains("call-b"));
+        assertNotNull(toolResults);
+        assertTrue(toolResults.contains("search result"));
+        assertTrue(toolResults.contains("calc result"));
+        assertTrue(toolResults.contains("\"state\":\"success\""));
     }
 
     @Test

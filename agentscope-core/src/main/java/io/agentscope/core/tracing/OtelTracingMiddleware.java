@@ -18,12 +18,16 @@ package io.agentscope.core.tracing;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.event.AgentStartEvent;
 import io.agentscope.core.event.ModelCallEndEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.ThinkingBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
+import io.agentscope.core.event.ToolResultDataDeltaEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.core.event.ToolResultStartEvent;
+import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.TextBlock;
@@ -125,6 +129,10 @@ public class OtelTracingMiddleware implements MiddlewareBase {
             AttributeKey.stringKey("gen_ai.output.messages");
     private static final AttributeKey<String> GEN_AI_TOOL_DEFINITIONS =
             AttributeKey.stringKey("gen_ai.tool.definitions");
+    private static final AttributeKey<String> GEN_AI_TOOL_CALL_ARGUMENTS =
+            AttributeKey.stringKey("gen_ai.tool.call.arguments");
+    private static final AttributeKey<String> GEN_AI_TOOL_CALL_RESULT =
+            AttributeKey.stringKey("gen_ai.tool.call.result");
 
     private static final String OPERATION_CHAT = "chat";
 
@@ -171,7 +179,7 @@ public class OtelTracingMiddleware implements MiddlewareBase {
         return Flux.deferContextual(
                 ctxView -> {
                     Context parentContext = resolveOtelContext(ctxView);
-                    Span span =
+                    SpanBuilder spanBuilder =
                             getTracer()
                                     .spanBuilder("invoke_agent " + agent.getName())
                                     .setParent(parentContext)
@@ -182,8 +190,14 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                             agent.getAgentId() != null ? agent.getAgentId() : "")
                                     .setAttribute(
                                             "gen_ai.request.messages.count",
-                                            (long) input.msgs().size())
-                                    .startSpan();
+                                            (long) input.msgs().size());
+                    if (recordContent) {
+                        String inputMessages = serializeInputMessages(input.msgs());
+                        if (inputMessages != null) {
+                            spanBuilder.setAttribute(GEN_AI_INPUT_MESSAGES, inputMessages);
+                        }
+                    }
+                    Span span = spanBuilder.startSpan();
 
                     Context otelCtx = span.storeInContext(parentContext);
                     AtomicReference<Boolean> ended = new AtomicReference<>(false);
@@ -198,6 +212,19 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                                     span.setAttribute(
                                                             "agentscope.agent.reply_id",
                                                             rse.getReplyId());
+                                                } else if (recordContent
+                                                        && event
+                                                                instanceof
+                                                                AgentResultEvent resultEvent
+                                                        && resultEvent.getSource() == null) {
+                                                    String outputMessages =
+                                                            serializeAgentOutputMessage(
+                                                                    resultEvent.getResult());
+                                                    if (outputMessages != null) {
+                                                        span.setAttribute(
+                                                                GEN_AI_OUTPUT_MESSAGES,
+                                                                outputMessages);
+                                                    }
                                                 }
                                             })
                                     .doOnComplete(
@@ -345,7 +372,7 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                     : "unknown";
                     String spanName = buildToolSpanName(input);
 
-                    Span span =
+                    SpanBuilder spanBuilder =
                             getTracer()
                                     .spanBuilder("execute_tool " + spanName)
                                     .setParent(parentContext)
@@ -355,26 +382,70 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                             "gen_ai.tool.call.count",
                                             input.toolCalls() != null
                                                     ? (long) input.toolCalls().size()
-                                                    : 0L)
-                                    .startSpan();
+                                                    : 0L);
+                    if (recordContent) {
+                        String arguments = serializeToolArguments(input.toolCalls());
+                        if (arguments != null) {
+                            spanBuilder.setAttribute(GEN_AI_TOOL_CALL_ARGUMENTS, arguments);
+                        }
+                    }
+                    Span span = spanBuilder.startSpan();
 
                     Context otelCtx = span.storeInContext(parentContext);
                     AtomicReference<Boolean> ended = new AtomicReference<>(false);
                     Set<String> callIds = ConcurrentHashMap.newKeySet();
+                    Map<String, ToolResultAccumulator> toolResults =
+                            recordContent ? initializeToolResults(input.toolCalls()) : null;
 
                     return ContextPropagationOperator.runWithContext(
                             next.apply(input)
                                     .doOnNext(
                                             event -> {
-                                                if (event instanceof ToolResultEndEvent tre
-                                                        && tre.getToolCallId() != null) {
-                                                    callIds.add(tre.getToolCallId());
+                                                if (event instanceof ToolResultEndEvent tre) {
+                                                    if (tre.getToolCallId() != null) {
+                                                        callIds.add(tre.getToolCallId());
+                                                    }
+                                                    if (recordContent) {
+                                                        getToolResultAccumulator(
+                                                                        toolResults,
+                                                                        tre.getToolCallId(),
+                                                                        tre.getToolCallName())
+                                                                .finish(tre.getState());
+                                                    }
+                                                } else if (recordContent
+                                                        && event
+                                                                instanceof
+                                                                ToolResultStartEvent start) {
+                                                    getToolResultAccumulator(
+                                                            toolResults,
+                                                            start.getToolCallId(),
+                                                            start.getToolCallName());
+                                                } else if (recordContent
+                                                        && event
+                                                                instanceof
+                                                                ToolResultTextDeltaEvent delta) {
+                                                    getToolResultAccumulator(
+                                                                    toolResults,
+                                                                    delta.getToolCallId(),
+                                                                    delta.getToolCallName())
+                                                            .appendText(delta.getDelta());
+                                                } else if (recordContent
+                                                        && event
+                                                                instanceof
+                                                                ToolResultDataDeltaEvent delta) {
+                                                    getToolResultAccumulator(
+                                                                    toolResults,
+                                                                    delta.getToolCallId(),
+                                                                    delta.getToolCallName())
+                                                            .addData(delta.getData());
                                                 }
                                             })
                                     .doOnComplete(
                                             () -> {
                                                 if (ended.compareAndSet(false, true)) {
                                                     setToolCallIds(span, callIds);
+                                                    setToolResultAttribute(
+                                                            span, input.toolCalls(), toolResults);
                                                     span.setStatus(StatusCode.OK);
                                                     span.end();
                                                 }
@@ -383,6 +454,8 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                             e -> {
                                                 if (ended.compareAndSet(false, true)) {
                                                     setToolCallIds(span, callIds);
+                                                    setToolResultAttribute(
+                                                            span, input.toolCalls(), toolResults);
                                                     span.setStatus(
                                                             StatusCode.ERROR, e.getMessage());
                                                     span.recordException(e);
@@ -393,6 +466,8 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                             () -> {
                                                 if (ended.compareAndSet(false, true)) {
                                                     setToolCallIds(span, callIds);
+                                                    setToolResultAttribute(
+                                                            span, input.toolCalls(), toolResults);
                                                     span.setStatus(StatusCode.ERROR, "cancelled");
                                                     span.end();
                                                 }
@@ -429,6 +504,123 @@ public class OtelTracingMiddleware implements MiddlewareBase {
         if (!callIds.isEmpty()) {
             span.setAttribute("gen_ai.tool.call.id", String.join(",", callIds));
         }
+    }
+
+    private String serializeAgentOutputMessage(Msg message) {
+        if (message == null) {
+            return null;
+        }
+        String role =
+                message.getRole() != null ? message.getRole().name().toLowerCase() : "unknown";
+        return serializeToJson(
+                List.of(new OutputMessage(role, serializeParts(message.getContent()))));
+    }
+
+    private String serializeToolArguments(List<ToolUseBlock> toolCalls) {
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            return null;
+        }
+        List<ToolUseBlock> validToolCalls =
+                toolCalls.stream().filter(call -> call != null).toList();
+        if (validToolCalls.isEmpty()) {
+            return null;
+        }
+        if (validToolCalls.size() == 1) {
+            Map<String, Object> arguments = validToolCalls.get(0).getInput();
+            return serializeToJson(arguments != null ? arguments : Map.of());
+        }
+        List<ToolExecutionInput> inputs =
+                validToolCalls.stream()
+                        .map(
+                                call ->
+                                        new ToolExecutionInput(
+                                                call.getId(),
+                                                call.getName(),
+                                                call.getInput() != null
+                                                        ? call.getInput()
+                                                        : Map.of()))
+                        .toList();
+        return serializeToJson(inputs);
+    }
+
+    private Map<String, ToolResultAccumulator> initializeToolResults(List<ToolUseBlock> toolCalls) {
+        Map<String, ToolResultAccumulator> results = new LinkedHashMap<>();
+        if (toolCalls != null) {
+            for (ToolUseBlock toolCall : toolCalls) {
+                if (toolCall != null) {
+                    results.put(
+                            toolCallKey(toolCall.getId(), toolCall.getName()),
+                            new ToolResultAccumulator(toolCall.getId(), toolCall.getName()));
+                }
+            }
+        }
+        return results;
+    }
+
+    private ToolResultAccumulator getToolResultAccumulator(
+            Map<String, ToolResultAccumulator> results, String id, String name) {
+        String key = toolCallKey(id, name);
+        return results.computeIfAbsent(key, ignored -> new ToolResultAccumulator(id, name));
+    }
+
+    private String toolCallKey(String id, String name) {
+        if (id != null && !id.isBlank()) {
+            return id;
+        }
+        return name != null ? name : "unknown";
+    }
+
+    private void setToolResultAttribute(
+            Span span,
+            List<ToolUseBlock> toolCalls,
+            Map<String, ToolResultAccumulator> toolResults) {
+        if (!recordContent || toolResults == null || toolResults.isEmpty()) {
+            return;
+        }
+        String result = serializeToolResults(toolCalls, toolResults);
+        if (result != null) {
+            span.setAttribute(GEN_AI_TOOL_CALL_RESULT, result);
+        }
+    }
+
+    private String serializeToolResults(
+            List<ToolUseBlock> toolCalls, Map<String, ToolResultAccumulator> toolResults) {
+        List<ToolResultAccumulator> orderedResults = new ArrayList<>();
+        if (toolCalls != null) {
+            for (ToolUseBlock toolCall : toolCalls) {
+                if (toolCall == null) {
+                    continue;
+                }
+                ToolResultAccumulator result =
+                        toolResults.get(toolCallKey(toolCall.getId(), toolCall.getName()));
+                if (result != null && result.hasResult()) {
+                    orderedResults.add(result);
+                }
+            }
+        }
+        for (ToolResultAccumulator result : toolResults.values()) {
+            if (result.hasResult() && !orderedResults.contains(result)) {
+                orderedResults.add(result);
+            }
+        }
+        if (orderedResults.isEmpty()) {
+            return null;
+        }
+        if (orderedResults.size() == 1) {
+            return serializeToJson(orderedResults.get(0).contentBlocks());
+        }
+        return serializeToJson(
+                orderedResults.stream()
+                        .map(
+                                result ->
+                                        new ToolExecutionResult(
+                                                result.id,
+                                                result.name,
+                                                result.contentBlocks(),
+                                                result.state != null
+                                                        ? result.state.getValue()
+                                                        : null))
+                        .toList());
     }
 
     private void setModelRequestAttributes(SpanBuilder spanBuilder, ModelCallInput input) {
@@ -632,6 +824,53 @@ public class OtelTracingMiddleware implements MiddlewareBase {
             }
         }
     }
+
+    private static final class ToolResultAccumulator {
+        private final String id;
+        private final String name;
+        private final StringBuilder text = new StringBuilder();
+        private final List<ContentBlock> data = new ArrayList<>();
+        private io.agentscope.core.message.ToolResultState state;
+
+        private ToolResultAccumulator(String id, String name) {
+            this.id = id;
+            this.name = name;
+        }
+
+        private void appendText(String delta) {
+            if (delta != null) {
+                text.append(delta);
+            }
+        }
+
+        private void addData(ContentBlock block) {
+            if (block != null) {
+                data.add(block);
+            }
+        }
+
+        private void finish(io.agentscope.core.message.ToolResultState resultState) {
+            this.state = resultState;
+        }
+
+        private boolean hasResult() {
+            return text.length() > 0 || !data.isEmpty();
+        }
+
+        private List<ContentBlock> contentBlocks() {
+            List<ContentBlock> blocks = new ArrayList<>();
+            if (text.length() > 0) {
+                blocks.add(TextBlock.builder().text(text.toString()).build());
+            }
+            blocks.addAll(data);
+            return blocks;
+        }
+    }
+
+    private record ToolExecutionInput(String id, String name, Object arguments) {}
+
+    private record ToolExecutionResult(
+            String id, String name, List<ContentBlock> result, String state) {}
 
     private record InputMessage(String role, List<MessagePart> parts, String name) {}
 
