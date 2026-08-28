@@ -99,7 +99,11 @@ public class DockerSandbox extends AbstractBaseSandbox {
     @Override
     public void shutdown() throws Exception {
         String containerId = dockerState.getContainerId();
-        if (containerId == null || containerId.isBlank()) {
+        String containerReference =
+                containerId == null || containerId.isBlank()
+                        ? dockerState.getContainerName()
+                        : containerId;
+        if (containerReference == null || containerReference.isBlank()) {
             return;
         }
         if (!dockerState.isContainerOwned()) {
@@ -108,29 +112,10 @@ public class DockerSandbox extends AbstractBaseSandbox {
                     containerId);
             return;
         }
-        try {
-            runDockerCliBlocking(
-                    CONTAINER_STOP_TIMEOUT_SECONDS * 2,
-                    "docker",
-                    "stop",
-                    "--time=" + CONTAINER_STOP_TIMEOUT_SECONDS,
-                    containerId);
-            log.debug("[sandbox-docker] Container stopped: {}", containerId);
-        } catch (Exception e) {
-            log.warn(
-                    "[sandbox-docker] Failed to stop container {}: {}",
-                    containerId,
-                    e.getMessage());
-        }
-        try {
-            runDockerCliBlocking(30, "docker", "rm", "--force", containerId);
-            log.debug("[sandbox-docker] Container removed: {}", containerId);
-        } catch (Exception e) {
-            log.warn(
-                    "[sandbox-docker] Failed to remove container {}: {}",
-                    containerId,
-                    e.getMessage());
-        }
+        removeOwnedContainer(containerReference, true);
+        dockerState.setContainerId(null);
+        dockerState.setContainerName(null);
+        log.debug("[sandbox-docker] Container removed: {}", containerReference);
     }
 
     @Override
@@ -428,13 +413,34 @@ public class DockerSandbox extends AbstractBaseSandbox {
                 drainer.submit(() -> readStream(process.getErrorStream(), 64 * 1024));
         drainer.shutdown();
 
-        boolean exited = process.waitFor(CONTAINER_START_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        boolean exited;
+        try {
+            exited = process.waitFor(CONTAINER_START_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
+            try {
+                removeOwnedContainer(containerName, true);
+            } catch (Exception cleanupFailure) {
+                interrupted.addSuppressed(cleanupFailure);
+            }
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        }
         if (!exited) {
             process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
             drainer.shutdownNow();
-            throw new SandboxException.SandboxRuntimeException(
-                    SandboxErrorCode.WORKSPACE_START_ERROR,
-                    "docker run timed out for image: " + dockerState.getImage());
+            SandboxException.SandboxRuntimeException timeout =
+                    new SandboxException.SandboxRuntimeException(
+                            SandboxErrorCode.WORKSPACE_START_ERROR,
+                            "docker run timed out for image: " + dockerState.getImage());
+            try {
+                removeOwnedContainer(containerName, true);
+            } catch (Exception cleanupFailure) {
+                timeout.addSuppressed(cleanupFailure);
+            }
+            throw timeout;
         }
 
         int exitCode = process.exitValue();
@@ -615,6 +621,20 @@ public class DockerSandbox extends AbstractBaseSandbox {
             throw new SandboxException.SandboxRuntimeException(
                     SandboxErrorCode.WORKSPACE_START_ERROR,
                     "docker command failed (exit=" + exitCode + "): " + stderr);
+        }
+    }
+
+    private void removeOwnedContainer(String containerReference, boolean allowMissing)
+            throws Exception {
+        try {
+            runDockerCliBlocking(30, "docker", "rm", "--force", containerReference);
+        } catch (SandboxException.SandboxRuntimeException exception) {
+            if (allowMissing
+                    && exception.getMessage() != null
+                    && exception.getMessage().contains("No such container")) {
+                return;
+            }
+            throw exception;
         }
     }
 
