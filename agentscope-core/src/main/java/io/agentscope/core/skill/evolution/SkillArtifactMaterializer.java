@@ -246,7 +246,9 @@ public final class SkillArtifactMaterializer {
     }
 
     private static String collisionKey(String path) {
-        return Normalizer.normalize(path, Normalizer.Form.NFC).toLowerCase(Locale.ROOT);
+        String normalized = Normalizer.normalize(path, Normalizer.Form.NFC);
+        String portableCaseFold = normalized.toUpperCase(Locale.ROOT).toLowerCase(Locale.ROOT);
+        return Normalizer.normalize(portableCaseFold, Normalizer.Form.NFC);
     }
 
     private static void requireNestingDepth(int depth, String name) {

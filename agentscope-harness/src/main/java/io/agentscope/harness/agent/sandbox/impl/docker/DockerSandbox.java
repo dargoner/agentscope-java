@@ -32,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -127,51 +128,92 @@ public class DockerSandbox extends AbstractBaseSandbox {
         ProcessBuilder pb = new ProcessBuilder(buildExecCommand(containerId, workspaceRoot));
         Process process = pb.start();
 
-        ExecutorService drainer =
-                Executors.newFixedThreadPool(
-                        2,
-                        r -> {
-                            Thread t =
-                                    new Thread(
-                                            r,
-                                            "sandbox-docker-drain-" + dockerState.getSessionId());
-                            t.setDaemon(true);
-                            return t;
-                        });
+        return executeProcess(
+                process,
+                command,
+                timeoutSeconds,
+                "sandbox-docker-drain-" + dockerState.getSessionId());
+    }
 
-        Future<String> stdoutFuture =
-                drainer.submit(() -> readStream(process.getInputStream(), OUTPUT_TRUNCATE_BYTES));
-        Future<String> stderrFuture =
-                drainer.submit(() -> readStream(process.getErrorStream(), OUTPUT_TRUNCATE_BYTES));
-        drainer.shutdown();
+    static ExecResult executeProcess(
+            Process process, String command, int timeoutSeconds, String drainerThreadName)
+            throws Exception {
+        Objects.requireNonNull(process, "process must not be null");
+        ExecutorService drainer = null;
+        try {
+            Objects.requireNonNull(command, "command must not be null");
+            Objects.requireNonNull(drainerThreadName, "drainerThreadName must not be null");
+            drainer =
+                    Executors.newFixedThreadPool(
+                            2,
+                            r -> {
+                                Thread t = new Thread(r, drainerThreadName);
+                                t.setDaemon(true);
+                                return t;
+                            });
+            Future<String> stdoutFuture =
+                    drainer.submit(
+                            () -> readStream(process.getInputStream(), OUTPUT_TRUNCATE_BYTES));
+            Future<String> stderrFuture =
+                    drainer.submit(
+                            () -> readStream(process.getErrorStream(), OUTPUT_TRUNCATE_BYTES));
+            drainer.shutdown();
 
-        try (OutputStream stdin = process.getOutputStream()) {
-            writeShellProgram(stdin, command);
-        } catch (IOException e) {
+            try (OutputStream stdin = process.getOutputStream()) {
+                writeShellProgram(stdin, command);
+            }
+
+            boolean exited = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+            if (!exited) {
+                throw new SandboxException.ExecTimeoutException(command, timeoutSeconds);
+            }
+
+            String stdout = stdoutFuture.get();
+            String stderr = stderrFuture.get();
+            int exitCode = process.exitValue();
+
+            boolean truncated =
+                    stdout.length() >= OUTPUT_TRUNCATE_BYTES
+                            || stderr.length() >= OUTPUT_TRUNCATE_BYTES;
+            ExecResult result = new ExecResult(exitCode, stdout, stderr, truncated);
+            if (!result.ok()) {
+                throw new SandboxException.ExecException(exitCode, stdout, stderr);
+            }
+            return result;
+        } catch (Exception | Error failure) {
+            terminateProcess(process);
+            throw failure;
+        } finally {
+            if (drainer != null) {
+                drainer.shutdownNow();
+            }
+        }
+    }
+
+    static void terminateProcess(Process process) {
+        boolean interrupted = false;
+        if (process.isAlive()) {
+            process.destroy();
+        }
+        long gracefulDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(250);
+        long forcedDeadline = gracefulDeadline + TimeUnit.SECONDS.toNanos(2);
+        while (process.isAlive() && System.nanoTime() < forcedDeadline) {
+            if (System.nanoTime() >= gracefulDeadline) {
+                process.destroyForcibly();
+            }
+            try {
+                process.waitFor(50, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException exception) {
+                interrupted = true;
+                process.destroyForcibly();
+            }
+        }
+        if (process.isAlive()) {
             process.destroyForcibly();
-            drainer.shutdownNow();
-            throw e;
         }
-
-        boolean exited = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-        if (!exited) {
-            process.destroyForcibly();
-            drainer.shutdownNow();
-            throw new SandboxException.ExecTimeoutException(command, timeoutSeconds);
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
-
-        String stdout = stdoutFuture.get();
-        String stderr = stderrFuture.get();
-        int exitCode = process.exitValue();
-
-        boolean truncated =
-                stdout.length() >= OUTPUT_TRUNCATE_BYTES
-                        || stderr.length() >= OUTPUT_TRUNCATE_BYTES;
-        ExecResult result = new ExecResult(exitCode, stdout, stderr, truncated);
-        if (!result.ok()) {
-            throw new SandboxException.ExecException(exitCode, stdout, stderr);
-        }
-        return result;
     }
 
     static List<String> buildExecCommand(String containerId, String workspaceRoot) {

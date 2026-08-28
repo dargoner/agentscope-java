@@ -329,6 +329,32 @@ class SkillEvolutionContractTest {
                                         "demo skill",
                                         "body",
                                         linkedResources(
+                                                "docs/stra\u00dfe.txt",
+                                                "first",
+                                                "docs/STRASSE.TXT",
+                                                "second"))));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        SkillArtifactMaterializer.materialize(
+                                new AgentSkill(
+                                        "demo",
+                                        "demo skill",
+                                        "body",
+                                        linkedResources(
+                                                "docs/\u03bf\u03c2.txt",
+                                                "first",
+                                                "docs/\u039f\u03a3.TXT",
+                                                "second"))));
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        SkillArtifactMaterializer.materialize(
+                                new AgentSkill(
+                                        "demo",
+                                        "demo skill",
+                                        "body",
+                                        linkedResources(
                                                 "Docs", "file", "docs/readme.md", "nested"))));
     }
 

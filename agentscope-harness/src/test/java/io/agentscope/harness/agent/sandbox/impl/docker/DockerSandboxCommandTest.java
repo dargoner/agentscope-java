@@ -17,14 +17,22 @@ package io.agentscope.harness.agent.sandbox.impl.docker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.Sandbox;
+import io.agentscope.harness.agent.sandbox.SandboxException;
 import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
@@ -61,6 +69,64 @@ class DockerSandboxCommandTest {
     }
 
     @Test
+    void execProcessDestroysTheHostProcessOnTimeout() throws Exception {
+        Process process = new ProcessBuilder("sh", "-s").start();
+
+        assertThrows(
+                SandboxException.ExecTimeoutException.class,
+                () ->
+                        DockerSandbox.executeProcess(
+                                process,
+                                "trap '' TERM; while :; do :; done",
+                                0,
+                                "docker-exec-timeout-test"));
+
+        assertFalse(process.isAlive());
+    }
+
+    @Test
+    void execProcessDestroysTheHostProcessWhenInterrupted() throws Exception {
+        Process process = new ProcessBuilder("sh", "-s").start();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread worker =
+                new Thread(
+                        () -> {
+                            try {
+                                DockerSandbox.executeProcess(
+                                        process,
+                                        "trap '' TERM; while :; do :; done",
+                                        30,
+                                        "docker-exec-interrupt-test");
+                            } catch (Throwable throwable) {
+                                failure.set(throwable);
+                            }
+                        });
+
+        worker.start();
+        Thread.sleep(100);
+        worker.interrupt();
+        worker.join(TimeUnit.SECONDS.toMillis(3));
+
+        assertFalse(worker.isAlive());
+        assertInstanceOf(InterruptedException.class, failure.get());
+        assertFalse(process.isAlive());
+    }
+
+    @Test
+    void execProcessDestroysTheHostProcessWhenWritingFails() throws Exception {
+        Process delegate = new ProcessBuilder("sh", "-s").start();
+        Process process = new FailingStdinProcess(delegate);
+
+        assertThrows(
+                IOException.class,
+                () ->
+                        DockerSandbox.executeProcess(
+                                process, "echo unreachable", 30, "docker-exec-failure-test"));
+
+        assertFalse(delegate.isAlive());
+    }
+
+    @Test
     @EnabledIfEnvironmentVariable(named = "AGENTSCOPE_DOCKER_INTEGRATION", matches = "true")
     void realDockerExecPreservesComplexAndLargeShellPrograms() throws Exception {
         DockerSandboxClient client = new DockerSandboxClient();
@@ -85,6 +151,66 @@ class DockerSandboxCommandTest {
                             + " /workspace/large.txt";
             ExecResult largeResult = sandbox.exec(RuntimeContext.empty(), large, 30);
             assertEquals("large-script-ok", largeResult.stdout());
+        }
+    }
+
+    private static final class FailingStdinProcess extends Process {
+
+        private final Process delegate;
+
+        private FailingStdinProcess(Process delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new OutputStream() {
+                @Override
+                public void write(int value) throws IOException {
+                    throw new IOException("simulated stdin failure");
+                }
+            };
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return delegate.getInputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return delegate.getErrorStream();
+        }
+
+        @Override
+        public int waitFor() throws InterruptedException {
+            return delegate.waitFor();
+        }
+
+        @Override
+        public boolean waitFor(long timeout, TimeUnit unit) throws InterruptedException {
+            return delegate.waitFor(timeout, unit);
+        }
+
+        @Override
+        public int exitValue() {
+            return delegate.exitValue();
+        }
+
+        @Override
+        public void destroy() {
+            delegate.destroy();
+        }
+
+        @Override
+        public Process destroyForcibly() {
+            delegate.destroyForcibly();
+            return this;
+        }
+
+        @Override
+        public boolean isAlive() {
+            return delegate.isAlive();
         }
     }
 }

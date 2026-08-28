@@ -210,6 +210,25 @@ class SandboxSkillCandidateValidatorTest {
     }
 
     @Test
+    void materializationExceptionStillRemovesTheAttemptedCandidateRoot() {
+        FakeSandbox sandbox = new FakeSandbox(new ExecResult(0, "passed", "", false));
+        sandbox.failMaterializationAfterCreatingRoot = true;
+        SandboxSkillCandidateValidator validator = new SandboxSkillCandidateValidator(sandbox);
+
+        assertThrows(
+                RuntimeException.class,
+                () ->
+                        validator
+                                .validate(candidate(), request(SkillValidationStage.DEVELOPMENT))
+                                .block());
+
+        assertEquals(1, sandbox.cleanupAttempts.get());
+        assertEquals(1, sandbox.cleanedRoots.size());
+        assertTrue(sandbox.materializedRoots.isEmpty());
+        assertEquals(1, sandbox.stopCount);
+    }
+
+    @Test
     void timeoutStopsExecutionAndCleanupFailureIsPropagated() {
         FakeSandbox slow = new FakeSandbox(new ExecResult(0, "passed", "", false));
         slow.validationDelayMillis = 2_000;
@@ -301,6 +320,7 @@ class SandboxSkillCandidateValidatorTest {
         private volatile boolean running;
         private boolean failStop;
         private boolean failCandidateRootCleanup;
+        private boolean failMaterializationAfterCreatingRoot;
         private boolean requireConcurrentValidation;
         private volatile boolean stoppedDuringValidation;
         private long validationDelayMillis;
@@ -366,6 +386,9 @@ class SandboxSkillCandidateValidatorTest {
                 if (!materializedRoots.add(root)) {
                     return new ExecResult(
                             73, "", "candidate validation root already exists", false);
+                }
+                if (failMaterializationAfterCreatingRoot) {
+                    throw new IllegalStateException("materialization transport failed");
                 }
                 return new ExecResult(0, "", "", false);
             }

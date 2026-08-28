@@ -123,6 +123,7 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
                             Sandbox sandbox = invocation.sandbox();
                             ensureRunning(invocation);
                             int timeoutSeconds = timeoutSeconds(request.timeout());
+                            invocation.markCandidateRootCreationAttempted();
                             ExecResult materialized =
                                     sandbox.exec(
                                             null,
@@ -131,9 +132,6 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
                                                     SkillArtifactMaterializer.materialize(
                                                             candidate.candidate())),
                                             timeoutSeconds);
-                            if (materialized.ok()) {
-                                invocation.markCandidateRootCreated();
-                            }
                             if (!materialized.ok() || materialized.truncated()) {
                                 return report(
                                         candidate,
@@ -207,7 +205,7 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
     }
 
     private static void bestEffortDeleteCandidateRoot(ValidationInvocation invocation) {
-        if (!invocation.candidateRootCreated()) {
+        if (!invocation.candidateRootCreationAttempted()) {
             return;
         }
         try {
@@ -419,7 +417,7 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
 
         private final Sandbox sandbox;
         private final String candidateDirectoryName;
-        private final AtomicBoolean candidateRootCreated = new AtomicBoolean();
+        private final AtomicBoolean candidateRootCreationAttempted = new AtomicBoolean();
         private volatile String candidateRoot;
 
         private ValidationInvocation(Sandbox sandbox, String candidateDirectoryName) {
@@ -445,12 +443,12 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
             }
         }
 
-        private void markCandidateRootCreated() {
-            candidateRootCreated.set(true);
+        private void markCandidateRootCreationAttempted() {
+            candidateRootCreationAttempted.set(true);
         }
 
-        private boolean candidateRootCreated() {
-            return candidateRootCreated.get();
+        private boolean candidateRootCreationAttempted() {
+            return candidateRootCreationAttempted.get();
         }
     }
 }
