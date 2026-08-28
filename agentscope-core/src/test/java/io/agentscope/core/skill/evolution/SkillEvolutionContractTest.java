@@ -35,13 +35,14 @@ class SkillEvolutionContractTest {
     void payloadIsDeeplyImmutableAndVersioned() {
         List<Object> nested = new ArrayList<>();
         nested.add("initial");
+        nested.add(null);
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("allowed", nested);
 
         SkillEvolutionPayload payload = new SkillEvolutionPayload("test.payload", 1, data);
         nested.add("changed");
 
-        assertEquals(List.of("initial"), payload.data().get("allowed"));
+        assertEquals(java.util.Arrays.asList("initial", null), payload.data().get("allowed"));
         assertThrows(UnsupportedOperationException.class, () -> payload.data().put("new", true));
         assertThrows(
                 IllegalArgumentException.class,
@@ -179,7 +180,7 @@ class SkillEvolutionContractTest {
     }
 
     @Test
-    void finalGateAlwaysRemovesDisclosedFeedback() {
+    void finalGateRejectsDisclosedFeedback() {
         assertThrows(
                 IllegalArgumentException.class,
                 () ->

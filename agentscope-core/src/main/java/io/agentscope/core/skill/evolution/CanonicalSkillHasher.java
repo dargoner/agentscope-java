@@ -143,7 +143,7 @@ final class CanonicalSkillHasher {
             for (int i = 0; i < list.size(); i++) {
                 copy.add(immutableJsonValue(list.get(i), name + "[" + i + "]"));
             }
-            return List.copyOf(copy);
+            return Collections.unmodifiableList(copy);
         }
         throw new IllegalArgumentException(name + " is not JSON-compatible");
     }
