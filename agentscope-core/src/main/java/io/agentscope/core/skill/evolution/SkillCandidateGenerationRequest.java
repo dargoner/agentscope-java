@@ -16,6 +16,8 @@
 package io.agentscope.core.skill.evolution;
 
 import io.agentscope.core.skill.AgentSkill;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -36,18 +38,33 @@ public record SkillCandidateGenerationRequest(
         if (type == SkillEvolutionType.RETIRE) {
             throw new IllegalArgumentException("RETIRE is not a candidate generation operation");
         }
-        sourceRefs = sourceRefs == null ? null : List.copyOf(sourceRefs);
-        sourceSkills = sourceSkills == null ? null : List.copyOf(sourceSkills);
         if (sourceRefs == null
                 || sourceSkills == null
                 || sourceRefs.stream().anyMatch(Objects::isNull)
                 || sourceSkills.stream().anyMatch(Objects::isNull)) {
             throw new IllegalArgumentException("sourceRefs and sourceSkills must not contain null");
         }
+        sourceRefs = List.copyOf(sourceRefs);
         if (sourceRefs.size() != sourceSkills.size()) {
             throw new IllegalArgumentException("sourceRefs and sourceSkills must have equal size");
         }
         validateSourceCount(type, sourceRefs.size());
+        if (type == SkillEvolutionType.MERGE
+                && new HashSet<>(sourceRefs).size() != sourceRefs.size()) {
+            throw new IllegalArgumentException("MERGE sourceRefs must be distinct");
+        }
+        List<AgentSkill> sourceSnapshots = new ArrayList<>(sourceSkills.size());
+        for (int i = 0; i < sourceSkills.size(); i++) {
+            AgentSkill snapshot = CanonicalSkillHasher.immutableSnapshot(sourceSkills.get(i));
+            SkillRevisionRef sourceRef = sourceRefs.get(i);
+            if (!SkillArtifactHasher.verify(
+                    snapshot, sourceRef.contentHashAlgorithm(), sourceRef.contentHash())) {
+                throw new IllegalArgumentException(
+                        "sourceRefs[" + i + "] does not match sourceSkills[" + i + "]");
+            }
+            sourceSnapshots.add(snapshot);
+        }
+        sourceSkills = List.copyOf(sourceSnapshots);
         previousCandidate = previousCandidate == null ? Optional.empty() : previousCandidate;
         if (iteration < 0) {
             throw new IllegalArgumentException("iteration must not be negative");
@@ -62,6 +79,10 @@ public record SkillCandidateGenerationRequest(
                         || previousCandidate.get().type() != type)) {
             throw new IllegalArgumentException(
                     "patch generation requires an earlier candidate of the same type");
+        }
+        if (previousCandidate.isPresent()
+                && !previousCandidate.get().sources().equals(sourceRefs)) {
+            throw new IllegalArgumentException("previousCandidate sources must match sourceRefs");
         }
         disclosedEvidence = disclosedEvidence == null ? null : List.copyOf(disclosedEvidence);
         if (disclosedEvidence == null || disclosedEvidence.stream().anyMatch(Objects::isNull)) {

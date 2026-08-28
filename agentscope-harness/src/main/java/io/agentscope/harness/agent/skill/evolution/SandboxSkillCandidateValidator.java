@@ -15,7 +15,7 @@
  */
 package io.agentscope.harness.agent.skill.evolution;
 
-import io.agentscope.core.skill.AgentSkill;
+import io.agentscope.core.skill.evolution.SkillArtifactMaterializer;
 import io.agentscope.core.skill.evolution.SkillCandidateArtifact;
 import io.agentscope.core.skill.evolution.SkillCandidateValidator;
 import io.agentscope.core.skill.evolution.SkillEvolutionPayload;
@@ -34,9 +34,12 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.IdentityHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
@@ -46,11 +49,14 @@ import reactor.core.scheduler.Schedulers;
 public final class SandboxSkillCandidateValidator implements SkillCandidateValidator {
 
     private static final int DEFAULT_MAX_FEEDBACK_CHARACTERS = 8_192;
+    private static final int CLEANUP_TIMEOUT_SECONDS = 10;
+    private static final String CANDIDATE_ROOT_PREFIX = ".agentscope-skill-validation-";
 
     private final Supplier<? extends Sandbox> sandboxFactory;
     private final boolean ownsSandbox;
     private final Scheduler blockingScheduler;
     private final int maxFeedbackCharacters;
+    private final Map<Sandbox, Integer> activeInvocations = new IdentityHashMap<>();
 
     /** Uses an externally owned sandbox and never shuts it down. */
     public SandboxSkillCandidateValidator(Sandbox sandbox) {
@@ -100,29 +106,34 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
                                 new IllegalArgumentException("candidate integrity check failed"));
                     }
                     return Mono.usingWhen(
-                            Mono.fromSupplier(sandboxFactory),
-                            sandbox -> execute(sandbox, candidate, request),
+                            Mono.fromSupplier(this::acquireInvocation),
+                            invocation -> execute(invocation, candidate, request),
                             this::cleanup,
-                            (sandbox, ignored) -> cleanup(sandbox),
+                            (invocation, ignored) -> cleanup(invocation),
                             this::cleanup);
                 });
     }
 
     private Mono<SkillValidationReport> execute(
-            Sandbox sandbox, SkillCandidateArtifact candidate, SkillValidationRequest request) {
+            ValidationInvocation invocation,
+            SkillCandidateArtifact candidate,
+            SkillValidationRequest request) {
         return Mono.fromCallable(
                         () -> {
-                            if (!sandbox.isRunning()) {
-                                sandbox.start();
-                            }
+                            Sandbox sandbox = invocation.sandbox();
+                            ensureRunning(invocation);
                             int timeoutSeconds = timeoutSeconds(request.timeout());
                             ExecResult materialized =
                                     sandbox.exec(
                                             null,
                                             materializeCommand(
-                                                    sandbox.getWorkspaceRoot(),
-                                                    candidate.candidate()),
+                                                    invocation.candidateRoot(),
+                                                    SkillArtifactMaterializer.materialize(
+                                                            candidate.candidate())),
                                             timeoutSeconds);
+                            if (materialized.ok()) {
+                                invocation.markCandidateRootCreated();
+                            }
                             if (!materialized.ok() || materialized.truncated()) {
                                 return report(
                                         candidate,
@@ -131,13 +142,13 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
                                         false,
                                         "候选技能写入隔离工作区失败");
                             }
-                            String candidateRoot =
-                                    normalizeRoot(sandbox.getWorkspaceRoot()) + "/skill-candidate";
                             String command =
-                                    "export SKILL_CANDIDATE_ROOT="
-                                            + shellQuote(candidateRoot)
-                                            + "; cd "
-                                            + shellQuote(candidateRoot)
+                                    "set -eu; candidate_root="
+                                            + shellQuote(invocation.candidateRoot())
+                                            + "; [ -d \"$candidate_root\" ]"
+                                            + "; [ ! -L \"$candidate_root\" ]"
+                                            + "; export SKILL_CANDIDATE_ROOT=\"$candidate_root\""
+                                            + "; cd \"$candidate_root\""
                                             + "; "
                                             + requiredCommand(request.validationSpec().data());
                             ExecResult result = executeValidation(sandbox, command, timeoutSeconds);
@@ -156,6 +167,24 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
                 .timeout(request.timeout());
     }
 
+    private ValidationInvocation acquireInvocation() {
+        Sandbox sandbox =
+                Objects.requireNonNull(sandboxFactory.get(), "sandboxFactory returned null");
+        synchronized (activeInvocations) {
+            activeInvocations.merge(sandbox, 1, Integer::sum);
+        }
+        return new ValidationInvocation(sandbox, CANDIDATE_ROOT_PREFIX + UUID.randomUUID());
+    }
+
+    private static void ensureRunning(ValidationInvocation invocation) throws Exception {
+        synchronized (invocation.sandbox()) {
+            if (!invocation.sandbox().isRunning()) {
+                invocation.sandbox().start();
+            }
+            invocation.initializeCandidateRoot(invocation.sandbox().getWorkspaceRoot());
+        }
+    }
+
     private static ExecResult executeValidation(Sandbox sandbox, String command, int timeoutSeconds)
             throws Exception {
         try {
@@ -166,33 +195,69 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
         }
     }
 
-    private Mono<Void> cleanup(Sandbox sandbox) {
+    private Mono<Void> cleanup(ValidationInvocation invocation) {
         return Mono.fromCallable(
                         () -> {
-                            Exception failure = null;
-                            try {
-                                sandbox.stop();
-                            } catch (Exception exception) {
-                                failure = exception;
-                            }
-                            if (ownsSandbox) {
-                                try {
-                                    sandbox.shutdown();
-                                } catch (Exception exception) {
-                                    if (failure == null) {
-                                        failure = exception;
-                                    } else {
-                                        failure.addSuppressed(exception);
-                                    }
-                                }
-                            }
-                            if (failure != null) {
-                                throw failure;
-                            }
+                            bestEffortDeleteCandidateRoot(invocation);
+                            cleanupSandboxIfLast(invocation.sandbox());
                             return true;
                         })
                 .subscribeOn(blockingScheduler)
                 .then();
+    }
+
+    private static void bestEffortDeleteCandidateRoot(ValidationInvocation invocation) {
+        if (!invocation.candidateRootCreated()) {
+            return;
+        }
+        try {
+            if (!invocation.sandbox().isRunning()) {
+                return;
+            }
+            String command =
+                    "set -eu; candidate_root="
+                            + shellQuote(invocation.candidateRoot())
+                            + "; if [ -L \"$candidate_root\" ]; then"
+                            + " rm -f -- \"$candidate_root\""
+                            + "; elif [ -e \"$candidate_root\" ]; then"
+                            + " rm -rf -- \"$candidate_root\""
+                            + "; fi";
+            invocation.sandbox().exec(null, command, CLEANUP_TIMEOUT_SECONDS);
+        } catch (Exception ignored) {
+            // Candidate directories are best-effort cleanup. Sandbox lifecycle cleanup still runs.
+        }
+    }
+
+    private void cleanupSandboxIfLast(Sandbox sandbox) throws Exception {
+        synchronized (activeInvocations) {
+            Integer count = activeInvocations.get(sandbox);
+            if (count != null && count > 1) {
+                activeInvocations.put(sandbox, count - 1);
+                return;
+            }
+            activeInvocations.remove(sandbox);
+
+            Exception failure = null;
+            try {
+                sandbox.stop();
+            } catch (Exception exception) {
+                failure = exception;
+            }
+            if (ownsSandbox) {
+                try {
+                    sandbox.shutdown();
+                } catch (Exception exception) {
+                    if (failure == null) {
+                        failure = exception;
+                    } else {
+                        failure.addSuppressed(exception);
+                    }
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        }
     }
 
     private SkillValidationReport report(
@@ -237,34 +302,65 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
                         : java.util.Optional.empty());
     }
 
-    private String materializeCommand(String workspaceRoot, AgentSkill skill) {
-        String targetRoot = normalizeRoot(workspaceRoot) + "/skill-candidate";
+    private String materializeCommand(String targetRoot, Map<String, byte[]> files) {
         StringBuilder command =
-                new StringBuilder("set -eu; mkdir -p ").append(shellQuote(targetRoot));
-        appendFile(command, targetRoot + "/SKILL.md", skill.getSkillContent());
-        skill.getResources().entrySet().stream()
+                new StringBuilder("set -eu; umask 077; candidate_root=")
+                        .append(shellQuote(targetRoot))
+                        .append(
+                                "; if [ -e \"$candidate_root\" ]"
+                                        + " || [ -L \"$candidate_root\" ]; then")
+                        .append(" echo 'candidate validation root already exists' >&2; exit 73; fi")
+                        .append("; mkdir -- \"$candidate_root\"")
+                        .append("; trap 'rm -rf -- \"$candidate_root\"' 0 1 2 15")
+                        .append("; [ -d \"$candidate_root\" ]")
+                        .append("; [ ! -L \"$candidate_root\" ]");
+        files.entrySet().stream()
                 .sorted(Map.Entry.comparingByKey())
                 .forEach(
                         entry -> {
-                            String relativePath = normalizeRelativePath(entry.getKey());
-                            String target = targetRoot + "/" + relativePath;
-                            int separator = target.lastIndexOf('/');
-                            command.append("; mkdir -p ")
-                                    .append(shellQuote(target.substring(0, separator)));
+                            String target = targetRoot + "/" + entry.getKey();
+                            appendSafeDirectories(command, targetRoot, entry.getKey());
                             appendFile(command, target, entry.getValue());
                         });
+        command.append("; trap - 0 1 2 15");
         return command.toString();
     }
 
-    private static void appendFile(StringBuilder command, String target, String content) {
-        String encoded =
-                Base64.getEncoder()
-                        .encodeToString(
-                                (content == null ? "" : content).getBytes(StandardCharsets.UTF_8));
-        command.append("; printf %s ")
+    private static void appendSafeDirectories(
+            StringBuilder command, String targetRoot, String relativePath) {
+        String[] parts = relativePath.split("/");
+        String current = targetRoot;
+        for (int index = 0; index < parts.length - 1; index++) {
+            current += "/" + parts[index];
+            command.append("; if [ ! -e ")
+                    .append(shellQuote(current))
+                    .append(" ] && [ ! -L ")
+                    .append(shellQuote(current))
+                    .append(" ]; then mkdir -- ")
+                    .append(shellQuote(current))
+                    .append("; fi; [ -d ")
+                    .append(shellQuote(current))
+                    .append(" ]; [ ! -L ")
+                    .append(shellQuote(current))
+                    .append(" ]");
+        }
+    }
+
+    private static void appendFile(StringBuilder command, String target, byte[] content) {
+        String encoded = Base64.getEncoder().encodeToString(content);
+        command.append("; [ ! -e ")
+                .append(shellQuote(target))
+                .append(" ]; [ ! -L ")
+                .append(shellQuote(target))
+                .append(" ]; printf %s ")
                 .append(shellQuote(encoded))
                 .append(" | base64 -d > ")
-                .append(shellQuote(target));
+                .append(shellQuote(target))
+                .append("; [ -f ")
+                .append(shellQuote(target))
+                .append(" ]; [ ! -L ")
+                .append(shellQuote(target))
+                .append(" ]");
     }
 
     private static String requiredCommand(Map<String, Object> validationSpec) {
@@ -300,23 +396,6 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
         return root.endsWith("/") ? root.substring(0, root.length() - 1) : root;
     }
 
-    private static String normalizeRelativePath(String value) {
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException("resource path must not be blank");
-        }
-        String path = value.replace('\\', '/');
-        while (path.startsWith("./")) {
-            path = path.substring(2);
-        }
-        if (path.startsWith("/")
-                || path.equals("..")
-                || path.startsWith("../")
-                || path.contains("/../")) {
-            throw new IllegalArgumentException("resource path must remain inside the candidate");
-        }
-        return path;
-    }
-
     private static String shellQuote(String value) {
         return "'" + value.replace("'", "'\"'\"'") + "'";
     }
@@ -333,6 +412,45 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
             return result.toString();
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 is unavailable", exception);
+        }
+    }
+
+    private static final class ValidationInvocation {
+
+        private final Sandbox sandbox;
+        private final String candidateDirectoryName;
+        private final AtomicBoolean candidateRootCreated = new AtomicBoolean();
+        private volatile String candidateRoot;
+
+        private ValidationInvocation(Sandbox sandbox, String candidateDirectoryName) {
+            this.sandbox = sandbox;
+            this.candidateDirectoryName = candidateDirectoryName;
+        }
+
+        private Sandbox sandbox() {
+            return sandbox;
+        }
+
+        private String candidateRoot() {
+            String resolved = candidateRoot;
+            if (resolved == null) {
+                throw new IllegalStateException("candidate root has not been initialized");
+            }
+            return resolved;
+        }
+
+        private void initializeCandidateRoot(String workspaceRoot) {
+            if (candidateRoot == null) {
+                candidateRoot = normalizeRoot(workspaceRoot) + "/" + candidateDirectoryName;
+            }
+        }
+
+        private void markCandidateRootCreated() {
+            candidateRootCreated.set(true);
+        }
+
+        private boolean candidateRootCreated() {
+            return candidateRootCreated.get();
         }
     }
 }

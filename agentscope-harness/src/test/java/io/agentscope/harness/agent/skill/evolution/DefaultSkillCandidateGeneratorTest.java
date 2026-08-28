@@ -60,7 +60,7 @@ class DefaultSkillCandidateGeneratorTest {
     @Test
     void refinePatchCarriesPreviousCandidateAndSanitizedFeedback() {
         AgentSkill sourceSkill = new AgentSkill("source", "source skill", "old", Map.of());
-        SkillRevisionRef sourceRef = revisionRef();
+        SkillRevisionRef sourceRef = revisionRef(sourceSkill);
         SkillCandidateArtifact previous =
                 SkillCandidateArtifact.create(
                         SkillEvolutionType.REFINE, List.of(sourceRef), sourceSkill, 0);
@@ -96,16 +96,18 @@ class DefaultSkillCandidateGeneratorTest {
         assertThrows(
                 IllegalArgumentException.class, () -> generator.generate(createRequest()).block());
 
+        AgentSkill sourceSkill = new AgentSkill("source", "source skill", "old", Map.of());
+        SkillRevisionRef sourceRef = revisionRef(sourceSkill);
         SkillCandidateGenerationRequest iterationOne =
                 new SkillCandidateGenerationRequest(
                         SkillEvolutionType.REFINE,
-                        List.of(revisionRef()),
-                        List.of(new AgentSkill("source", "source skill", "old", Map.of())),
+                        List.of(sourceRef),
+                        List.of(sourceSkill),
                         Optional.of(
                                 SkillCandidateArtifact.create(
                                         SkillEvolutionType.REFINE,
-                                        List.of(revisionRef()),
-                                        new AgentSkill("source", "source skill", "old", Map.of()),
+                                        List.of(sourceRef),
+                                        sourceSkill,
                                         0)),
                         List.of(),
                         Optional.empty(),
@@ -132,8 +134,9 @@ class DefaultSkillCandidateGeneratorTest {
                 "test.skill-evolution." + schema, Map.of(key, value));
     }
 
-    private static SkillRevisionRef revisionRef() {
-        return new SkillRevisionRef("source", "1", SkillArtifactHasher.ALGORITHM, "c".repeat(64));
+    private static SkillRevisionRef revisionRef(AgentSkill skill) {
+        return new SkillRevisionRef(
+                "source", "1", SkillArtifactHasher.ALGORITHM, SkillArtifactHasher.hash(skill));
     }
 
     private static String candidateJson(String name, String content) {

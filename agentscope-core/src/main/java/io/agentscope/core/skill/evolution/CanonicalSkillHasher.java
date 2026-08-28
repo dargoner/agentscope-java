@@ -16,17 +16,20 @@
 package io.agentscope.core.skill.evolution;
 
 import io.agentscope.core.skill.AgentSkill;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.TreeMap;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /** Package-owned canonicalization shared by all candidate construction paths. */
@@ -34,6 +37,7 @@ final class CanonicalSkillHasher {
 
     private static final Pattern SHA_256 = Pattern.compile("[0-9a-f]{64}");
     private static final int MAX_KEY_LENGTH = 128;
+    private static final int MAX_NESTING_DEPTH = 64;
     private static final List<String> PLATFORM_KEY_FRAGMENTS =
             List.of(
                     "taskid",
@@ -50,21 +54,37 @@ final class CanonicalSkillHasher {
     private CanonicalSkillHasher() {}
 
     static String hash(AgentSkill skill) {
-        Objects.requireNonNull(skill, "candidate must not be null");
+        return hashMaterialized(SkillArtifactMaterializer.materialize(immutableSnapshot(skill)));
+    }
+
+    static String hashMaterialized(Map<String, byte[]> files) {
+        Objects.requireNonNull(files, "files must not be null");
         MessageDigest digest = sha256();
-        update(digest, "skill-content");
-        update(digest, normalizeText(skill.getSkillContent()));
-        TreeMap<String, String> resources = new TreeMap<>();
-        skill.getResources()
-                .forEach(
-                        (path, content) ->
-                                resources.put(normalizePath(path), normalizeText(content)));
-        for (Map.Entry<String, String> entry : resources.entrySet()) {
-            update(digest, "resource");
-            update(digest, entry.getKey());
-            update(digest, entry.getValue());
-        }
+        update(digest, SkillArtifactHasher.ALGORITHM.getBytes(StandardCharsets.UTF_8));
+        files.forEach(
+                (path, content) -> {
+                    update(
+                            digest,
+                            requireText(path, "artifact file path")
+                                    .getBytes(StandardCharsets.UTF_8));
+                    update(
+                            digest,
+                            Objects.requireNonNull(
+                                    content, "artifact file content must not be null"));
+                });
         return hex(digest.digest());
+    }
+
+    static AgentSkill immutableSnapshot(AgentSkill skill) {
+        Objects.requireNonNull(skill, "skill must not be null");
+        Map<String, Object> metadata =
+                SkillArtifactMaterializer.canonicalMetadata(skill.getMetadata());
+        return new AgentSkill(
+                metadata,
+                skill.getSkillContent(),
+                skill.getResources(),
+                skill.getSource(),
+                skill.getOriginDir().orElse(null));
     }
 
     static String requireText(String value, String name) {
@@ -84,23 +104,49 @@ final class CanonicalSkillHasher {
 
     static Map<String, Object> immutableJsonMap(
             Map<String, Object> value, String name, boolean requireSchemaVersion) {
+        return immutableJsonMap(
+                value,
+                name,
+                requireSchemaVersion,
+                Collections.newSetFromMap(new IdentityHashMap<>()),
+                0);
+    }
+
+    private static Map<String, Object> immutableJsonMap(
+            Map<?, ?> value,
+            String name,
+            boolean requireSchemaVersion,
+            Set<Object> containersBeingCopied,
+            int depth) {
         if (value == null) {
             throw new IllegalArgumentException(name + " must not be null");
         }
-        LinkedHashMap<String, Object> result = new LinkedHashMap<>();
-        value.forEach(
-                (key, item) -> {
-                    String normalizedKey = requireText(key, name + " key");
-                    if (normalizedKey.length() > MAX_KEY_LENGTH) {
-                        throw new IllegalArgumentException(name + " key is too long");
-                    }
-                    rejectPlatformKey(normalizedKey);
-                    result.put(normalizedKey, immutableJsonValue(item, name + "." + normalizedKey));
-                });
-        if (requireSchemaVersion && !result.containsKey("schemaVersion")) {
-            throw new IllegalArgumentException(name + " must contain schemaVersion");
+        requireNestingDepth(depth, name);
+        if (!containersBeingCopied.add(value)) {
+            throw new IllegalArgumentException(name + " must not contain cycles");
         }
-        return Collections.unmodifiableMap(result);
+        try {
+            LinkedHashMap<String, Object> result = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : value.entrySet()) {
+                if (!(entry.getKey() instanceof String key)) {
+                    throw new IllegalArgumentException(name + " keys must be strings");
+                }
+                String validatedKey = requireJsonKey(key, name + " key");
+                result.put(
+                        validatedKey,
+                        immutableJsonValue(
+                                entry.getValue(),
+                                name + "." + validatedKey,
+                                containersBeingCopied,
+                                depth + 1));
+            }
+            if (requireSchemaVersion && !result.containsKey("schemaVersion")) {
+                throw new IllegalArgumentException(name + " must contain schemaVersion");
+            }
+            return Collections.unmodifiableMap(result);
+        } finally {
+            containersBeingCopied.remove(value);
+        }
     }
 
     static List<Map<String, Object>> immutableJsonMaps(
@@ -115,37 +161,79 @@ final class CanonicalSkillHasher {
         return List.copyOf(result);
     }
 
-    private static Object immutableJsonValue(Object value, String name) {
+    private static Object immutableJsonValue(
+            Object value, String name, Set<Object> containersBeingCopied, int depth) {
+        requireNestingDepth(depth, name);
         if (value == null || value instanceof String || value instanceof Boolean) {
             return value;
         }
         if (value instanceof Number number) {
+            return immutableJsonNumber(number, name);
+        }
+        if (value instanceof Map<?, ?> map) {
+            return immutableJsonMap(map, name, false, containersBeingCopied, depth);
+        }
+        if (value instanceof List<?> list) {
+            if (!containersBeingCopied.add(list)) {
+                throw new IllegalArgumentException(name + " must not contain cycles");
+            }
+            try {
+                List<Object> copy = new ArrayList<>(list.size());
+                for (int i = 0; i < list.size(); i++) {
+                    copy.add(
+                            immutableJsonValue(
+                                    list.get(i),
+                                    name + "[" + i + "]",
+                                    containersBeingCopied,
+                                    depth + 1));
+                }
+                return Collections.unmodifiableList(copy);
+            } finally {
+                containersBeingCopied.remove(list);
+            }
+        }
+        throw new IllegalArgumentException(name + " is not JSON-compatible");
+    }
+
+    private static void requireNestingDepth(int depth, String name) {
+        if (depth > MAX_NESTING_DEPTH) {
+            throw new IllegalArgumentException(
+                    name + " exceeds maximum nesting depth " + MAX_NESTING_DEPTH);
+        }
+    }
+
+    private static String requireJsonKey(String key, String name) {
+        String validated = requireText(key, name);
+        if (!validated.equals(key)) {
+            throw new IllegalArgumentException(name + " must not have surrounding whitespace");
+        }
+        if (validated.length() > MAX_KEY_LENGTH) {
+            throw new IllegalArgumentException(name + " is too long");
+        }
+        rejectPlatformKey(validated);
+        return validated;
+    }
+
+    private static Number immutableJsonNumber(Number number, String name) {
+        Objects.requireNonNull(number, name + " must not be null");
+        if (number instanceof BigDecimal
+                || number instanceof BigInteger
+                || number instanceof Byte
+                || number instanceof Short
+                || number instanceof Integer
+                || number instanceof Long) {
+            return number;
+        }
+        if (number instanceof Float || number instanceof Double) {
             requireFinite(number, name);
             return number;
         }
-        if (value instanceof Map<?, ?> map) {
-            LinkedHashMap<String, Object> copy = new LinkedHashMap<>();
-            map.forEach(
-                    (key, item) -> {
-                        if (!(key instanceof String stringKey)) {
-                            throw new IllegalArgumentException(name + " keys must be strings");
-                        }
-                        String normalizedKey = requireText(stringKey, name + " key");
-                        rejectPlatformKey(normalizedKey);
-                        copy.put(
-                                normalizedKey,
-                                immutableJsonValue(item, name + "." + normalizedKey));
-                    });
-            return Collections.unmodifiableMap(copy);
+        try {
+            return new BigDecimal(number.toString());
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(
+                    name + " is not a JSON-compatible number", exception);
         }
-        if (value instanceof List<?> list) {
-            List<Object> copy = new ArrayList<>(list.size());
-            for (int i = 0; i < list.size(); i++) {
-                copy.add(immutableJsonValue(list.get(i), name + "[" + i + "]"));
-            }
-            return Collections.unmodifiableList(copy);
-        }
-        throw new IllegalArgumentException(name + " is not JSON-compatible");
     }
 
     static void requireFinite(Number number, String name) {
@@ -166,27 +254,6 @@ final class CanonicalSkillHasher {
         }
     }
 
-    private static String normalizePath(String value) {
-        String path = requireText(value, "resource path").replace('\\', '/');
-        while (path.startsWith("./")) {
-            path = path.substring(2);
-        }
-        if (path.startsWith("/")
-                || path.equals("..")
-                || path.startsWith("../")
-                || path.contains("/../")) {
-            throw new IllegalArgumentException("resource path must be relative and normalized");
-        }
-        return path;
-    }
-
-    private static String normalizeText(String value) {
-        if (value == null) {
-            return "";
-        }
-        return value.replace("\r\n", "\n").replace('\r', '\n');
-    }
-
     private static MessageDigest sha256() {
         try {
             return MessageDigest.getInstance("SHA-256");
@@ -195,8 +262,7 @@ final class CanonicalSkillHasher {
         }
     }
 
-    private static void update(MessageDigest digest, String value) {
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+    private static void update(MessageDigest digest, byte[] bytes) {
         digest.update((byte) (bytes.length >>> 24));
         digest.update((byte) (bytes.length >>> 16));
         digest.update((byte) (bytes.length >>> 8));

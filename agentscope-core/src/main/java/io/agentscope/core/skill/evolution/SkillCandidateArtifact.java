@@ -16,6 +16,7 @@
 package io.agentscope.core.skill.evolution;
 
 import io.agentscope.core.skill.AgentSkill;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 
@@ -38,7 +39,10 @@ public record SkillCandidateArtifact(
             throw new IllegalArgumentException("sources must not contain null");
         }
         validateSourceCount(type, sources.size());
-        candidate = Objects.requireNonNull(candidate, "candidate must not be null");
+        if (type == SkillEvolutionType.MERGE && new HashSet<>(sources).size() != sources.size()) {
+            throw new IllegalArgumentException("MERGE sources must be distinct");
+        }
+        candidate = CanonicalSkillHasher.immutableSnapshot(candidate);
         if (iteration < 0) {
             throw new IllegalArgumentException("iteration must not be negative");
         }

@@ -26,7 +26,13 @@ public final class SkillArtifactHasher {
 
     private SkillArtifactHasher() {}
 
-    /** Returns the canonical hash of SKILL.md and all resources. */
+    /**
+     * Returns the canonical hash of every path and byte produced by {@link
+     * SkillArtifactMaterializer#materialize(AgentSkill)}.
+     *
+     * @throws IllegalArgumentException if metadata cannot be canonicalized or normalized resource
+     *     paths collide
+     */
     public static String hash(AgentSkill skill) {
         return CanonicalSkillHasher.hash(skill);
     }
