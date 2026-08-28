@@ -18,6 +18,7 @@ package io.agentscope.harness.agent.skill.evolution;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.evolution.SkillCandidateArtifact;
 import io.agentscope.core.skill.evolution.SkillCandidateValidator;
+import io.agentscope.core.skill.evolution.SkillEvolutionPayload;
 import io.agentscope.core.skill.evolution.SkillValidationReport;
 import io.agentscope.core.skill.evolution.SkillValidationRequest;
 import io.agentscope.core.skill.evolution.SkillValidationStage;
@@ -138,9 +139,10 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
                                             + "; cd "
                                             + shellQuote(candidateRoot)
                                             + "; "
-                                            + requiredCommand(request.validationSpec());
+                                            + requiredCommand(request.validationSpec().data());
                             ExecResult result = executeValidation(sandbox, command, timeoutSeconds);
-                            int expectedExitCode = expectedExitCode(request.validationSpec());
+                            int expectedExitCode =
+                                    expectedExitCode(request.validationSpec().data());
                             boolean passed =
                                     result.exitCode() == expectedExitCode && !result.truncated();
                             return report(
@@ -199,18 +201,21 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
             ExecResult result,
             boolean passed,
             String feedback) {
-        Map<String, Number> metrics =
-                Map.of(
-                        "exitCode",
-                        result.exitCode(),
-                        "outputTruncated",
-                        result.truncated() ? 1 : 0);
-        Map<String, Object> disclosed =
-                Map.of(
-                        "schemaVersion", 1,
-                        "summary", bounded(feedback),
-                        "exitCode", result.exitCode(),
-                        "outputTruncated", result.truncated());
+        SkillEvolutionPayload metrics =
+                SkillEvolutionPayload.versionOne(
+                        "agentscope.skill-evolution.validation-metrics",
+                        Map.of(
+                                "exitCode",
+                                result.exitCode(),
+                                "outputTruncated",
+                                result.truncated() ? 1 : 0));
+        SkillEvolutionPayload disclosed =
+                SkillEvolutionPayload.versionOne(
+                        "agentscope.skill-evolution.validation-feedback",
+                        Map.of(
+                                "summary", bounded(feedback),
+                                "exitCode", result.exitCode(),
+                                "outputTruncated", result.truncated()));
         String reportHash =
                 sha256(
                         candidate.contentHash()

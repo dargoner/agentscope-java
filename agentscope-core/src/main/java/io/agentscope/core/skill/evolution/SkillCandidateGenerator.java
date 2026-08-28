@@ -20,5 +20,8 @@ import reactor.core.publisher.Mono;
 /** Generates an immutable skill candidate without publishing it. */
 public interface SkillCandidateGenerator {
 
+    /** Compatibility version of the candidate generation and validation protocol. */
+    String CAPABILITY_VERSION = "1";
+
     Mono<SkillCandidateArtifact> generate(SkillCandidateGenerationRequest request);
 }

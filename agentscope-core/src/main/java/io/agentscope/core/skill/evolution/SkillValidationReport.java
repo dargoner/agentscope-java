@@ -15,9 +15,6 @@
  */
 package io.agentscope.core.skill.evolution;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -26,35 +23,25 @@ public record SkillValidationReport(
         SkillValidationStage stage,
         boolean passed,
         String reportHash,
-        Map<String, Number> metrics,
-        Optional<Map<String, Object>> disclosedFeedback) {
+        SkillEvolutionPayload metrics,
+        Optional<SkillEvolutionPayload> disclosedFeedback) {
 
     public SkillValidationReport {
         stage = Objects.requireNonNull(stage, "stage must not be null");
         reportHash = CanonicalSkillHasher.requireHash(reportHash, "reportHash");
-        if (metrics == null) {
-            throw new IllegalArgumentException("metrics must not be null");
-        }
-        LinkedHashMap<String, Number> metricsCopy = new LinkedHashMap<>();
-        metrics.forEach(
-                (key, value) -> {
-                    String normalizedKey = CanonicalSkillHasher.requireText(key, "metrics key");
-                    if (normalizedKey.length() > 128) {
-                        throw new IllegalArgumentException("metrics key is too long");
-                    }
-                    CanonicalSkillHasher.requireFinite(value, "metrics." + normalizedKey);
-                    metricsCopy.put(normalizedKey, value);
-                });
-        metrics = Collections.unmodifiableMap(metricsCopy);
-        disclosedFeedback =
-                disclosedFeedback == null
-                        ? Optional.empty()
-                        : disclosedFeedback.map(
-                                value ->
-                                        CanonicalSkillHasher.immutableJsonMap(
-                                                value, "disclosedFeedback", true));
-        if (stage == SkillValidationStage.FINAL_GATE) {
-            disclosedFeedback = Optional.empty();
+        metrics = Objects.requireNonNull(metrics, "metrics must not be null");
+        metrics.data()
+                .forEach(
+                        (key, value) -> {
+                            if (!(value instanceof Number number)) {
+                                throw new IllegalArgumentException(
+                                        "metrics." + key + " must be a number");
+                            }
+                            CanonicalSkillHasher.requireFinite(number, "metrics." + key);
+                        });
+        disclosedFeedback = disclosedFeedback == null ? Optional.empty() : disclosedFeedback;
+        if (stage == SkillValidationStage.FINAL_GATE && disclosedFeedback.isPresent()) {
+            throw new IllegalArgumentException("FINAL_GATE must not disclose feedback");
         }
     }
 }

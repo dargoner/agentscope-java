@@ -16,11 +16,13 @@
 package io.agentscope.core.skill.evolution;
 
 /** Immutable identity of a source skill revision. */
-public record SkillRevisionRef(String skillId, String revision, String contentHash) {
+public record SkillRevisionRef(
+        String skillId, String revision, String contentHashAlgorithm, String contentHash) {
 
     public SkillRevisionRef {
         skillId = CanonicalSkillHasher.requireText(skillId, "skillId");
         revision = CanonicalSkillHasher.requireText(revision, "revision");
+        contentHashAlgorithm = SkillArtifactHasher.requireSupportedAlgorithm(contentHashAlgorithm);
         contentHash = CanonicalSkillHasher.requireHash(contentHash, "contentHash");
     }
 }

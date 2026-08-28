@@ -16,21 +16,19 @@
 package io.agentscope.core.skill.evolution;
 
 import java.time.Duration;
-import java.util.Map;
 import java.util.Objects;
 
 /** Platform-neutral validation specification. */
 public record SkillValidationRequest(
         SkillValidationStage stage,
-        Map<String, Object> validationSpec,
-        Map<String, Object> constraints,
+        SkillEvolutionPayload validationSpec,
+        SkillEvolutionPayload constraints,
         Duration timeout) {
 
     public SkillValidationRequest {
         stage = Objects.requireNonNull(stage, "stage must not be null");
-        validationSpec =
-                CanonicalSkillHasher.immutableJsonMap(validationSpec, "validationSpec", true);
-        constraints = CanonicalSkillHasher.immutableJsonMap(constraints, "constraints", true);
+        validationSpec = Objects.requireNonNull(validationSpec, "validationSpec must not be null");
+        constraints = Objects.requireNonNull(constraints, "constraints must not be null");
         if (timeout == null || timeout.isZero() || timeout.isNegative()) {
             throw new IllegalArgumentException("timeout must be positive");
         }

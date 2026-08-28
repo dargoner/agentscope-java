@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.evolution.SkillCandidateArtifact;
+import io.agentscope.core.skill.evolution.SkillEvolutionPayload;
 import io.agentscope.core.skill.evolution.SkillEvolutionType;
 import io.agentscope.core.skill.evolution.SkillValidationReport;
 import io.agentscope.core.skill.evolution.SkillValidationRequest;
@@ -85,8 +86,8 @@ class SandboxSkillCandidateValidatorTest {
         SkillValidationRequest timeoutRequest =
                 new SkillValidationRequest(
                         SkillValidationStage.DEVELOPMENT,
-                        Map.of("schemaVersion", 1, "command", "verify"),
-                        Map.of("schemaVersion", 1),
+                        payload("validation-spec", Map.of("command", "verify")),
+                        payload("validation-constraints", Map.of()),
                         Duration.ofMillis(50));
 
         assertThrows(
@@ -125,12 +126,19 @@ class SandboxSkillCandidateValidatorTest {
     private static SkillValidationRequest request(SkillValidationStage stage) {
         return new SkillValidationRequest(
                 stage,
-                Map.of(
-                        "schemaVersion", 1,
-                        "command", "test -f SKILL.md && echo passed",
-                        "expectedExitCode", 0),
-                Map.of("schemaVersion", 1),
+                payload(
+                        "validation-spec",
+                        Map.of(
+                                "command",
+                                "test -f SKILL.md && echo passed",
+                                "expectedExitCode",
+                                0)),
+                payload("validation-constraints", Map.of()),
                 Duration.ofSeconds(2));
+    }
+
+    private static SkillEvolutionPayload payload(String schema, Map<String, Object> data) {
+        return SkillEvolutionPayload.versionOne("test.skill-evolution." + schema, data);
     }
 
     private static String rootMessage(Throwable throwable) {

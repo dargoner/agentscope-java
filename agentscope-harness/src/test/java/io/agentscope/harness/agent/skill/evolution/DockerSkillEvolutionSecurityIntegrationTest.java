@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.core.skill.AgentSkill;
 import io.agentscope.core.skill.evolution.SkillCandidateArtifact;
+import io.agentscope.core.skill.evolution.SkillEvolutionPayload;
 import io.agentscope.core.skill.evolution.SkillEvolutionType;
 import io.agentscope.core.skill.evolution.SkillValidationReport;
 import io.agentscope.core.skill.evolution.SkillValidationRequest;
@@ -76,11 +77,10 @@ class DockerSkillEvolutionSecurityIntegrationTest {
         SkillValidationRequest timeout =
                 new SkillValidationRequest(
                         SkillValidationStage.DEVELOPMENT,
-                        Map.of(
-                                "schemaVersion", 1,
-                                "command", "while :; do :; done",
-                                "expectedExitCode", 0),
-                        Map.of("schemaVersion", 1),
+                        payload(
+                                "validation-spec",
+                                Map.of("command", "while :; do :; done", "expectedExitCode", 0)),
+                        payload("validation-constraints", Map.of()),
                         Duration.ofMillis(300));
 
         assertThrows(
@@ -139,9 +139,13 @@ class DockerSkillEvolutionSecurityIntegrationTest {
     private static SkillValidationRequest request(String command) {
         return new SkillValidationRequest(
                 SkillValidationStage.FINAL_GATE,
-                Map.of("schemaVersion", 1, "command", command, "expectedExitCode", 0),
-                Map.of("schemaVersion", 1),
+                payload("validation-spec", Map.of("command", command, "expectedExitCode", 0)),
+                payload("validation-constraints", Map.of()),
                 Duration.ofSeconds(15));
+    }
+
+    private static SkillEvolutionPayload payload(String schema, Map<String, Object> data) {
+        return SkillEvolutionPayload.versionOne("test.skill-evolution." + schema, data);
     }
 
     private static int sandboxContainerCount() throws Exception {

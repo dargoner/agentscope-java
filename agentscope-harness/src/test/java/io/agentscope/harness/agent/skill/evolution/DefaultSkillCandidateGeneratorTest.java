@@ -26,8 +26,10 @@ import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ToolSchema;
 import io.agentscope.core.skill.AgentSkill;
+import io.agentscope.core.skill.evolution.SkillArtifactHasher;
 import io.agentscope.core.skill.evolution.SkillCandidateArtifact;
 import io.agentscope.core.skill.evolution.SkillCandidateGenerationRequest;
+import io.agentscope.core.skill.evolution.SkillEvolutionPayload;
 import io.agentscope.core.skill.evolution.SkillEvolutionType;
 import io.agentscope.core.skill.evolution.SkillRevisionRef;
 import java.util.List;
@@ -58,7 +60,7 @@ class DefaultSkillCandidateGeneratorTest {
     @Test
     void refinePatchCarriesPreviousCandidateAndSanitizedFeedback() {
         AgentSkill sourceSkill = new AgentSkill("source", "source skill", "old", Map.of());
-        SkillRevisionRef sourceRef = new SkillRevisionRef("source", "1", "c".repeat(64));
+        SkillRevisionRef sourceRef = revisionRef();
         SkillCandidateArtifact previous =
                 SkillCandidateArtifact.create(
                         SkillEvolutionType.REFINE, List.of(sourceRef), sourceSkill, 0);
@@ -70,10 +72,10 @@ class DefaultSkillCandidateGeneratorTest {
                         List.of(sourceRef),
                         List.of(sourceSkill),
                         Optional.of(previous),
-                        List.of(versioned("failureType", "FORMAT")),
-                        Optional.of(versioned("suggestion", "repair")),
+                        List.of(payload("evidence", "failureType", "FORMAT")),
+                        Optional.of(payload("feedback", "suggestion", "repair")),
                         1,
-                        versioned("language", "zh-CN"));
+                        payload("constraints", "language", "zh-CN"));
 
         SkillCandidateArtifact patched = generator.generate(request).block();
 
@@ -97,20 +99,18 @@ class DefaultSkillCandidateGeneratorTest {
         SkillCandidateGenerationRequest iterationOne =
                 new SkillCandidateGenerationRequest(
                         SkillEvolutionType.REFINE,
-                        List.of(new SkillRevisionRef("source", "1", "c".repeat(64))),
+                        List.of(revisionRef()),
                         List.of(new AgentSkill("source", "source skill", "old", Map.of())),
                         Optional.of(
                                 SkillCandidateArtifact.create(
                                         SkillEvolutionType.REFINE,
-                                        List.of(
-                                                new SkillRevisionRef(
-                                                        "source", "1", "c".repeat(64))),
+                                        List.of(revisionRef()),
                                         new AgentSkill("source", "source skill", "old", Map.of()),
                                         0)),
                         List.of(),
                         Optional.empty(),
                         1,
-                        versioned("language", "zh-CN"));
+                        payload("constraints", "language", "zh-CN"));
         assertThrows(
                 IllegalArgumentException.class, () -> generator.generate(iterationOne).block());
     }
@@ -121,14 +121,19 @@ class DefaultSkillCandidateGeneratorTest {
                 List.of(),
                 List.of(),
                 Optional.empty(),
-                List.of(versioned("failureType", "MISSING_FORMAT")),
+                List.of(payload("evidence", "failureType", "MISSING_FORMAT")),
                 Optional.empty(),
                 0,
-                versioned("language", "zh-CN"));
+                payload("constraints", "language", "zh-CN"));
     }
 
-    private static Map<String, Object> versioned(String key, Object value) {
-        return Map.of("schemaVersion", 1, key, value);
+    private static SkillEvolutionPayload payload(String schema, String key, Object value) {
+        return SkillEvolutionPayload.versionOne(
+                "test.skill-evolution." + schema, Map.of(key, value));
+    }
+
+    private static SkillRevisionRef revisionRef() {
+        return new SkillRevisionRef("source", "1", SkillArtifactHasher.ALGORITHM, "c".repeat(64));
     }
 
     private static String candidateJson(String name, String content) {

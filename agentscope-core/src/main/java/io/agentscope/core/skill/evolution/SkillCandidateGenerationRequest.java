@@ -17,7 +17,6 @@ package io.agentscope.core.skill.evolution;
 
 import io.agentscope.core.skill.AgentSkill;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -27,10 +26,10 @@ public record SkillCandidateGenerationRequest(
         List<SkillRevisionRef> sourceRefs,
         List<AgentSkill> sourceSkills,
         Optional<SkillCandidateArtifact> previousCandidate,
-        List<Map<String, Object>> disclosedEvidence,
-        Optional<Map<String, Object>> disclosedFeedback,
+        List<SkillEvolutionPayload> disclosedEvidence,
+        Optional<SkillEvolutionPayload> disclosedFeedback,
         int iteration,
-        Map<String, Object> constraints) {
+        SkillEvolutionPayload constraints) {
 
     public SkillCandidateGenerationRequest {
         type = Objects.requireNonNull(type, "type must not be null");
@@ -64,16 +63,12 @@ public record SkillCandidateGenerationRequest(
             throw new IllegalArgumentException(
                     "patch generation requires an earlier candidate of the same type");
         }
-        disclosedEvidence =
-                CanonicalSkillHasher.immutableJsonMaps(disclosedEvidence, "disclosedEvidence");
-        disclosedFeedback =
-                disclosedFeedback == null
-                        ? Optional.empty()
-                        : disclosedFeedback.map(
-                                value ->
-                                        CanonicalSkillHasher.immutableJsonMap(
-                                                value, "disclosedFeedback", true));
-        constraints = CanonicalSkillHasher.immutableJsonMap(constraints, "constraints", true);
+        disclosedEvidence = disclosedEvidence == null ? null : List.copyOf(disclosedEvidence);
+        if (disclosedEvidence == null || disclosedEvidence.stream().anyMatch(Objects::isNull)) {
+            throw new IllegalArgumentException("disclosedEvidence must not contain null");
+        }
+        disclosedFeedback = disclosedFeedback == null ? Optional.empty() : disclosedFeedback;
+        constraints = Objects.requireNonNull(constraints, "constraints must not be null");
     }
 
     private static void validateSourceCount(SkillEvolutionType type, int sourceCount) {

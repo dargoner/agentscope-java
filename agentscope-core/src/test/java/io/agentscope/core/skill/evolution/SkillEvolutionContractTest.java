@@ -21,34 +21,34 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.core.skill.AgentSkill;
-import java.lang.reflect.Modifier;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class SkillEvolutionContractTest {
 
     @Test
-    void stageOnePublicApiIsFrozenToNineTypes() {
-        Set<Class<?>> publicTypes =
-                Set.of(
-                        SkillEvolutionType.class,
-                        SkillRevisionRef.class,
-                        SkillCandidateArtifact.class,
-                        SkillCandidateGenerationRequest.class,
-                        SkillCandidateGenerator.class,
-                        SkillValidationStage.class,
-                        SkillValidationRequest.class,
-                        SkillValidationReport.class,
-                        SkillCandidateValidator.class);
+    void payloadIsDeeplyImmutableAndVersioned() {
+        List<Object> nested = new ArrayList<>();
+        nested.add("initial");
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("allowed", nested);
 
-        assertEquals(9, publicTypes.size());
-        assertTrue(publicTypes.stream().allMatch(type -> Modifier.isPublic(type.getModifiers())));
+        SkillEvolutionPayload payload = new SkillEvolutionPayload("test.payload", 1, data);
+        nested.add("changed");
+
+        assertEquals(List.of("initial"), payload.data().get("allowed"));
+        assertThrows(UnsupportedOperationException.class, () -> payload.data().put("new", true));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new SkillEvolutionPayload("Invalid Schema", 1, Map.of()));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new SkillEvolutionPayload("test.payload", 0, Map.of()));
     }
 
     @Test
@@ -91,7 +91,12 @@ class SkillEvolutionContractTest {
                 IllegalArgumentException.class,
                 () ->
                         new SkillCandidateArtifact(
-                                SkillEvolutionType.CREATE, List.of(), changed, validHash, 0));
+                                SkillEvolutionType.CREATE,
+                                List.of(),
+                                changed,
+                                SkillArtifactHasher.ALGORITHM,
+                                validHash,
+                                0));
     }
 
     @Test
@@ -110,7 +115,7 @@ class SkillEvolutionContractTest {
     void sourceCardinalityAndPatchIterationAreEnforced() {
         SkillRevisionRef source = revision("source");
         AgentSkill sourceSkill = skill("source");
-        Map<String, Object> constraints = versionedMap();
+        SkillEvolutionPayload constraints = payload("constraints");
 
         assertThrows(
                 IllegalArgumentException.class,
@@ -134,8 +139,8 @@ class SkillEvolutionContractTest {
                         List.of(source),
                         List.of(sourceSkill),
                         Optional.of(previous),
-                        List.of(versionedMap()),
-                        Optional.of(versionedMap()),
+                        List.of(payload("evidence")),
+                        Optional.of(payload("feedback")),
                         1,
                         constraints);
 
@@ -144,11 +149,11 @@ class SkillEvolutionContractTest {
     }
 
     @Test
-    void requestMapsAreDeeplyImmutableAndRejectPlatformFields() {
+    void requestPayloadsRejectPlatformFields() {
         List<Object> nested = new ArrayList<>();
         nested.add("initial");
-        Map<String, Object> constraints = versionedMap();
-        constraints.put("allowed", nested);
+        Map<String, Object> constraintData = new LinkedHashMap<>();
+        constraintData.put("allowed", nested);
         SkillCandidateGenerationRequest request =
                 new SkillCandidateGenerationRequest(
                         SkillEvolutionType.CREATE,
@@ -158,40 +163,32 @@ class SkillEvolutionContractTest {
                         List.of(),
                         Optional.empty(),
                         0,
-                        constraints);
+                        new SkillEvolutionPayload("test.constraints", 1, constraintData));
         nested.add("changed");
 
-        assertEquals(List.of("initial"), request.constraints().get("allowed"));
+        assertEquals(List.of("initial"), request.constraints().data().get("allowed"));
         assertThrows(
-                UnsupportedOperationException.class, () -> request.constraints().put("new", true));
+                UnsupportedOperationException.class,
+                () -> request.constraints().data().put("new", true));
 
-        Map<String, Object> invalid = versionedMap();
+        Map<String, Object> invalid = new LinkedHashMap<>();
         invalid.put("workspace_id", "forbidden");
         assertThrows(
                 IllegalArgumentException.class,
-                () ->
-                        new SkillCandidateGenerationRequest(
-                                SkillEvolutionType.CREATE,
-                                List.of(),
-                                List.of(),
-                                Optional.empty(),
-                                List.of(),
-                                Optional.empty(),
-                                0,
-                                invalid));
+                () -> new SkillEvolutionPayload("test.constraints", 1, invalid));
     }
 
     @Test
     void finalGateAlwaysRemovesDisclosedFeedback() {
-        SkillValidationReport report =
-                new SkillValidationReport(
-                        SkillValidationStage.FINAL_GATE,
-                        false,
-                        "a".repeat(64),
-                        Map.of("score", 0.4),
-                        Optional.of(versionedMap()));
-
-        assertTrue(report.disclosedFeedback().isEmpty());
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        new SkillValidationReport(
+                                SkillValidationStage.FINAL_GATE,
+                                false,
+                                "a".repeat(64),
+                                metrics(0.4),
+                                Optional.of(payload("feedback"))));
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
@@ -199,7 +196,8 @@ class SkillEvolutionContractTest {
                                 SkillValidationStage.DEVELOPMENT,
                                 false,
                                 "b".repeat(64),
-                                Map.of("score", Double.NaN),
+                                new SkillEvolutionPayload(
+                                        "test.metrics", 1, Map.of("score", "not-a-number")),
                                 Optional.empty()));
     }
 
@@ -210,17 +208,12 @@ class SkillEvolutionContractTest {
                 () ->
                         new SkillValidationRequest(
                                 SkillValidationStage.DEVELOPMENT,
-                                Map.of("schemaVersion", 1),
-                                Map.of("schemaVersion", 1),
+                                payload("validation-spec"),
+                                payload("validation-constraints"),
                                 Duration.ZERO));
         assertThrows(
                 IllegalArgumentException.class,
-                () ->
-                        new SkillValidationRequest(
-                                SkillValidationStage.DEVELOPMENT,
-                                Map.of(),
-                                Map.of("schemaVersion", 1),
-                                Duration.ofSeconds(1)));
+                () -> new SkillEvolutionPayload("test.payload", 1, Map.of("score", Double.NaN)));
     }
 
     private static AgentSkill skill(String content) {
@@ -228,13 +221,15 @@ class SkillEvolutionContractTest {
     }
 
     private static SkillRevisionRef revision(String skillId) {
-        return new SkillRevisionRef(skillId, "1", "c".repeat(64));
+        return new SkillRevisionRef(skillId, "1", SkillArtifactHasher.ALGORITHM, "c".repeat(64));
     }
 
-    private static Map<String, Object> versionedMap() {
-        Map<String, Object> value = new LinkedHashMap<>();
-        value.put("schemaVersion", 1);
-        return value;
+    private static SkillEvolutionPayload payload(String name) {
+        return SkillEvolutionPayload.versionOne("test." + name, Map.of());
+    }
+
+    private static SkillEvolutionPayload metrics(double score) {
+        return SkillEvolutionPayload.versionOne("test.metrics", Map.of("score", score));
     }
 
     private static Map<String, String> linkedResources(String... values) {

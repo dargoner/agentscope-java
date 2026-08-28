@@ -15,6 +15,7 @@
  */
 package io.agentscope.harness.agent.skill.evolution.internal;
 
+import io.agentscope.core.skill.evolution.SkillEvolutionPayload;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,15 +29,17 @@ public final class DevelopmentFeedbackSanitizer {
     private DevelopmentFeedbackSanitizer() {}
 
     /** Returns a bounded copy without changing the caller-owned value. */
-    public static Map<String, Object> sanitize(Map<String, Object> feedback) {
-        if (feedback == null || feedback.isEmpty()) {
-            return Map.of();
+    public static SkillEvolutionPayload sanitize(SkillEvolutionPayload feedback) {
+        if (feedback == null || feedback.data().isEmpty()) {
+            return SkillEvolutionPayload.versionOne(
+                    "agentscope.skill-evolution.feedback", Map.of());
         }
         LinkedHashMap<String, Object> result = new LinkedHashMap<>();
-        feedback.entrySet().stream()
+        feedback.data().entrySet().stream()
                 .limit(MAX_ENTRIES)
                 .forEach(entry -> result.put(entry.getKey(), sanitizeValue(entry.getValue())));
-        return Map.copyOf(result);
+        return new SkillEvolutionPayload(
+                feedback.schemaId(), feedback.schemaVersion(), Map.copyOf(result));
     }
 
     private static Object sanitizeValue(Object value) {

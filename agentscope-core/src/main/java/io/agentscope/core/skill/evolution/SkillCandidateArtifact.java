@@ -24,6 +24,7 @@ public record SkillCandidateArtifact(
         SkillEvolutionType type,
         List<SkillRevisionRef> sources,
         AgentSkill candidate,
+        String contentHashAlgorithm,
         String contentHash,
         int iteration) {
 
@@ -41,9 +42,9 @@ public record SkillCandidateArtifact(
         if (iteration < 0) {
             throw new IllegalArgumentException("iteration must not be negative");
         }
+        contentHashAlgorithm = SkillArtifactHasher.requireSupportedAlgorithm(contentHashAlgorithm);
         contentHash = CanonicalSkillHasher.requireHash(contentHash, "contentHash");
-        String actualHash = CanonicalSkillHasher.hash(candidate);
-        if (!actualHash.equals(contentHash)) {
+        if (!SkillArtifactHasher.verify(candidate, contentHashAlgorithm, contentHash)) {
             throw new IllegalArgumentException("contentHash does not match candidate content");
         }
     }
@@ -55,12 +56,17 @@ public record SkillCandidateArtifact(
             AgentSkill candidate,
             int iteration) {
         return new SkillCandidateArtifact(
-                type, sources, candidate, CanonicalSkillHasher.hash(candidate), iteration);
+                type,
+                sources,
+                candidate,
+                SkillArtifactHasher.ALGORITHM,
+                SkillArtifactHasher.hash(candidate),
+                iteration);
     }
 
     /** Recomputes and verifies the canonical content hash. */
     public boolean verifyIntegrity() {
-        return contentHash.equals(CanonicalSkillHasher.hash(candidate));
+        return SkillArtifactHasher.verify(candidate, contentHashAlgorithm, contentHash);
     }
 
     private static void validateSourceCount(SkillEvolutionType type, int sourceCount) {
