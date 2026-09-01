@@ -32,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -99,7 +100,11 @@ public class DockerSandbox extends AbstractBaseSandbox {
     @Override
     public void shutdown() throws Exception {
         String containerId = dockerState.getContainerId();
-        if (containerId == null || containerId.isBlank()) {
+        String containerReference =
+                containerId == null || containerId.isBlank()
+                        ? dockerState.getContainerName()
+                        : containerId;
+        if (containerReference == null || containerReference.isBlank()) {
             return;
         }
         if (!dockerState.isContainerOwned()) {
@@ -108,29 +113,10 @@ public class DockerSandbox extends AbstractBaseSandbox {
                     containerId);
             return;
         }
-        try {
-            runDockerCliBlocking(
-                    CONTAINER_STOP_TIMEOUT_SECONDS * 2,
-                    "docker",
-                    "stop",
-                    "--time=" + CONTAINER_STOP_TIMEOUT_SECONDS,
-                    containerId);
-            log.debug("[sandbox-docker] Container stopped: {}", containerId);
-        } catch (Exception e) {
-            log.warn(
-                    "[sandbox-docker] Failed to stop container {}: {}",
-                    containerId,
-                    e.getMessage());
-        }
-        try {
-            runDockerCliBlocking(30, "docker", "rm", "--force", containerId);
-            log.debug("[sandbox-docker] Container removed: {}", containerId);
-        } catch (Exception e) {
-            log.warn(
-                    "[sandbox-docker] Failed to remove container {}: {}",
-                    containerId,
-                    e.getMessage());
-        }
+        removeOwnedContainer(containerReference, true);
+        dockerState.setContainerId(null);
+        dockerState.setContainerName(null);
+        log.debug("[sandbox-docker] Container removed: {}", containerReference);
     }
 
     @Override
@@ -142,51 +128,92 @@ public class DockerSandbox extends AbstractBaseSandbox {
         ProcessBuilder pb = new ProcessBuilder(buildExecCommand(containerId, workspaceRoot));
         Process process = pb.start();
 
-        ExecutorService drainer =
-                Executors.newFixedThreadPool(
-                        2,
-                        r -> {
-                            Thread t =
-                                    new Thread(
-                                            r,
-                                            "sandbox-docker-drain-" + dockerState.getSessionId());
-                            t.setDaemon(true);
-                            return t;
-                        });
+        return executeProcess(
+                process,
+                command,
+                timeoutSeconds,
+                "sandbox-docker-drain-" + dockerState.getSessionId());
+    }
 
-        Future<String> stdoutFuture =
-                drainer.submit(() -> readStream(process.getInputStream(), OUTPUT_TRUNCATE_BYTES));
-        Future<String> stderrFuture =
-                drainer.submit(() -> readStream(process.getErrorStream(), OUTPUT_TRUNCATE_BYTES));
-        drainer.shutdown();
+    static ExecResult executeProcess(
+            Process process, String command, int timeoutSeconds, String drainerThreadName)
+            throws Exception {
+        Objects.requireNonNull(process, "process must not be null");
+        ExecutorService drainer = null;
+        try {
+            Objects.requireNonNull(command, "command must not be null");
+            Objects.requireNonNull(drainerThreadName, "drainerThreadName must not be null");
+            drainer =
+                    Executors.newFixedThreadPool(
+                            2,
+                            r -> {
+                                Thread t = new Thread(r, drainerThreadName);
+                                t.setDaemon(true);
+                                return t;
+                            });
+            Future<String> stdoutFuture =
+                    drainer.submit(
+                            () -> readStream(process.getInputStream(), OUTPUT_TRUNCATE_BYTES));
+            Future<String> stderrFuture =
+                    drainer.submit(
+                            () -> readStream(process.getErrorStream(), OUTPUT_TRUNCATE_BYTES));
+            drainer.shutdown();
 
-        try (OutputStream stdin = process.getOutputStream()) {
-            writeShellProgram(stdin, command);
-        } catch (IOException e) {
+            try (OutputStream stdin = process.getOutputStream()) {
+                writeShellProgram(stdin, command);
+            }
+
+            boolean exited = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+            if (!exited) {
+                throw new SandboxException.ExecTimeoutException(command, timeoutSeconds);
+            }
+
+            String stdout = stdoutFuture.get();
+            String stderr = stderrFuture.get();
+            int exitCode = process.exitValue();
+
+            boolean truncated =
+                    stdout.length() >= OUTPUT_TRUNCATE_BYTES
+                            || stderr.length() >= OUTPUT_TRUNCATE_BYTES;
+            ExecResult result = new ExecResult(exitCode, stdout, stderr, truncated);
+            if (!result.ok()) {
+                throw new SandboxException.ExecException(exitCode, stdout, stderr);
+            }
+            return result;
+        } catch (Exception | Error failure) {
+            terminateProcess(process);
+            throw failure;
+        } finally {
+            if (drainer != null) {
+                drainer.shutdownNow();
+            }
+        }
+    }
+
+    static void terminateProcess(Process process) {
+        boolean interrupted = false;
+        if (process.isAlive()) {
+            process.destroy();
+        }
+        long gracefulDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(250);
+        long forcedDeadline = gracefulDeadline + TimeUnit.SECONDS.toNanos(2);
+        while (process.isAlive() && System.nanoTime() < forcedDeadline) {
+            if (System.nanoTime() >= gracefulDeadline) {
+                process.destroyForcibly();
+            }
+            try {
+                process.waitFor(50, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException exception) {
+                interrupted = true;
+                process.destroyForcibly();
+            }
+        }
+        if (process.isAlive()) {
             process.destroyForcibly();
-            drainer.shutdownNow();
-            throw e;
         }
-
-        boolean exited = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-        if (!exited) {
-            process.destroyForcibly();
-            drainer.shutdownNow();
-            throw new SandboxException.ExecTimeoutException(command, timeoutSeconds);
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
-
-        String stdout = stdoutFuture.get();
-        String stderr = stderrFuture.get();
-        int exitCode = process.exitValue();
-
-        boolean truncated =
-                stdout.length() >= OUTPUT_TRUNCATE_BYTES
-                        || stderr.length() >= OUTPUT_TRUNCATE_BYTES;
-        ExecResult result = new ExecResult(exitCode, stdout, stderr, truncated);
-        if (!result.ok()) {
-            throw new SandboxException.ExecException(exitCode, stdout, stderr);
-        }
-        return result;
     }
 
     static List<String> buildExecCommand(String containerId, String workspaceRoot) {
@@ -428,13 +455,34 @@ public class DockerSandbox extends AbstractBaseSandbox {
                 drainer.submit(() -> readStream(process.getErrorStream(), 64 * 1024));
         drainer.shutdown();
 
-        boolean exited = process.waitFor(CONTAINER_START_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        boolean exited;
+        try {
+            exited = process.waitFor(CONTAINER_START_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
+            try {
+                removeOwnedContainer(containerName, true);
+            } catch (Exception cleanupFailure) {
+                interrupted.addSuppressed(cleanupFailure);
+            }
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        }
         if (!exited) {
             process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
             drainer.shutdownNow();
-            throw new SandboxException.SandboxRuntimeException(
-                    SandboxErrorCode.WORKSPACE_START_ERROR,
-                    "docker run timed out for image: " + dockerState.getImage());
+            SandboxException.SandboxRuntimeException timeout =
+                    new SandboxException.SandboxRuntimeException(
+                            SandboxErrorCode.WORKSPACE_START_ERROR,
+                            "docker run timed out for image: " + dockerState.getImage());
+            try {
+                removeOwnedContainer(containerName, true);
+            } catch (Exception cleanupFailure) {
+                timeout.addSuppressed(cleanupFailure);
+            }
+            throw timeout;
         }
 
         int exitCode = process.exitValue();
@@ -619,6 +667,20 @@ public class DockerSandbox extends AbstractBaseSandbox {
             throw new SandboxException.SandboxRuntimeException(
                     SandboxErrorCode.WORKSPACE_START_ERROR,
                     "docker command failed (exit=" + exitCode + "): " + stderr);
+        }
+    }
+
+    private void removeOwnedContainer(String containerReference, boolean allowMissing)
+            throws Exception {
+        try {
+            runDockerCliBlocking(30, "docker", "rm", "--force", containerReference);
+        } catch (SandboxException.SandboxRuntimeException exception) {
+            if (allowMissing
+                    && exception.getMessage() != null
+                    && exception.getMessage().contains("No such container")) {
+                return;
+            }
+            throw exception;
         }
     }
 

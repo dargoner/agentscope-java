@@ -2707,13 +2707,13 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                 // (e.g. a reasoning model that wrote its whole answer into the
                                 // reasoning channel and left the content channel empty). Loop
                                 // back to reasoning with a synthetic reminder.
-                                if (!hasToolCalls(eventMsg)) {
+                                boolean emptyFinalResponse = !hasToolCalls(eventMsg);
+                                if (emptyFinalResponse) {
                                     log.warn(
                                             "Final response has no visible content (empty reply),"
                                                     + " model: {}, iter: {}",
                                             model.getModelName(),
                                             iter);
-                                    state.contextMutable().add(buildEmptyResponseReminder());
                                 }
 
                                 // Continue to acting
@@ -2728,6 +2728,11 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                                 Mono.defer(
                                                         () -> {
                                                             state.contextMutable().add(eventMsg);
+                                                            if (emptyFinalResponse) {
+                                                                state.contextMutable()
+                                                                        .add(
+                                                                                buildEmptyResponseReminder());
+                                                            }
                                                             return acting(iter);
                                                         }));
                             })
