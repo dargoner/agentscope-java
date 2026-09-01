@@ -486,6 +486,14 @@ public class HarnessAgent implements Agent, AutoCloseable {
                                 io.agentscope.harness.agent.memory.session.SessionTree
                                         .awaitMirrorQuiescence(
                                                 5, java.util.concurrent.TimeUnit.SECONDS));
+        // Drain fire-and-forget memory flush/maintenance so async memory/*.md writes do not
+        // race with resource cleanup (e.g., temp workspace deletion in tests).
+        failure =
+                closeAndAccumulate(
+                        failure,
+                        () ->
+                                io.agentscope.harness.agent.memory.MemoryBackgroundTasks
+                                        .awaitQuiescence(5, java.util.concurrent.TimeUnit.SECONDS));
         failure = closeAndAccumulate(failure, this::shutdownTaskRepository);
         failure = closeAndAccumulate(failure, ownedSandboxClient);
         failure = closeAndAccumulate(failure, ownedWorkspaceIndex);
