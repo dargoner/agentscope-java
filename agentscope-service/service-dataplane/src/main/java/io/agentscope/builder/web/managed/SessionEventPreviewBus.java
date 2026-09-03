@@ -24,8 +24,9 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
 /**
- * Process-local stream-only preview bus for {@code event_start} / {@code event_delta}. Never
- * persisted; best-effort and sticky to the turn-owner JVM (see DATA_PLANE_CONTRACT §3).
+ * Process-local stream-only preview bus for {@code event_start}, {@code event_delta} and {@code
+ * event_update}. Never persisted; best-effort and sticky to the turn-owner JVM (see
+ * DATA_PLANE_CONTRACT §3).
  */
 @Component
 public class SessionEventPreviewBus {
@@ -50,6 +51,18 @@ public class SessionEventPreviewBus {
         emit(sessionId, SessionEventTypes.EVENT_DELTA, payload);
     }
 
+    /** Emits an {@code event_update} frame with lifecycle or authoritative result attributes. */
+    public void emitUpdate(
+            String sessionId, String targetType, String eventId, Map<String, Object> attributes) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("event_id", eventId);
+        payload.put("type", targetType);
+        if (attributes != null) {
+            payload.putAll(attributes);
+        }
+        emit(sessionId, SessionEventTypes.EVENT_UPDATE, payload);
+    }
+
     /** Publishes a mapper preview frame when the subscriber opted into {@code targetType}. */
     public void emitFrame(
             String sessionId, SessionEventMapper.PreviewFrame frame, Set<String> enabledTypes) {
@@ -58,8 +71,10 @@ public class SessionEventPreviewBus {
         }
         if (SessionEventTypes.EVENT_START.equals(frame.streamType())) {
             emitStart(sessionId, frame.targetType(), frame.eventId());
-        } else {
+        } else if (SessionEventTypes.EVENT_DELTA.equals(frame.streamType())) {
             emitDelta(sessionId, frame.targetType(), frame.eventId(), frame.delta());
+        } else if (SessionEventTypes.EVENT_UPDATE.equals(frame.streamType())) {
+            emitUpdate(sessionId, frame.targetType(), frame.eventId(), frame.attributes());
         }
     }
 
