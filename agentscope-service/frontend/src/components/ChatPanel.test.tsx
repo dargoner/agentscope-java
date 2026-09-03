@@ -15,12 +15,16 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { renderToStaticMarkup } from 'react-dom/server';
 import type { SessionEvent } from '../api/managedSessions';
 import {
+  applyAssistantFrameToHistory,
   applyChatFrame,
   chatDisplayBlocks,
   createChatDisplayState,
+  restoreChatHistory,
 } from './ChatPanel';
+import MessageBlock from './MessageBlock';
 
 function frame(
   id: string,
@@ -51,13 +55,20 @@ function updateFrame(eventId: string, attributes: Record<string, unknown>): Sess
   return frame(
     `update-${eventId}`,
     'event_update',
-    { event_id: eventId, type: 'agent.message' },
-    attributes,
+    { event_id: eventId, type: 'agent.message', ...attributes },
   );
 }
 
 function persistedAgentMessage(eventId: string, text: string): SessionEvent {
   return frame(eventId, 'agent.message', { text });
+}
+
+function persistedToolUse(eventId: string, toolId: string, toolName: string): SessionEvent {
+  return frame(eventId, 'agent.tool_use', {
+    id: toolId,
+    name: toolName,
+    input: { city: 'Hangzhou' },
+  });
 }
 
 describe('chat display state', () => {
@@ -107,5 +118,77 @@ describe('chat display state', () => {
     expect(state.thinkingSegments['thinking-1'].text).toBe('checking');
     expect(state.toolExecutions['tool-1'].text).toBe('{"city":"Hangzhou"}');
     expect(state.finalAnswer).toBeUndefined();
+  });
+
+  it('settles a terminal preview without treating it as the final answer', () => {
+    let state = createChatDisplayState();
+    state = applyChatFrame(state, startFrame('preview-terminal'));
+    state = applyChatFrame(state, deltaFrame('preview-terminal', 'candidate'));
+    state = applyChatFrame(state, updateFrame('preview-terminal', {
+      disposition: 'TERMINAL',
+      generateReason: 'MODEL_STOP',
+    }));
+
+    expect(state.pendingSegments['preview-terminal'].pending).toBe(false);
+    expect(state.finalAnswer).toBeUndefined();
+    expect(chatDisplayBlocks(state)).toEqual([
+      expect.objectContaining({
+        id: 'preview-terminal',
+        presentation: 'preview',
+        text: 'candidate',
+      }),
+    ]);
+  });
+
+  it('continues a restored tool turn in the same assistant message', () => {
+    const history = restoreChatHistory([
+      frame('user-1', 'user.message', { text: 'weather?' }),
+      persistedToolUse('tool-event-1', 'tool-call-1', 'weather'),
+    ]);
+
+    expect(history.openMessageId).toBe('tool-event-1-turn');
+    expect(history.messages).toHaveLength(2);
+
+    const resumed = applyAssistantFrameToHistory(
+      history,
+      deltaFrame('answer-preview', 'It is sunny.'),
+    );
+
+    expect(resumed.messages).toHaveLength(2);
+    expect(resumed.messages[1].id).toBe('tool-event-1-turn');
+    expect(resumed.messages[1].displayState?.toolExecutions['tool-call-1'].toolName)
+      .toBe('weather');
+    expect(resumed.messages[1].displayState?.pendingSegments['answer-preview'].text)
+      .toBe('It is sunny.');
+  });
+
+  it('preserves wire order and presentation across repeated reply segments and tools', () => {
+    let state = createChatDisplayState();
+    state = applyChatFrame(state, deltaFrame('reply-1', 'checking'));
+    state = applyChatFrame(state, updateFrame('reply-1', { disposition: 'INTERMEDIATE' }));
+    state = applyChatFrame(state, startFrame('tool-preview-1', 'agent.tool_use'));
+    state = applyChatFrame(state, persistedToolUse('tool-preview-1', 'tool-call-1', 'lookup'));
+    state = applyChatFrame(state, deltaFrame('reply-1', 'writing'));
+    state = applyChatFrame(state, updateFrame('reply-1', { disposition: 'INTERMEDIATE' }));
+    state = applyChatFrame(state, deltaFrame('reply-1', 'answer'));
+    state = applyChatFrame(state, persistedAgentMessage('reply-1', 'final answer'));
+
+    const blocks = chatDisplayBlocks(state);
+    expect(blocks.map(block => [block.presentation ?? 'tool', block.text])).toEqual([
+      ['commentary', 'checking'],
+      ['tool', ''],
+      ['commentary', 'writing'],
+      ['final', 'final answer'],
+    ]);
+    expect(new Set(blocks.map(block => block.id)).size).toBe(blocks.length);
+
+    const html = renderToStaticMarkup(
+      <MessageBlock role="assistant" blocks={blocks} defaultOpen />,
+    );
+    expect(html).toContain('Commentary');
+    expect(html).toContain('Final answer');
+    expect(html.indexOf('checking')).toBeLessThan(html.indexOf('lookup'));
+    expect(html.indexOf('lookup')).toBeLessThan(html.indexOf('writing'));
+    expect(html.indexOf('writing')).toBeLessThan(html.indexOf('final answer'));
   });
 });

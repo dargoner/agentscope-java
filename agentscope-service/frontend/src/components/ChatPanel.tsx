@@ -31,7 +31,7 @@ import MessageBlock, { ContentBlock } from './MessageBlock';
 
 type Role = 'user' | 'assistant' | 'system' | 'error';
 
-interface Message {
+export interface Message {
   id: string;
   role: Role;
   blocks: ContentBlock[];
@@ -49,7 +49,9 @@ interface PendingConfirmation {
 
 export interface ChatTextSegment {
   id: string;
+  sourceId: string;
   text: string;
+  pending: boolean;
 }
 
 export interface ChatToolExecution {
@@ -59,12 +61,24 @@ export interface ChatToolExecution {
   result?: string;
 }
 
+export type ChatTextPresentation = 'commentary' | 'thinking' | 'pending' | 'preview' | 'final';
+
+export interface ChatDisplayEntry {
+  key: string;
+  kind: 'text' | 'tool';
+  refId: string;
+  presentation?: ChatTextPresentation;
+}
+
 export interface ChatDisplayState {
   pendingSegments: Record<string, ChatTextSegment>;
   commentarySegments: Record<string, ChatTextSegment>;
   thinkingSegments: Record<string, ChatTextSegment>;
   toolExecutions: Record<string, ChatToolExecution>;
   finalAnswer?: ChatTextSegment;
+  displayOrder: ChatDisplayEntry[];
+  activePendingSegmentIds: Record<string, string>;
+  nextSequence: number;
 }
 
 export function createChatDisplayState(): ChatDisplayState {
@@ -73,18 +87,64 @@ export function createChatDisplayState(): ChatDisplayState {
     commentarySegments: {},
     thinkingSegments: {},
     toolExecutions: {},
+    displayOrder: [],
+    activePendingSegmentIds: {},
+    nextSequence: 1,
   };
 }
 
-function appendText(
-  segments: Record<string, ChatTextSegment>,
-  id: string,
-  delta: string,
-): Record<string, ChatTextSegment> {
+function cloneDisplayState(state: ChatDisplayState): ChatDisplayState {
   return {
-    ...segments,
-    [id]: { id, text: `${segments[id]?.text ?? ''}${delta}` },
+    ...state,
+    pendingSegments: { ...state.pendingSegments },
+    commentarySegments: { ...state.commentarySegments },
+    thinkingSegments: { ...state.thinkingSegments },
+    toolExecutions: { ...state.toolExecutions },
+    displayOrder: [...state.displayOrder],
+    activePendingSegmentIds: { ...state.activePendingSegmentIds },
   };
+}
+
+function uniqueDisplayKey(state: ChatDisplayState, preferred: string): string {
+  if (!state.displayOrder.some(entry => entry.key === preferred)) return preferred;
+  let key: string;
+  do {
+    key = `${preferred}:${state.nextSequence++}`;
+  } while (state.displayOrder.some(entry => entry.key === key));
+  return key;
+}
+
+function ensurePendingSegment(state: ChatDisplayState, sourceId: string): string {
+  const activeId = state.activePendingSegmentIds[sourceId];
+  if (activeId && state.pendingSegments[activeId]) return activeId;
+  const segmentId = uniqueDisplayKey(state, sourceId);
+  state.pendingSegments[segmentId] = {
+    id: segmentId,
+    sourceId,
+    text: '',
+    pending: true,
+  };
+  state.activePendingSegmentIds[sourceId] = segmentId;
+  state.displayOrder.push({
+    key: segmentId,
+    kind: 'text',
+    refId: segmentId,
+    presentation: 'pending',
+  });
+  return segmentId;
+}
+
+function ensureToolExecution(state: ChatDisplayState, eventId: string): ChatToolExecution {
+  const existing = state.toolExecutions[eventId];
+  if (existing) return existing;
+  const execution = { id: eventId, toolName: 'tool', text: '' };
+  state.toolExecutions[eventId] = execution;
+  state.displayOrder.push({
+    key: uniqueDisplayKey(state, eventId),
+    kind: 'tool',
+    refId: eventId,
+  });
+  return execution;
 }
 
 /** Applies one persisted event or stream-only preview frame to the current assistant turn. */
@@ -96,23 +156,14 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
   if (event.type === 'event_start') {
     if (!eventId) return state;
     if (targetType === 'agent.message') {
-      return {
-        ...state,
-        pendingSegments: {
-          ...state.pendingSegments,
-          [eventId]: state.pendingSegments[eventId] ?? { id: eventId, text: '' },
-        },
-      };
+      const next = cloneDisplayState(state);
+      ensurePendingSegment(next, eventId);
+      return next;
     }
     if (targetType === 'agent.tool_use') {
-      return {
-        ...state,
-        toolExecutions: {
-          ...state.toolExecutions,
-          [eventId]: state.toolExecutions[eventId]
-            ?? { id: eventId, toolName: 'tool', text: '' },
-        },
-      };
+      const next = cloneDisplayState(state);
+      ensureToolExecution(next, eventId);
+      return next;
     }
     return state;
   }
@@ -121,25 +172,44 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
     const delta = payload.delta != null ? String(payload.delta) : '';
     if (!eventId || !delta) return state;
     if (targetType === 'agent.message') {
-      return { ...state, pendingSegments: appendText(state.pendingSegments, eventId, delta) };
+      const next = cloneDisplayState(state);
+      const segmentId = ensurePendingSegment(next, eventId);
+      next.pendingSegments[segmentId] = {
+        ...next.pendingSegments[segmentId],
+        text: `${next.pendingSegments[segmentId].text}${delta}`,
+        pending: true,
+      };
+      return next;
     }
     if (targetType === 'agent.thinking') {
-      return { ...state, thinkingSegments: appendText(state.thinkingSegments, eventId, delta) };
+      const next = cloneDisplayState(state);
+      const existing = next.thinkingSegments[eventId];
+      if (!existing) {
+        next.thinkingSegments[eventId] = {
+          id: eventId,
+          sourceId: eventId,
+          text: delta,
+          pending: true,
+        };
+        next.displayOrder.push({
+          key: uniqueDisplayKey(next, eventId),
+          kind: 'text',
+          refId: eventId,
+          presentation: 'thinking',
+        });
+      } else {
+        next.thinkingSegments[eventId] = { ...existing, text: `${existing.text}${delta}` };
+      }
+      return next;
     }
     if (targetType === 'agent.tool_use') {
-      const current = state.toolExecutions[eventId];
-      return {
-        ...state,
-        toolExecutions: {
-          ...state.toolExecutions,
-          [eventId]: {
-            id: eventId,
-            toolName: current?.toolName ?? 'tool',
-            text: `${current?.text ?? ''}${delta}`,
-            result: current?.result,
-          },
-        },
+      const next = cloneDisplayState(state);
+      const current = ensureToolExecution(next, eventId);
+      next.toolExecutions[eventId] = {
+        ...current,
+        text: `${current.text ?? ''}${delta}`,
       };
+      return next;
     }
     return state;
   }
@@ -147,53 +217,94 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
   if (event.type === 'event_update' && targetType === 'agent.message' && eventId) {
     const attributes = { ...payload, ...(event.attributes ?? {}) };
     if (attributes.disposition === 'INTERMEDIATE') {
-      const pending = state.pendingSegments[eventId];
+      const segmentId = state.activePendingSegmentIds[eventId];
+      const pending = segmentId ? state.pendingSegments[segmentId] : undefined;
       if (!pending) return state;
-      const pendingSegments = { ...state.pendingSegments };
-      delete pendingSegments[eventId];
-      return {
-        ...state,
-        pendingSegments,
-        commentarySegments: appendText(
-          state.commentarySegments,
-          eventId,
-          pending.text,
-        ),
-      };
+      const next = cloneDisplayState(state);
+      delete next.pendingSegments[segmentId];
+      delete next.activePendingSegmentIds[eventId];
+      next.commentarySegments[segmentId] = { ...pending, pending: false };
+      next.displayOrder = next.displayOrder.map(entry => entry.refId === segmentId
+        ? { ...entry, presentation: 'commentary' }
+        : entry);
+      return next;
+    }
+    if (attributes.disposition === 'TERMINAL') {
+      const segmentId = state.activePendingSegmentIds[eventId];
+      const pending = segmentId ? state.pendingSegments[segmentId] : undefined;
+      if (!pending) return state;
+      const next = cloneDisplayState(state);
+      next.pendingSegments[segmentId] = { ...pending, pending: false };
+      delete next.activePendingSegmentIds[eventId];
+      next.displayOrder = next.displayOrder.map(entry => entry.refId === segmentId
+        ? { ...entry, presentation: 'preview' }
+        : entry);
+      return next;
     }
     if (attributes.authoritative === true && attributes.hasOutput === false) {
-      if (!state.pendingSegments[eventId]) return state;
-      const pendingSegments = { ...state.pendingSegments };
-      delete pendingSegments[eventId];
-      return { ...state, pendingSegments };
+      const removedIds = Object.values(state.pendingSegments)
+        .filter(segment => segment.sourceId === eventId)
+        .map(segment => segment.id);
+      if (removedIds.length === 0) return state;
+      const next = cloneDisplayState(state);
+      for (const id of removedIds) delete next.pendingSegments[id];
+      delete next.activePendingSegmentIds[eventId];
+      next.displayOrder = next.displayOrder.filter(entry => !removedIds.includes(entry.refId));
+      return next;
     }
     return state;
   }
 
   if (event.type === 'agent.message') {
     const text = payloadText(event.payload);
-    const pendingSegments = { ...state.pendingSegments };
-    delete pendingSegments[event.id];
-    return {
-      ...state,
-      pendingSegments,
-      finalAnswer: text ? { id: event.id, text } : undefined,
-    };
+    const next = cloneDisplayState(state);
+    const removedEntries = next.displayOrder.filter(entry => {
+      const segment = next.pendingSegments[entry.refId];
+      return segment?.sourceId === event.id;
+    });
+    const insertionIndex = removedEntries.length > 0
+      ? next.displayOrder.findIndex(entry => entry.key === removedEntries[0].key)
+      : next.displayOrder.length;
+    const removedIds = Object.values(next.pendingSegments)
+      .filter(segment => segment.sourceId === event.id)
+      .map(segment => segment.id);
+    for (const id of removedIds) delete next.pendingSegments[id];
+    delete next.activePendingSegmentIds[event.id];
+    next.displayOrder = next.displayOrder.filter(entry =>
+      !removedIds.includes(entry.refId) && entry.presentation !== 'final');
+    next.finalAnswer = text
+      ? { id: event.id, sourceId: event.id, text, pending: false }
+      : undefined;
+    if (next.finalAnswer) {
+      const key = removedEntries[0]?.key ?? uniqueDisplayKey(next, `final-${event.id}`);
+      next.displayOrder.splice(insertionIndex, 0, {
+        key,
+        kind: 'text',
+        refId: event.id,
+        presentation: 'final',
+      });
+    }
+    return next;
   }
 
   if (event.type === 'agent.tool_use') {
     const toolId = String(payload.id ?? payload.toolCallId ?? payload.toolUseId ?? event.id);
     if (!toolId) return state;
-    const preview = state.toolExecutions[event.id];
-    const toolExecutions = { ...state.toolExecutions };
-    if (event.id !== toolId) delete toolExecutions[event.id];
-    toolExecutions[toolId] = {
+    const next = cloneDisplayState(state);
+    const preview = next.toolExecutions[event.id];
+    if (!preview) ensureToolExecution(next, event.id);
+    const source = preview ?? next.toolExecutions[event.id];
+    if (event.id !== toolId) delete next.toolExecutions[event.id];
+    next.toolExecutions[toolId] = {
       id: toolId,
-      toolName: String(payload.name ?? payload.toolName ?? preview?.toolName ?? 'tool'),
-      text: preview?.text ?? (payload.input != null ? JSON.stringify(payload.input) : undefined),
-      result: preview?.result,
+      toolName: String(payload.name ?? payload.toolName ?? source?.toolName ?? 'tool'),
+      text: source?.text ?? (payload.input != null ? JSON.stringify(payload.input) : undefined),
+      result: source?.result,
     };
-    return { ...state, toolExecutions };
+    next.displayOrder = next.displayOrder.map(entry => entry.kind === 'tool' && entry.refId === event.id
+      ? { ...entry, refId: toolId }
+      : entry);
+    return next;
   }
 
   if (event.type === 'agent.tool_result') {
@@ -214,32 +325,33 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
 }
 
 export function chatDisplayBlocks(state: ChatDisplayState): ContentBlock[] {
-  const commentary = Object.values(state.commentarySegments).map(segment => ({
-    kind: 'text' as const,
-    id: `commentary-${segment.id}`,
-    text: segment.text,
-  }));
-  const thinking = Object.values(state.thinkingSegments).map(segment => ({
-    kind: 'text' as const,
-    id: `thinking-${segment.id}`,
-    text: segment.text,
-  }));
-  const tools = Object.values(state.toolExecutions).map(tool => ({
-    kind: 'tool' as const,
-    id: tool.id,
-    toolName: tool.toolName,
-    text: tool.text,
-    result: tool.result,
-  }));
-  const pending = Object.values(state.pendingSegments).map(segment => ({
-    kind: 'text' as const,
-    id: `pending-${segment.id}`,
-    text: segment.text,
-  }));
-  const finalAnswer = state.finalAnswer
-    ? [{ kind: 'text' as const, id: `final-${state.finalAnswer.id}`, text: state.finalAnswer.text }]
-    : [];
-  return [...commentary, ...thinking, ...tools, ...pending, ...finalAnswer];
+  return state.displayOrder.flatMap<ContentBlock>(entry => {
+    if (entry.kind === 'tool') {
+      const tool = state.toolExecutions[entry.refId];
+      return tool ? [{
+        kind: 'tool' as const,
+        id: tool.id,
+        renderKey: entry.key,
+        toolName: tool.toolName,
+        text: tool.text,
+        result: tool.result,
+      }] : [];
+    }
+    const segment = entry.presentation === 'commentary'
+      ? state.commentarySegments[entry.refId]
+      : entry.presentation === 'thinking'
+        ? state.thinkingSegments[entry.refId]
+        : entry.presentation === 'final'
+          ? state.finalAnswer
+          : state.pendingSegments[entry.refId];
+    return segment ? [{
+      kind: 'text' as const,
+      id: entry.key,
+      sourceId: segment.sourceId,
+      text: segment.text,
+      presentation: entry.presentation,
+    }] : [];
+  });
 }
 
 const NEAR_BOTTOM_PX = 96;
@@ -323,7 +435,12 @@ function errorText(evt: SessionEvent): string {
   return `${label} ${message || 'Session turn failed'}`.trim();
 }
 
-function eventsToMessages(events: SessionEvent[]): Message[] {
+export interface ChatHistoryState {
+  messages: Message[];
+  openMessageId: string | null;
+}
+
+export function restoreChatHistory(events: SessionEvent[]): ChatHistoryState {
   const out: Message[] = [];
   // Index of the current assistant turn bubble; content appends into it until
   // a status/error event closes the turn.
@@ -355,7 +472,12 @@ function eventsToMessages(events: SessionEvent[]): Message[] {
     } else if (evt.type === 'agent.message') {
       const text = payloadText(evt.payload);
       if (text) {
-        ensureOpen(evt.id).blocks.push({ kind: 'text', id: evt.id, text });
+        ensureOpen(evt.id).blocks.push({
+          kind: 'text',
+          id: evt.id,
+          text,
+          presentation: 'final',
+        });
       }
     } else if (evt.type === 'agent.tool_use') {
       ensureOpen(evt.id).blocks.push({
@@ -396,7 +518,96 @@ function eventsToMessages(events: SessionEvent[]): Message[] {
       }
     }
   }
-  return out;
+  const openMessage = open >= 0 ? out[open] : undefined;
+  if (openMessage?.role === 'assistant') {
+    const displayState = createChatDisplayState();
+    for (const block of openMessage.blocks) {
+      if (block.kind === 'tool') {
+        displayState.toolExecutions[block.id] = {
+          id: block.id,
+          toolName: block.toolName ?? 'tool',
+          text: block.text,
+          result: block.result,
+        };
+        displayState.displayOrder.push({
+          key: uniqueDisplayKey(displayState, block.renderKey ?? block.id),
+          kind: 'tool',
+          refId: block.id,
+        });
+      } else if (block.text) {
+        displayState.finalAnswer = {
+          id: block.id,
+          sourceId: block.sourceId ?? block.id,
+          text: block.text,
+          pending: false,
+        };
+        displayState.displayOrder.push({
+          key: uniqueDisplayKey(displayState, block.id),
+          kind: 'text',
+          refId: block.id,
+          presentation: 'final',
+        });
+      }
+    }
+    openMessage.blocks = [];
+    openMessage.displayState = displayState;
+  }
+  return {
+    messages: out,
+    openMessageId: openMessage?.role === 'assistant' ? openMessage.id : null,
+  };
+}
+
+export function applyAssistantFrameToHistory(
+  history: ChatHistoryState,
+  event: SessionEvent,
+): ChatHistoryState {
+  const current = history.openMessageId
+    ? history.messages.find(message => message.id === history.openMessageId && !message.closed)
+    : undefined;
+  const displayState = applyChatFrame(
+    current?.displayState ?? createChatDisplayState(),
+    event,
+  );
+  const displayBlocks = chatDisplayBlocks(displayState);
+  const attributes = { ...(event.payload ?? {}), ...(event.attributes ?? {}) };
+  const settled = event.type === 'agent.message'
+    || (event.type === 'event_update'
+      && (attributes.disposition === 'TERMINAL'
+        || (attributes.authoritative === true && attributes.hasOutput === false)));
+
+  if (current) {
+    if (displayBlocks.length === 0 && current.blocks.length === 0) {
+      return {
+        messages: history.messages.filter(message => message.id !== current.id),
+        openMessageId: null,
+      };
+    }
+    return {
+      messages: history.messages.map(message => message.id === current.id
+        ? {
+            ...message,
+            displayState,
+            pending: settled ? false : event.type.startsWith('event_') ? true : message.pending,
+          }
+        : message),
+      openMessageId: current.id,
+    };
+  }
+
+  if (displayBlocks.length === 0) return history;
+  const seedId = String(event.payload?.event_id ?? event.id ?? nextId());
+  const messageId = `${seedId}-turn`;
+  return {
+    messages: [...history.messages, {
+      id: messageId,
+      role: 'assistant',
+      blocks: [],
+      displayState,
+      pending: !settled,
+    }],
+    openMessageId: messageId,
+  };
 }
 
 function extractConfirmation(evt: SessionEvent): PendingConfirmation | null {
@@ -516,46 +727,12 @@ export default function ChatPanel({
       return prev.map(m => (m.id === id ? { ...m, pending: false, closed: true } : m));
     };
     const updateDisplay = (prev: Message[]): Message[] => {
-      const currentId = openMsgIdRef.current;
-      const current = currentId
-        ? prev.find(message => message.id === currentId && !message.closed)
-        : undefined;
-      const displayState = applyChatFrame(
-        current?.displayState ?? createChatDisplayState(),
+      const next = applyAssistantFrameToHistory(
+        { messages: prev, openMessageId: openMsgIdRef.current },
         evt,
       );
-      const displayBlocks = chatDisplayBlocks(displayState);
-      const attributes = { ...(evt.payload ?? {}), ...(evt.attributes ?? {}) };
-      const settled = evt.type === 'agent.message'
-        || (evt.type === 'event_update'
-          && attributes.authoritative === true
-          && attributes.hasOutput === false);
-
-      if (current) {
-        if (displayBlocks.length === 0 && current.blocks.length === 0) {
-          openMsgIdRef.current = null;
-          return prev.filter(message => message.id !== current.id);
-        }
-        return prev.map(message => message.id === current.id
-          ? {
-              ...message,
-              displayState,
-              pending: settled ? false : evt.type.startsWith('event_') ? true : message.pending,
-            }
-          : message);
-      }
-
-      if (displayBlocks.length === 0) return prev;
-      const seedId = String(evt.payload?.event_id ?? evt.id ?? nextId());
-      const messageId = `${seedId}-turn`;
-      openMsgIdRef.current = messageId;
-      return [...prev, {
-        id: messageId,
-        role: 'assistant',
-        blocks: [],
-        displayState,
-        pending: !settled,
-      }];
+      openMsgIdRef.current = next.openMessageId;
+      return next.messages;
     };
 
     if (evt.type === 'event_start'
@@ -673,7 +850,9 @@ export default function ChatPanel({
             lastSeqRef.current = e.seq;
           }
         }
-        setMessages(eventsToMessages(events));
+        const history = restoreChatHistory(events);
+        openMsgIdRef.current = history.openMessageId;
+        setMessages(history.messages);
         streamHandleRef.current = streamEvents(
           sessionId,
           evt => { if (!cancelled) handleManagedEvent(evt); },
