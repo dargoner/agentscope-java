@@ -25,6 +25,7 @@ import io.agentscope.builder.web.managed.service.DeletedSessionRegistry;
 import io.agentscope.builder.web.managed.service.SessionEventLog;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentEventStreams;
 import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.message.GenerateReason;
 import io.agentscope.core.message.Msg;
@@ -270,7 +271,8 @@ public class SessionTurnRunner {
                                         .build()));
         RuntimeContext rc = rcBuilder.build();
 
-        Flux<AgentEvent> stream = agent.streamEvents(inputMsgs, rc);
+        Flux<AgentEvent> stream =
+                AgentEventStreams.withTextOutputDisposition(agent.streamEvents(inputMsgs, rc));
 
         previewIdsBySession.put(session.id(), new SessionEventMapper.PreviewIds());
         startedPreviewTypes.put(session.id(), ConcurrentHashMap.newKeySet());
@@ -352,11 +354,14 @@ public class SessionTurnRunner {
      * @return {@code true} when the event indicates {@link GenerateReason#TOOL_SUSPENDED}
      */
     private boolean handleAgentEvent(String sessionId, AgentEvent event) {
-        if (event instanceof AgentResultEvent result
-                && result.getResult() != null
-                && result.getResult().getGenerateReason() == GenerateReason.TOOL_SUSPENDED) {
+        boolean suspended =
+                event instanceof AgentResultEvent result
+                        && event.getSource() == null
+                        && result.getResult() != null
+                        && result.getResult().getGenerateReason() == GenerateReason.TOOL_SUSPENDED;
+        if (suspended) {
+            AgentResultEvent result = (AgentResultEvent) event;
             persistSuspendedToolUses(sessionId, result.getResult());
-            return true;
         }
 
         SessionEventMapper.PreviewIds ids =
@@ -369,17 +374,35 @@ public class SessionTurnRunner {
                             Set<String> started =
                                     startedPreviewTypes.computeIfAbsent(
                                             sessionId, ignored -> ConcurrentHashMap.newKeySet());
-                            if (started.add(frame.targetType() + ":" + frame.eventId())) {
-                                previewBus.emitStart(
-                                        sessionId, frame.targetType(), frame.eventId());
-                            }
-                            // null delta = start-only announcement (e.g. tool_use begin)
-                            if (frame.delta() != null) {
-                                previewBus.emitDelta(
-                                        sessionId,
-                                        frame.targetType(),
-                                        frame.eventId(),
-                                        frame.delta());
+                            String previewKey = frame.targetType() + ":" + frame.eventId();
+                            switch (frame.streamType()) {
+                                case SessionEventTypes.EVENT_START -> {
+                                    if (started.add(previewKey)) {
+                                        previewBus.emitStart(
+                                                sessionId, frame.targetType(), frame.eventId());
+                                    }
+                                }
+                                case SessionEventTypes.EVENT_DELTA -> {
+                                    if (started.add(previewKey)) {
+                                        previewBus.emitStart(
+                                                sessionId, frame.targetType(), frame.eventId());
+                                    }
+                                    previewBus.emitDelta(
+                                            sessionId,
+                                            frame.targetType(),
+                                            frame.eventId(),
+                                            frame.delta());
+                                }
+                                case SessionEventTypes.EVENT_UPDATE ->
+                                        previewBus.emitUpdate(
+                                                sessionId,
+                                                frame.targetType(),
+                                                frame.eventId(),
+                                                frame.attributes());
+                                default ->
+                                        log.debug(
+                                                "Ignoring unsupported preview frame type {}",
+                                                frame.streamType());
                             }
                         });
         mapped.persisted()
@@ -390,7 +413,7 @@ public class SessionTurnRunner {
                                         persisted.type(),
                                         persisted.payload(),
                                         persisted.eventId()));
-        return false;
+        return suspended;
     }
 
     private void persistSuspendedToolUses(String sessionId, Msg result) {

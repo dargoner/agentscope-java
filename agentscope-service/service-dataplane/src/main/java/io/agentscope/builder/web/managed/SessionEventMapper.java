@@ -24,6 +24,8 @@ import io.agentscope.core.event.AgentStartEvent;
 import io.agentscope.core.event.ModelCallEndEvent;
 import io.agentscope.core.event.ModelCallStartEvent;
 import io.agentscope.core.event.TextBlockDeltaEvent;
+import io.agentscope.core.event.TextOutputDisposition;
+import io.agentscope.core.event.TextOutputDispositionEvent;
 import io.agentscope.core.event.ThinkingBlockDeltaEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
 import io.agentscope.core.event.ToolCallEndEvent;
@@ -32,11 +34,16 @@ import io.agentscope.core.event.ToolResultDataDeltaEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.GenerateReason;
+import io.agentscope.core.message.MessageMetadataKeys;
+import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.TextBlock;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.stereotype.Component;
 
@@ -102,12 +109,24 @@ public class SessionEventMapper {
     }
 
     /**
-     * Stream-only preview frame ({@code event_start} / {@code event_delta}).
+     * Stream-only preview frame ({@code event_start}, {@code event_delta} or {@code event_update}).
      *
      * <p>When {@code delta} is null, callers should emit start only (no delta frame).
      */
     public record PreviewFrame(
-            String streamType, String targetType, String eventId, String delta) {}
+            String streamType,
+            String targetType,
+            String eventId,
+            String delta,
+            Map<String, Object> attributes) {
+        public PreviewFrame(String streamType, String targetType, String eventId, String delta) {
+            this(streamType, targetType, eventId, delta, Map.of());
+        }
+
+        public PreviewFrame {
+            attributes = attributes != null ? attributes : Map.of();
+        }
+    }
 
     /**
      * Maps a harness event. Text/thinking/tool deltas produce preview frames only; complete
@@ -118,7 +137,7 @@ public class SessionEventMapper {
             if (delta.getDelta() == null || delta.getDelta().isEmpty()) {
                 return MappingResult.empty();
             }
-            String eventId = previewIds.messageEventId();
+            String eventId = previewIds.messageEventId(delta.getReplyId());
             return MappingResult.previewOnly(
                     new PreviewFrame(
                             SessionEventTypes.EVENT_DELTA,
@@ -138,17 +157,33 @@ public class SessionEventMapper {
                             eventId,
                             thinking.getDelta()));
         }
+        if (event instanceof TextOutputDispositionEvent disposition) {
+            String eventId = previewIds.messageEventIdIfPresent(disposition.getReplyId());
+            if (eventId == null) {
+                return MappingResult.empty();
+            }
+            if (disposition.getDisposition() == TextOutputDisposition.INTERMEDIATE) {
+                previewIds.markIntermediate(disposition.getReplyId());
+            }
+            Map<String, Object> attributes = new LinkedHashMap<>();
+            attributes.put("replyId", disposition.getReplyId());
+            attributes.put("disposition", disposition.getDisposition().name());
+            if (disposition.getGenerateReason() != null) {
+                attributes.put("generateReason", disposition.getGenerateReason().name());
+            }
+            return MappingResult.previewOnly(
+                    new PreviewFrame(
+                            SessionEventTypes.EVENT_UPDATE,
+                            SessionEventTypes.AGENT_MESSAGE,
+                            eventId,
+                            null,
+                            attributes));
+        }
         if (event instanceof AgentResultEvent result) {
-            String text =
-                    result.getResult() != null && result.getResult().getTextContent() != null
-                            ? result.getResult().getTextContent()
-                            : "";
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("text", text);
-            payload.put("content", List.of(Map.of("type", "text", "text", text)));
-            // Reuse the preview id when deltas already streamed for this message.
-            String eventId = previewIds.consumeMessageEventId();
-            return MappingResult.persist(SessionEventTypes.AGENT_MESSAGE, payload, eventId);
+            if (event.getSource() == null) {
+                previewIds.rememberTopLevelResult(result.getResult());
+            }
+            return MappingResult.empty();
         }
         if (event instanceof ToolCallStartEvent toolUse) {
             previewIds.beginToolUse(toolUse.getToolCallId(), toolUse.getToolCallName());
@@ -232,25 +267,105 @@ public class SessionEventMapper {
             return MappingResult.persist(
                     SessionEventTypes.AGENT_TOOL_RESULT, payload, buf.eventId());
         }
-        if (event instanceof ModelCallStartEvent) {
+        if (event instanceof ModelCallStartEvent modelStart) {
             // Opening a model request opens a fresh preview window. The previous window must stay
             // readable until then: AgentResultEvent arrives only at the end of the turn and needs
             // the last window's id to reconcile with the streamed preview.
-            previewIds.resetMessage();
+            previewIds.beginModelCall(modelStart.getReplyId());
             previewIds.resetThinking();
             return MappingResult.persist(SessionEventTypes.SPAN_MODEL_REQUEST_START, Map.of());
         }
         if (event instanceof ModelCallEndEvent modelEnd) {
+            previewIds.finishModelCall(modelEnd.getReplyId());
             Map<String, Object> payload = new LinkedHashMap<>();
             if (modelEnd.getUsage() != null) {
                 payload.put("usage", modelEnd.getUsage());
             }
             return MappingResult.persist(SessionEventTypes.SPAN_MODEL_REQUEST_END, payload);
         }
-        if (event instanceof AgentStartEvent || event instanceof AgentEndEvent) {
+        if (event instanceof AgentEndEvent end) {
+            if (event.getSource() != null) {
+                return MappingResult.empty();
+            }
+            return commitTopLevelResult(end, previewIds);
+        }
+        if (event instanceof AgentStartEvent) {
             return MappingResult.empty();
         }
         return MappingResult.empty();
+    }
+
+    private MappingResult commitTopLevelResult(AgentEndEvent end, PreviewIds previewIds) {
+        Msg result = previewIds.takeTopLevelResult();
+        String previewId = previewIds.consumeMessageEventId(end.getReplyId());
+        if (result == null) {
+            return MappingResult.empty();
+        }
+
+        GenerateReason reason = result.getGenerateReason();
+        if (!commitsOrdinaryMessage(reason)) {
+            return MappingResult.empty();
+        }
+
+        if (!hasOutput(result)) {
+            if (previewId == null) {
+                return MappingResult.empty();
+            }
+            Map<String, Object> attributes = new LinkedHashMap<>();
+            attributes.put("authoritative", true);
+            attributes.put("hasOutput", false);
+            attributes.put("generateReason", reason.name());
+            return MappingResult.previewOnly(
+                    new PreviewFrame(
+                            SessionEventTypes.EVENT_UPDATE,
+                            SessionEventTypes.AGENT_MESSAGE,
+                            previewId,
+                            null,
+                            attributes));
+        }
+
+        String eventId = previewId != null ? previewId : PreviewIds.newEventId();
+        return MappingResult.persist(
+                SessionEventTypes.AGENT_MESSAGE, messagePayload(result, reason), eventId);
+    }
+
+    private Map<String, Object> messagePayload(Msg message, GenerateReason reason) {
+        Map<String, Object> messageDto = objectMapper.convertValue(message, MAP_TYPE);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("text", message.getTextContent());
+        payload.put("content", messageDto.getOrDefault("content", List.of()));
+        Map<String, Object> metadata =
+                message.getMetadata() != null
+                        ? new LinkedHashMap<>(message.getMetadata())
+                        : Map.of();
+        payload.put("metadata", metadata);
+        payload.put("generateReason", reason.name());
+        if (metadata.containsKey(MessageMetadataKeys.STRUCTURED_OUTPUT)) {
+            payload.put("structuredOutput", metadata.get(MessageMetadataKeys.STRUCTURED_OUTPUT));
+        }
+        return payload;
+    }
+
+    private static boolean hasOutput(Msg message) {
+        if (message.hasStructuredData()) {
+            return true;
+        }
+        for (ContentBlock block : message.getContent()) {
+            if (block instanceof TextBlock text) {
+                if (!text.getText().isEmpty()) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean commitsOrdinaryMessage(GenerateReason reason) {
+        return reason == GenerateReason.MODEL_STOP
+                || reason == GenerateReason.STRUCTURED_OUTPUT
+                || reason == GenerateReason.MAX_ITERATIONS;
     }
 
     private Map<String, Object> parseToolInput(String raw) {
@@ -277,23 +392,55 @@ public class SessionEventMapper {
 
     /** Allocates stable preview / persist event ids for a turn and accumulates tool buffers. */
     public static final class PreviewIds {
-        private String messageId;
+        private final Map<String, String> messageIdsByReply = new LinkedHashMap<>();
+        private final Set<String> intermediateReplies = new HashSet<>();
         private String thinkingId;
+        private Msg topLevelResult;
         private final Map<String, ToolBuffers.ToolUseBuffer> toolUses = new LinkedHashMap<>();
         private final Map<String, ToolBuffers.ToolResultBuffer> toolResults = new LinkedHashMap<>();
 
-        public String messageEventId() {
-            if (messageId == null) {
-                messageId = newEventId();
-            }
-            return messageId;
+        public String messageEventId(String replyId) {
+            return messageIdsByReply.computeIfAbsent(key(replyId), ignored -> newEventId());
         }
 
-        /** Returns and clears the in-flight message preview id (null when no deltas streamed). */
-        public String consumeMessageEventId() {
-            String id = messageId;
-            messageId = null;
-            return id;
+        public String messageEventIdIfPresent(String replyId) {
+            return messageIdsByReply.get(key(replyId));
+        }
+
+        /** Returns and clears the preview id for {@code replyId} (null when no deltas streamed). */
+        public String consumeMessageEventId(String replyId) {
+            String replyKey = key(replyId);
+            intermediateReplies.remove(replyKey);
+            return messageIdsByReply.remove(replyKey);
+        }
+
+        public void markIntermediate(String replyId) {
+            intermediateReplies.add(key(replyId));
+        }
+
+        public void beginModelCall(String replyId) {
+            for (String completed : List.copyOf(intermediateReplies)) {
+                messageIdsByReply.remove(completed);
+                intermediateReplies.remove(completed);
+            }
+            messageIdsByReply.remove(key(replyId));
+        }
+
+        public void finishModelCall(String replyId) {
+            String replyKey = key(replyId);
+            if (intermediateReplies.remove(replyKey)) {
+                messageIdsByReply.remove(replyKey);
+            }
+        }
+
+        public void rememberTopLevelResult(Msg result) {
+            topLevelResult = result;
+        }
+
+        public Msg takeTopLevelResult() {
+            Msg result = topLevelResult;
+            topLevelResult = null;
+            return result;
         }
 
         public String thinkingEventId() {
@@ -351,10 +498,6 @@ public class SessionEventMapper {
             }
             toolResults.remove(key(toolCallId));
             return buf;
-        }
-
-        public void resetMessage() {
-            messageId = null;
         }
 
         public void resetThinking() {

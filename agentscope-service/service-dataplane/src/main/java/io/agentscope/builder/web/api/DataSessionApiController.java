@@ -343,7 +343,14 @@ public class DataSessionApiController {
     private ServerSentEvent<String> toSse(SessionEventDto dto) {
         try {
             String json = objectMapper.writeValueAsString(dto);
-            return ServerSentEvent.<String>builder().event(dto.type()).data(json).build();
+            String eventType =
+                    switch (dto.type()) {
+                        case SessionEventTypes.EVENT_START -> SessionEventTypes.EVENT_START;
+                        case SessionEventTypes.EVENT_DELTA -> SessionEventTypes.EVENT_DELTA;
+                        case SessionEventTypes.EVENT_UPDATE -> SessionEventTypes.EVENT_UPDATE;
+                        default -> dto.type();
+                    };
+            return ServerSentEvent.<String>builder().event(eventType).data(json).build();
         } catch (JsonProcessingException ex) {
             return ServerSentEvent.<String>builder().event("error").data("{}").build();
         }

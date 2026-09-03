@@ -60,4 +60,5 @@ public final class SessionEventTypes {
     // ---- Stream-only (never persisted) ----
     public static final String EVENT_START = "event_start";
     public static final String EVENT_DELTA = "event_delta";
+    public static final String EVENT_UPDATE = "event_update";
 }
