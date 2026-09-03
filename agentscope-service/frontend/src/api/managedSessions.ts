@@ -42,6 +42,8 @@ export interface SessionEvent {
   seq: number;
   type: string;
   payload?: Record<string, unknown>;
+  /** Optional event_update metadata; managed-session streams may flatten it into payload. */
+  attributes?: Record<string, unknown>;
   processedAt?: number | null;
   createdAt: number;
 }
