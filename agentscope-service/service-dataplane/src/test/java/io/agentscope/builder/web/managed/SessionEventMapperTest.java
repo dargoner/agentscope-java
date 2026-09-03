@@ -25,6 +25,7 @@ import io.agentscope.builder.web.managed.service.HandsMetrics;
 import io.agentscope.builder.web.managed.service.SessionEventLog;
 import io.agentscope.builder.web.toolbus.ToolConfirmationCoordinator;
 import io.agentscope.core.event.AgentEndEvent;
+import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.event.ModelCallEndEvent;
 import io.agentscope.core.event.ModelCallStartEvent;
@@ -282,6 +283,171 @@ class SessionEventMapperTest {
     }
 
     @Test
+    void nullLastResultStillSendsAuthoritativeEmptyUpdateWhenPreviewExists() {
+        String previewId =
+                mapper.map(new TextBlockDeltaEvent("r", "b", "stale preview"), previewIds)
+                        .preview()
+                        .orElseThrow()
+                        .eventId();
+        Msg nonEmpty =
+                Msg.builder()
+                        .role(MsgRole.ASSISTANT)
+                        .textContent("first result")
+                        .generateReason(GenerateReason.MODEL_STOP)
+                        .build();
+        mapper.map(new AgentResultEvent(nonEmpty), previewIds);
+        mapper.map(new AgentResultEvent(null), previewIds);
+
+        SessionEventMapper.MappingResult end = mapper.map(new AgentEndEvent("r"), previewIds);
+
+        assertThat(end.persisted()).isEmpty();
+        SessionEventMapper.PreviewFrame update = end.preview().orElseThrow();
+        assertThat(update.streamType()).isEqualTo(SessionEventTypes.EVENT_UPDATE);
+        assertThat(update.eventId()).isEqualTo(previewId);
+        assertThat(update.attributes())
+                .containsEntry("authoritative", true)
+                .containsEntry("hasOutput", false)
+                .doesNotContainKey("generateReason");
+    }
+
+    @Test
+    void normalEndWithoutAnyResultDoesNotEmitAuthoritativeEmptyUpdate() {
+        String previewId =
+                mapper.map(new TextBlockDeltaEvent("r", "b", "preview"), previewIds)
+                        .preview()
+                        .orElseThrow()
+                        .eventId();
+
+        SessionEventMapper.MappingResult end = mapper.map(new AgentEndEvent("r"), previewIds);
+
+        assertThat(end.persisted()).isEmpty();
+        assertThat(end.preview()).isEmpty();
+        assertThat(previewId).startsWith("evt_");
+    }
+
+    @Test
+    void previewIdsAreIsolatedBySourceAndTaskIdWhenReplyIdsCollide() {
+        String parentId =
+                mapper.map(new TextBlockDeltaEvent("shared", "b-parent", "parent"), previewIds)
+                        .preview()
+                        .orElseThrow()
+                        .eventId();
+        String childId =
+                mapper.map(
+                                scoped(
+                                        new TextBlockDeltaEvent("shared", "b-child", "child"),
+                                        "child",
+                                        "task-1"),
+                                previewIds)
+                        .preview()
+                        .orElseThrow()
+                        .eventId();
+
+        assertThat(childId).isNotEqualTo(parentId);
+
+        SessionEventMapper.PreviewFrame childUpdate =
+                mapper.map(
+                                scoped(
+                                        new TextOutputDispositionEvent(
+                                                "shared", TextOutputDisposition.INTERMEDIATE, null),
+                                        "child",
+                                        "task-1"),
+                                previewIds)
+                        .preview()
+                        .orElseThrow();
+        assertThat(childUpdate.eventId()).isEqualTo(childId);
+
+        mapper.map(scoped(new ModelCallStartEvent("shared"), "child", "task-1"), previewIds);
+        String childNextRoundId =
+                mapper.map(
+                                scoped(
+                                        new TextBlockDeltaEvent(
+                                                "shared", "b-child-next", "child next"),
+                                        "child",
+                                        "task-1"),
+                                previewIds)
+                        .preview()
+                        .orElseThrow()
+                        .eventId();
+        assertThat(childNextRoundId).isNotEqualTo(childId);
+
+        Msg parentResult =
+                Msg.builder()
+                        .role(MsgRole.ASSISTANT)
+                        .textContent("parent answer")
+                        .generateReason(GenerateReason.MODEL_STOP)
+                        .build();
+        mapper.map(new AgentResultEvent(parentResult), previewIds);
+        SessionEventMapper.PersistedEvent parentPersisted =
+                mapper.map(new AgentEndEvent("shared"), previewIds).persisted().orElseThrow();
+        assertThat(parentPersisted.eventId()).isEqualTo(parentId);
+        assertThat(parentPersisted.payload().get("text")).isEqualTo("parent answer");
+    }
+
+    @Test
+    void previewIdsAreIsolatedByTaskIdWithinSameSourceWhenReplyIdsCollide() {
+        String taskOneId =
+                mapper.map(
+                                scoped(
+                                        new TextBlockDeltaEvent("shared", "b-1", "one"),
+                                        "worker",
+                                        "task-1"),
+                                previewIds)
+                        .preview()
+                        .orElseThrow()
+                        .eventId();
+        String taskTwoId =
+                mapper.map(
+                                scoped(
+                                        new TextBlockDeltaEvent("shared", "b-2", "two"),
+                                        "worker",
+                                        "task-2"),
+                                previewIds)
+                        .preview()
+                        .orElseThrow()
+                        .eventId();
+
+        assertThat(taskTwoId).isNotEqualTo(taskOneId);
+
+        SessionEventMapper.PreviewFrame taskOneUpdate =
+                mapper.map(
+                                scoped(
+                                        new TextOutputDispositionEvent(
+                                                "shared", TextOutputDisposition.INTERMEDIATE, null),
+                                        "worker",
+                                        "task-1"),
+                                previewIds)
+                        .preview()
+                        .orElseThrow();
+
+        mapper.map(scoped(new ModelCallStartEvent("shared"), "worker", "task-2"), previewIds);
+
+        SessionEventMapper.PreviewFrame taskTwoNextRound =
+                mapper.map(
+                                scoped(
+                                        new TextBlockDeltaEvent("shared", "b-2-next", "two next"),
+                                        "worker",
+                                        "task-2"),
+                                previewIds)
+                        .preview()
+                        .orElseThrow();
+        SessionEventMapper.PreviewFrame taskOneUpdateAfterTaskTwoStarts =
+                mapper.map(
+                                scoped(
+                                        new TextOutputDispositionEvent(
+                                                "shared", TextOutputDisposition.INTERMEDIATE, null),
+                                        "worker",
+                                        "task-1"),
+                                previewIds)
+                        .preview()
+                        .orElseThrow();
+
+        assertThat(taskOneUpdate.eventId()).isEqualTo(taskOneId);
+        assertThat(taskOneUpdateAfterTaskTwoStarts.eventId()).isEqualTo(taskOneId);
+        assertThat(taskTwoNextRound.eventId()).isNotEqualTo(taskTwoId);
+    }
+
+    @Test
     void suspendedAndPausedResultsDoNotCommitOrdinaryAgentMessage() {
         for (GenerateReason reason :
                 List.of(
@@ -389,5 +555,9 @@ class SessionEventMapperTest {
         assertThat(persisted.payload().get("output")).isEqualTo("file1\nfile2\n");
         assertThat(persisted.payload().get("text")).isEqualTo("file1\nfile2\n");
         assertThat(persisted.eventId()).startsWith("evt_");
+    }
+
+    private static AgentEvent scoped(AgentEvent event, String source, String taskId) {
+        return event.withSource(source).withMetadataEntry(AgentEvent.METADATA_TASK_ID, taskId);
     }
 }

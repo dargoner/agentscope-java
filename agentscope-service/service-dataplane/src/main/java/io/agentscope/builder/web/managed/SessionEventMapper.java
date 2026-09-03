@@ -137,7 +137,7 @@ public class SessionEventMapper {
             if (delta.getDelta() == null || delta.getDelta().isEmpty()) {
                 return MappingResult.empty();
             }
-            String eventId = previewIds.messageEventId(delta.getReplyId());
+            String eventId = previewIds.messageEventId(delta);
             return MappingResult.previewOnly(
                     new PreviewFrame(
                             SessionEventTypes.EVENT_DELTA,
@@ -149,7 +149,7 @@ public class SessionEventMapper {
             if (thinking.getDelta() == null || thinking.getDelta().isEmpty()) {
                 return MappingResult.empty();
             }
-            String eventId = previewIds.thinkingEventId();
+            String eventId = previewIds.thinkingEventId(thinking);
             return MappingResult.previewOnly(
                     new PreviewFrame(
                             SessionEventTypes.EVENT_DELTA,
@@ -158,12 +158,12 @@ public class SessionEventMapper {
                             thinking.getDelta()));
         }
         if (event instanceof TextOutputDispositionEvent disposition) {
-            String eventId = previewIds.messageEventIdIfPresent(disposition.getReplyId());
+            String eventId = previewIds.messageEventIdIfPresent(disposition);
             if (eventId == null) {
                 return MappingResult.empty();
             }
             if (disposition.getDisposition() == TextOutputDisposition.INTERMEDIATE) {
-                previewIds.markIntermediate(disposition.getReplyId());
+                previewIds.markIntermediate(disposition);
             }
             Map<String, Object> attributes = new LinkedHashMap<>();
             attributes.put("replyId", disposition.getReplyId());
@@ -180,14 +180,14 @@ public class SessionEventMapper {
                             attributes));
         }
         if (event instanceof AgentResultEvent result) {
-            if (event.getSource() == null) {
-                previewIds.rememberTopLevelResult(result.getResult());
+            if (previewIds.isTopLevel(result)) {
+                previewIds.rememberTopLevelResult(result);
             }
             return MappingResult.empty();
         }
         if (event instanceof ToolCallStartEvent toolUse) {
-            previewIds.beginToolUse(toolUse.getToolCallId(), toolUse.getToolCallName());
-            String eventId = previewIds.toolUseEventId(toolUse.getToolCallId());
+            previewIds.beginToolUse(toolUse);
+            String eventId = previewIds.toolUseEventId(toolUse);
             // Start announces the upcoming tool_use; args arrive via deltas and persist on End.
             return MappingResult.previewOnly(
                     new PreviewFrame(
@@ -200,9 +200,8 @@ public class SessionEventMapper {
             if (toolDelta.getDelta() == null || toolDelta.getDelta().isEmpty()) {
                 return MappingResult.empty();
             }
-            previewIds.appendToolInput(
-                    toolDelta.getToolCallId(), toolDelta.getToolCallName(), toolDelta.getDelta());
-            String eventId = previewIds.toolUseEventId(toolDelta.getToolCallId());
+            previewIds.appendToolInput(toolDelta);
+            String eventId = previewIds.toolUseEventId(toolDelta);
             return MappingResult.previewOnly(
                     new PreviewFrame(
                             SessionEventTypes.EVENT_DELTA,
@@ -211,8 +210,7 @@ public class SessionEventMapper {
                             toolDelta.getDelta()));
         }
         if (event instanceof ToolCallEndEvent toolEnd) {
-            ToolBuffers.ToolUseBuffer buf =
-                    previewIds.finishToolUse(toolEnd.getToolCallId(), toolEnd.getToolCallName());
+            ToolBuffers.ToolUseBuffer buf = previewIds.finishToolUse(toolEnd);
             Map<String, Object> input = parseToolInput(buf.inputJson());
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("id", toolEnd.getToolCallId());
@@ -230,8 +228,7 @@ public class SessionEventMapper {
             if (textDelta.getDelta() == null || textDelta.getDelta().isEmpty()) {
                 return MappingResult.empty();
             }
-            previewIds.appendToolResultText(
-                    textDelta.getToolCallId(), textDelta.getToolCallName(), textDelta.getDelta());
+            previewIds.appendToolResultText(textDelta);
             return MappingResult.empty();
         }
         if (event instanceof ToolResultDataDeltaEvent dataDelta) {
@@ -239,14 +236,11 @@ public class SessionEventMapper {
             if (fragment == null || fragment.isEmpty()) {
                 return MappingResult.empty();
             }
-            previewIds.appendToolResultText(
-                    dataDelta.getToolCallId(), dataDelta.getToolCallName(), fragment);
+            previewIds.appendToolResultText(dataDelta, fragment);
             return MappingResult.empty();
         }
         if (event instanceof ToolResultEndEvent toolResult) {
-            ToolBuffers.ToolResultBuffer buf =
-                    previewIds.finishToolResult(
-                            toolResult.getToolCallId(), toolResult.getToolCallName());
+            ToolBuffers.ToolResultBuffer buf = previewIds.finishToolResult(toolResult);
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("tool_use_id", toolResult.getToolCallId());
             payload.put("id", toolResult.getToolCallId());
@@ -271,12 +265,12 @@ public class SessionEventMapper {
             // Opening a model request opens a fresh preview window. The previous window must stay
             // readable until then: AgentResultEvent arrives only at the end of the turn and needs
             // the last window's id to reconcile with the streamed preview.
-            previewIds.beginModelCall(modelStart.getReplyId());
-            previewIds.resetThinking();
+            previewIds.beginModelCall(modelStart);
+            previewIds.resetThinking(modelStart);
             return MappingResult.persist(SessionEventTypes.SPAN_MODEL_REQUEST_START, Map.of());
         }
         if (event instanceof ModelCallEndEvent modelEnd) {
-            previewIds.finishModelCall(modelEnd.getReplyId());
+            previewIds.finishModelCall(modelEnd);
             Map<String, Object> payload = new LinkedHashMap<>();
             if (modelEnd.getUsage() != null) {
                 payload.put("usage", modelEnd.getUsage());
@@ -284,7 +278,7 @@ public class SessionEventMapper {
             return MappingResult.persist(SessionEventTypes.SPAN_MODEL_REQUEST_END, payload);
         }
         if (event instanceof AgentEndEvent end) {
-            if (event.getSource() != null) {
+            if (!previewIds.isTopLevel(end)) {
                 return MappingResult.empty();
             }
             return commitTopLevelResult(end, previewIds);
@@ -296,10 +290,27 @@ public class SessionEventMapper {
     }
 
     private MappingResult commitTopLevelResult(AgentEndEvent end, PreviewIds previewIds) {
-        Msg result = previewIds.takeTopLevelResult();
-        String previewId = previewIds.consumeMessageEventId(end.getReplyId());
-        if (result == null) {
+        AgentResultEvent resultEvent = previewIds.takeTopLevelResult(end);
+        String previewId = previewIds.consumeMessageEventId(end);
+        if (resultEvent == null) {
             return MappingResult.empty();
+        }
+
+        Msg result = resultEvent.getResult();
+        if (result == null) {
+            if (previewId == null) {
+                return MappingResult.empty();
+            }
+            Map<String, Object> attributes = new LinkedHashMap<>();
+            attributes.put("authoritative", true);
+            attributes.put("hasOutput", false);
+            return MappingResult.previewOnly(
+                    new PreviewFrame(
+                            SessionEventTypes.EVENT_UPDATE,
+                            SessionEventTypes.AGENT_MESSAGE,
+                            previewId,
+                            null,
+                            attributes));
         }
 
         GenerateReason reason = result.getGenerateReason();
@@ -392,95 +403,127 @@ public class SessionEventMapper {
 
     /** Allocates stable preview / persist event ids for a turn and accumulates tool buffers. */
     public static final class PreviewIds {
-        private final Map<String, String> messageIdsByReply = new LinkedHashMap<>();
-        private final Set<String> intermediateReplies = new HashSet<>();
-        private String thinkingId;
-        private Msg topLevelResult;
-        private final Map<String, ToolBuffers.ToolUseBuffer> toolUses = new LinkedHashMap<>();
-        private final Map<String, ToolBuffers.ToolResultBuffer> toolResults = new LinkedHashMap<>();
+        private record InvocationKey(String source, String taskId) {}
 
-        public String messageEventId(String replyId) {
-            return messageIdsByReply.computeIfAbsent(key(replyId), ignored -> newEventId());
+        private record PreviewKey(InvocationKey invocation, String replyId) {}
+
+        private record ToolKey(InvocationKey invocation, String toolCallId) {}
+
+        private final Map<PreviewKey, String> messageIdsByReply = new LinkedHashMap<>();
+        private final Set<PreviewKey> intermediateReplies = new HashSet<>();
+        private final Map<InvocationKey, String> thinkingIds = new LinkedHashMap<>();
+        private final Map<InvocationKey, AgentResultEvent> topLevelResults = new LinkedHashMap<>();
+        private final Map<ToolKey, ToolBuffers.ToolUseBuffer> toolUses = new LinkedHashMap<>();
+        private final Map<ToolKey, ToolBuffers.ToolResultBuffer> toolResults =
+                new LinkedHashMap<>();
+
+        public String messageEventId(TextBlockDeltaEvent event) {
+            PreviewKey previewKey = previewKey(event, event.getReplyId());
+            return messageIdsByReply.computeIfAbsent(previewKey, ignored -> newEventId());
         }
 
-        public String messageEventIdIfPresent(String replyId) {
-            return messageIdsByReply.get(key(replyId));
+        public String messageEventIdIfPresent(TextOutputDispositionEvent event) {
+            return messageIdsByReply.get(previewKey(event, event.getReplyId()));
         }
 
-        /** Returns and clears the preview id for {@code replyId} (null when no deltas streamed). */
-        public String consumeMessageEventId(String replyId) {
-            String replyKey = key(replyId);
-            intermediateReplies.remove(replyKey);
-            return messageIdsByReply.remove(replyKey);
+        /** Returns and clears the preview id for this invocation and reply. */
+        public String consumeMessageEventId(AgentEndEvent event) {
+            PreviewKey previewKey = previewKey(event, event.getReplyId());
+            intermediateReplies.remove(previewKey);
+            return messageIdsByReply.remove(previewKey);
         }
 
-        public void markIntermediate(String replyId) {
-            intermediateReplies.add(key(replyId));
+        public void markIntermediate(TextOutputDispositionEvent event) {
+            intermediateReplies.add(previewKey(event, event.getReplyId()));
         }
 
-        public void beginModelCall(String replyId) {
-            for (String completed : List.copyOf(intermediateReplies)) {
-                messageIdsByReply.remove(completed);
-                intermediateReplies.remove(completed);
+        public void beginModelCall(ModelCallStartEvent event) {
+            InvocationKey invocationKey = invocationKey(event);
+            for (PreviewKey completed : List.copyOf(intermediateReplies)) {
+                if (completed.invocation().equals(invocationKey)) {
+                    messageIdsByReply.remove(completed);
+                    intermediateReplies.remove(completed);
+                }
             }
-            messageIdsByReply.remove(key(replyId));
+            messageIdsByReply.remove(previewKey(event, event.getReplyId()));
         }
 
-        public void finishModelCall(String replyId) {
-            String replyKey = key(replyId);
-            if (intermediateReplies.remove(replyKey)) {
-                messageIdsByReply.remove(replyKey);
+        public void finishModelCall(ModelCallEndEvent event) {
+            PreviewKey previewKey = previewKey(event, event.getReplyId());
+            if (intermediateReplies.remove(previewKey)) {
+                messageIdsByReply.remove(previewKey);
             }
         }
 
-        public void rememberTopLevelResult(Msg result) {
-            topLevelResult = result;
+        public boolean isTopLevel(AgentEvent event) {
+            return invocationKey(event).equals(new InvocationKey("", ""));
         }
 
-        public Msg takeTopLevelResult() {
-            Msg result = topLevelResult;
-            topLevelResult = null;
-            return result;
+        public void rememberTopLevelResult(AgentResultEvent result) {
+            topLevelResults.put(invocationKey(result), result);
         }
 
-        public String thinkingEventId() {
-            if (thinkingId == null) {
-                thinkingId = newEventId();
-            }
-            return thinkingId;
+        public AgentResultEvent takeTopLevelResult(AgentEndEvent end) {
+            return topLevelResults.remove(invocationKey(end));
         }
 
-        public String toolUseEventId(String toolCallId) {
-            return beginToolUse(toolCallId, null).eventId();
+        public String thinkingEventId(ThinkingBlockDeltaEvent event) {
+            return thinkingIds.computeIfAbsent(invocationKey(event), ignored -> newEventId());
         }
 
-        public ToolBuffers.ToolUseBuffer beginToolUse(String toolCallId, String toolName) {
-            String key = key(toolCallId);
+        public String toolUseEventId(ToolCallStartEvent event) {
+            return beginToolUse(event).eventId();
+        }
+
+        public String toolUseEventId(ToolCallDeltaEvent event) {
+            return beginToolUse(event, event.getToolCallId(), event.getToolCallName()).eventId();
+        }
+
+        public ToolBuffers.ToolUseBuffer beginToolUse(ToolCallStartEvent event) {
+            return beginToolUse(event, event.getToolCallId(), event.getToolCallName());
+        }
+
+        private ToolBuffers.ToolUseBuffer beginToolUse(
+                AgentEvent event, String toolCallId, String toolName) {
+            ToolKey toolKey = toolKey(event, toolCallId);
             return toolUses.computeIfAbsent(
-                    key, ignored -> new ToolBuffers.ToolUseBuffer(newEventId(), toolName));
+                    toolKey, ignored -> new ToolBuffers.ToolUseBuffer(newEventId(), toolName));
         }
 
-        public void appendToolInput(String toolCallId, String toolName, String delta) {
-            ToolBuffers.ToolUseBuffer buf = beginToolUse(toolCallId, toolName);
-            if (toolName != null) {
-                buf.setToolName(toolName);
+        public void appendToolInput(ToolCallDeltaEvent event) {
+            ToolBuffers.ToolUseBuffer buf =
+                    beginToolUse(event, event.getToolCallId(), event.getToolCallName());
+            if (event.getToolCallName() != null) {
+                buf.setToolName(event.getToolCallName());
             }
-            buf.appendInput(delta, MAX_TOOL_PAYLOAD_CHARS);
+            buf.appendInput(event.getDelta(), MAX_TOOL_PAYLOAD_CHARS);
         }
 
-        public ToolBuffers.ToolUseBuffer finishToolUse(String toolCallId, String toolName) {
-            ToolBuffers.ToolUseBuffer buf = beginToolUse(toolCallId, toolName);
-            if (toolName != null) {
-                buf.setToolName(toolName);
+        public ToolBuffers.ToolUseBuffer finishToolUse(ToolCallEndEvent event) {
+            ToolKey toolKey = toolKey(event, event.getToolCallId());
+            ToolBuffers.ToolUseBuffer buf =
+                    beginToolUse(event, event.getToolCallId(), event.getToolCallName());
+            if (event.getToolCallName() != null) {
+                buf.setToolName(event.getToolCallName());
             }
-            toolUses.remove(key(toolCallId));
+            toolUses.remove(toolKey);
             return buf;
         }
 
-        public void appendToolResultText(String toolCallId, String toolName, String delta) {
+        public void appendToolResultText(ToolResultTextDeltaEvent event) {
+            appendToolResultText(
+                    event, event.getToolCallId(), event.getToolCallName(), event.getDelta());
+        }
+
+        public void appendToolResultText(ToolResultDataDeltaEvent event, String delta) {
+            appendToolResultText(event, event.getToolCallId(), event.getToolCallName(), delta);
+        }
+
+        private void appendToolResultText(
+                AgentEvent event, String toolCallId, String toolName, String delta) {
             ToolBuffers.ToolResultBuffer buf =
                     toolResults.computeIfAbsent(
-                            key(toolCallId),
+                            toolKey(event, toolCallId),
                             ignored -> new ToolBuffers.ToolResultBuffer(newEventId(), toolName));
             if (toolName != null) {
                 buf.setToolName(toolName);
@@ -488,24 +531,49 @@ public class SessionEventMapper {
             buf.appendOutput(delta, MAX_TOOL_PAYLOAD_CHARS);
         }
 
-        public ToolBuffers.ToolResultBuffer finishToolResult(String toolCallId, String toolName) {
+        public ToolBuffers.ToolResultBuffer finishToolResult(ToolResultEndEvent event) {
+            ToolKey toolKey = toolKey(event, event.getToolCallId());
             ToolBuffers.ToolResultBuffer buf =
                     toolResults.computeIfAbsent(
-                            key(toolCallId),
-                            ignored -> new ToolBuffers.ToolResultBuffer(newEventId(), toolName));
-            if (toolName != null) {
-                buf.setToolName(toolName);
+                            toolKey,
+                            ignored ->
+                                    new ToolBuffers.ToolResultBuffer(
+                                            newEventId(), event.getToolCallName()));
+            if (event.getToolCallName() != null) {
+                buf.setToolName(event.getToolCallName());
             }
-            toolResults.remove(key(toolCallId));
+            toolResults.remove(toolKey);
             return buf;
         }
 
-        public void resetThinking() {
-            thinkingId = null;
+        public void resetThinking(ModelCallStartEvent event) {
+            thinkingIds.remove(invocationKey(event));
         }
 
-        private static String key(String toolCallId) {
-            return toolCallId == null || toolCallId.isBlank() ? "_" : toolCallId;
+        private static PreviewKey previewKey(AgentEvent event, String replyId) {
+            return new PreviewKey(invocationKey(event), key(replyId));
+        }
+
+        private static ToolKey toolKey(AgentEvent event, String toolCallId) {
+            return new ToolKey(invocationKey(event), key(toolCallId));
+        }
+
+        private static InvocationKey invocationKey(AgentEvent event) {
+            Object taskId =
+                    event.getMetadata() == null
+                            ? null
+                            : event.getMetadata().get(AgentEvent.METADATA_TASK_ID);
+            return new InvocationKey(
+                    normalize(event.getSource()),
+                    normalize(taskId == null ? null : taskId.toString()));
+        }
+
+        private static String normalize(String value) {
+            return value == null ? "" : value;
+        }
+
+        private static String key(String value) {
+            return value == null || value.isBlank() ? "_" : value;
         }
 
         private static String newEventId() {
