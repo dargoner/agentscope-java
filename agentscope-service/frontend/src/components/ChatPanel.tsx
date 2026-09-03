@@ -35,6 +35,7 @@ interface Message {
   id: string;
   role: Role;
   blocks: ContentBlock[];
+  displayState?: ChatDisplayState;
   pending?: boolean;
   /** Turn finished: no more blocks are appended to this bubble. */
   closed?: boolean;
@@ -44,6 +45,201 @@ interface PendingConfirmation {
   toolUseId: string;
   toolName: string;
   input?: Record<string, unknown>;
+}
+
+export interface ChatTextSegment {
+  id: string;
+  text: string;
+}
+
+export interface ChatToolExecution {
+  id: string;
+  toolName: string;
+  text?: string;
+  result?: string;
+}
+
+export interface ChatDisplayState {
+  pendingSegments: Record<string, ChatTextSegment>;
+  commentarySegments: Record<string, ChatTextSegment>;
+  thinkingSegments: Record<string, ChatTextSegment>;
+  toolExecutions: Record<string, ChatToolExecution>;
+  finalAnswer?: ChatTextSegment;
+}
+
+export function createChatDisplayState(): ChatDisplayState {
+  return {
+    pendingSegments: {},
+    commentarySegments: {},
+    thinkingSegments: {},
+    toolExecutions: {},
+  };
+}
+
+function appendText(
+  segments: Record<string, ChatTextSegment>,
+  id: string,
+  delta: string,
+): Record<string, ChatTextSegment> {
+  return {
+    ...segments,
+    [id]: { id, text: `${segments[id]?.text ?? ''}${delta}` },
+  };
+}
+
+/** Applies one persisted event or stream-only preview frame to the current assistant turn. */
+export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): ChatDisplayState {
+  const payload = event.payload ?? {};
+  const eventId = String(payload.event_id ?? event.id ?? '');
+  const targetType = String(payload.type ?? '');
+
+  if (event.type === 'event_start') {
+    if (!eventId) return state;
+    if (targetType === 'agent.message') {
+      return {
+        ...state,
+        pendingSegments: {
+          ...state.pendingSegments,
+          [eventId]: state.pendingSegments[eventId] ?? { id: eventId, text: '' },
+        },
+      };
+    }
+    if (targetType === 'agent.tool_use') {
+      return {
+        ...state,
+        toolExecutions: {
+          ...state.toolExecutions,
+          [eventId]: state.toolExecutions[eventId]
+            ?? { id: eventId, toolName: 'tool', text: '' },
+        },
+      };
+    }
+    return state;
+  }
+
+  if (event.type === 'event_delta') {
+    const delta = payload.delta != null ? String(payload.delta) : '';
+    if (!eventId || !delta) return state;
+    if (targetType === 'agent.message') {
+      return { ...state, pendingSegments: appendText(state.pendingSegments, eventId, delta) };
+    }
+    if (targetType === 'agent.thinking') {
+      return { ...state, thinkingSegments: appendText(state.thinkingSegments, eventId, delta) };
+    }
+    if (targetType === 'agent.tool_use') {
+      const current = state.toolExecutions[eventId];
+      return {
+        ...state,
+        toolExecutions: {
+          ...state.toolExecutions,
+          [eventId]: {
+            id: eventId,
+            toolName: current?.toolName ?? 'tool',
+            text: `${current?.text ?? ''}${delta}`,
+            result: current?.result,
+          },
+        },
+      };
+    }
+    return state;
+  }
+
+  if (event.type === 'event_update' && targetType === 'agent.message' && eventId) {
+    const attributes = { ...payload, ...(event.attributes ?? {}) };
+    if (attributes.disposition === 'INTERMEDIATE') {
+      const pending = state.pendingSegments[eventId];
+      if (!pending) return state;
+      const pendingSegments = { ...state.pendingSegments };
+      delete pendingSegments[eventId];
+      return {
+        ...state,
+        pendingSegments,
+        commentarySegments: appendText(
+          state.commentarySegments,
+          eventId,
+          pending.text,
+        ),
+      };
+    }
+    if (attributes.authoritative === true && attributes.hasOutput === false) {
+      if (!state.pendingSegments[eventId]) return state;
+      const pendingSegments = { ...state.pendingSegments };
+      delete pendingSegments[eventId];
+      return { ...state, pendingSegments };
+    }
+    return state;
+  }
+
+  if (event.type === 'agent.message') {
+    const text = payloadText(event.payload);
+    const pendingSegments = { ...state.pendingSegments };
+    delete pendingSegments[event.id];
+    return {
+      ...state,
+      pendingSegments,
+      finalAnswer: text ? { id: event.id, text } : undefined,
+    };
+  }
+
+  if (event.type === 'agent.tool_use') {
+    const toolId = String(payload.id ?? payload.toolCallId ?? payload.toolUseId ?? event.id);
+    if (!toolId) return state;
+    const preview = state.toolExecutions[event.id];
+    const toolExecutions = { ...state.toolExecutions };
+    if (event.id !== toolId) delete toolExecutions[event.id];
+    toolExecutions[toolId] = {
+      id: toolId,
+      toolName: String(payload.name ?? payload.toolName ?? preview?.toolName ?? 'tool'),
+      text: preview?.text ?? (payload.input != null ? JSON.stringify(payload.input) : undefined),
+      result: preview?.result,
+    };
+    return { ...state, toolExecutions };
+  }
+
+  if (event.type === 'agent.tool_result') {
+    const toolId = String(payload.tool_use_id ?? payload.toolCallId ?? payload.id ?? '');
+    const current = state.toolExecutions[toolId];
+    if (!toolId || !current) return state;
+    const result = payload.output != null ? String(payload.output) : payloadText(event.payload);
+    return {
+      ...state,
+      toolExecutions: {
+        ...state.toolExecutions,
+        [toolId]: { ...current, result },
+      },
+    };
+  }
+
+  return state;
+}
+
+export function chatDisplayBlocks(state: ChatDisplayState): ContentBlock[] {
+  const commentary = Object.values(state.commentarySegments).map(segment => ({
+    kind: 'text' as const,
+    id: `commentary-${segment.id}`,
+    text: segment.text,
+  }));
+  const thinking = Object.values(state.thinkingSegments).map(segment => ({
+    kind: 'text' as const,
+    id: `thinking-${segment.id}`,
+    text: segment.text,
+  }));
+  const tools = Object.values(state.toolExecutions).map(tool => ({
+    kind: 'tool' as const,
+    id: tool.id,
+    toolName: tool.toolName,
+    text: tool.text,
+    result: tool.result,
+  }));
+  const pending = Object.values(state.pendingSegments).map(segment => ({
+    kind: 'text' as const,
+    id: `pending-${segment.id}`,
+    text: segment.text,
+  }));
+  const finalAnswer = state.finalAnswer
+    ? [{ kind: 'text' as const, id: `final-${state.finalAnswer.id}`, text: state.finalAnswer.text }]
+    : [];
+  return [...commentary, ...thinking, ...tools, ...pending, ...finalAnswer];
 }
 
 const NEAR_BOTTOM_PX = 96;
@@ -156,12 +352,11 @@ function eventsToMessages(events: SessionEvent[]): Message[] {
         role: 'user',
         blocks: [{ kind: 'text', id: evt.id, text: payloadText(evt.payload) }],
       });
-    } else if (evt.type === 'agent.turn_stub' || evt.type === 'agent.message') {
-      ensureOpen(evt.id).blocks.push({
-        kind: 'text',
-        id: evt.id,
-        text: payloadText(evt.payload) || '[agent response]',
-      });
+    } else if (evt.type === 'agent.message') {
+      const text = payloadText(evt.payload);
+      if (text) {
+        ensureOpen(evt.id).blocks.push({ kind: 'text', id: evt.id, text });
+      }
     } else if (evt.type === 'agent.tool_use') {
       ensureOpen(evt.id).blocks.push({
         kind: 'tool',
@@ -320,63 +515,88 @@ export default function ChatPanel({
       if (!id) return prev;
       return prev.map(m => (m.id === id ? { ...m, pending: false, closed: true } : m));
     };
-    const append = (prev: Message[], seedId: string, block: ContentBlock): Message[] => {
-      const cur = openMsgIdRef.current;
-      if (cur) {
-        const existing = prev.find(m => m.id === cur);
-        if (existing && !existing.closed) {
-          // Avoid duplicate blocks for the same event id (preview vs persisted).
-          if (existing.blocks.some(
-            b => b.kind === block.kind && (b.id === block.id || b.id === seedId),
-          )) return prev;
-          return prev.map(m =>
-            m.id === cur ? { ...m, blocks: [...m.blocks, block], pending: true } : m);
+    const updateDisplay = (prev: Message[]): Message[] => {
+      const currentId = openMsgIdRef.current;
+      const current = currentId
+        ? prev.find(message => message.id === currentId && !message.closed)
+        : undefined;
+      const displayState = applyChatFrame(
+        current?.displayState ?? createChatDisplayState(),
+        evt,
+      );
+      const displayBlocks = chatDisplayBlocks(displayState);
+      const attributes = { ...(evt.payload ?? {}), ...(evt.attributes ?? {}) };
+      const settled = evt.type === 'agent.message'
+        || (evt.type === 'event_update'
+          && attributes.authoritative === true
+          && attributes.hasOutput === false);
+
+      if (current) {
+        if (displayBlocks.length === 0 && current.blocks.length === 0) {
+          openMsgIdRef.current = null;
+          return prev.filter(message => message.id !== current.id);
         }
+        return prev.map(message => message.id === current.id
+          ? {
+              ...message,
+              displayState,
+              pending: settled ? false : evt.type.startsWith('event_') ? true : message.pending,
+            }
+          : message);
       }
-      openMsgIdRef.current = `${seedId}-turn`;
-      return [...prev, { id: `${seedId}-turn`, role: 'assistant', blocks: [block], pending: true }];
+
+      if (displayBlocks.length === 0) return prev;
+      const seedId = String(evt.payload?.event_id ?? evt.id ?? nextId());
+      const messageId = `${seedId}-turn`;
+      openMsgIdRef.current = messageId;
+      return [...prev, {
+        id: messageId,
+        role: 'assistant',
+        blocks: [],
+        displayState,
+        pending: !settled,
+      }];
     };
 
-    if (evt.type === 'event_start') {
-      const targetType = String(evt.payload?.type ?? '');
-      const eventId = String(evt.payload?.event_id ?? '');
-      if (!eventId || targetType !== 'agent.message') return;
-      // Reserve the turn bubble so deltas stream into it.
-      setMessages(prev => append(prev, eventId, { kind: 'text', id: eventId, text: '' }));
+    if (evt.type === 'event_start'
+      || evt.type === 'event_delta'
+      || evt.type === 'event_update'
+      || evt.type === 'agent.message'
+      || evt.type === 'agent.tool_use') {
+      setMessages(updateDisplay);
       return;
     }
 
-    if (evt.type === 'event_delta') {
-      const targetType = String(evt.payload?.type ?? '');
-      const eventId = String(evt.payload?.event_id ?? '');
-      const delta = evt.payload?.delta != null ? String(evt.payload.delta) : '';
-      if (!eventId || !delta) return;
-      if (targetType === 'agent.message') {
-        setMessages(prev => {
-          const cur = openMsgIdRef.current;
-          if (cur) {
-            const existing = prev.find(m => m.id === cur);
-            if (existing && !existing.closed) {
-              return prev.map(m => {
-                if (m.id !== cur) return m;
-                const idx = m.blocks.findIndex(b => b.kind === 'text' && b.id === eventId);
-                if (idx >= 0) {
-                  return {
-                    ...m,
-                    blocks: m.blocks.map((b, i) =>
-                      i === idx ? { ...b, text: (b.text ?? '') + delta } : b),
-                    pending: true,
-                  };
-                }
-                return { ...m, blocks: [...m.blocks, { kind: 'text', id: eventId, text: delta }], pending: true };
-              });
-            }
-          }
-          return append(prev, eventId, { kind: 'text', id: eventId, text: delta });
+    if (evt.type === 'agent.tool_result') {
+      const toolId = String(
+        evt.payload?.tool_use_id ?? evt.payload?.toolCallId ?? evt.payload?.id ?? '',
+      );
+      if (!toolId) return;
+      setMessages(prev => {
+        const current = openMsgIdRef.current
+          ? prev.find(message => message.id === openMsgIdRef.current && !message.closed)
+          : undefined;
+        if (current?.displayState?.toolExecutions[toolId]) {
+          return updateDisplay(prev);
+        }
+        const result = evt.payload?.output != null
+          ? String(evt.payload.output)
+          : payloadText(evt.payload);
+        let updated = false;
+        const next = prev.map(message => {
+          const index = message.blocks.findIndex(
+            block => block.kind === 'tool' && block.id === toolId,
+          );
+          if (index < 0) return message;
+          updated = true;
+          return {
+            ...message,
+            blocks: message.blocks.map((block, i) =>
+              i === index ? { ...block, result } : block),
+          };
         });
-      } else if (targetType === 'agent.tool_use') {
-        setMessages(prev => append(prev, eventId, { kind: 'tool', id: eventId, toolName: 'tool', text: delta }));
-      }
+        return updated ? next : prev;
+      });
       return;
     }
 
@@ -395,84 +615,6 @@ export default function ChatPanel({
               : m);
         }
         return [...next, { id: evt.id, role: 'user', blocks: [{ kind: 'text', id: evt.id, text }] }];
-      });
-      return;
-    }
-
-    if (evt.type === 'agent.message' || evt.type === 'agent.turn_stub') {
-      const text = payloadText(evt.payload) || '[agent response]';
-      setMessages(prev => {
-        // The final persisted event carries the full text: replace the streamed
-        // preview block instead of appending a duplicate.
-        const cur = openMsgIdRef.current;
-        if (cur) {
-          const existing = prev.find(m => m.id === cur);
-          if (existing && !existing.closed) {
-            const idx = existing.blocks.findIndex(b => b.kind === 'text' && b.id === evt.id);
-            if (idx >= 0) {
-              return prev.map(m =>
-                m.id === cur
-                  ? { ...m, blocks: m.blocks.map((b, i) => (i === idx ? { ...b, text } : b)) }
-                  : m);
-            }
-          }
-        }
-        return append(prev, evt.id, { kind: 'text', id: evt.id, text });
-      });
-      return;
-    }
-
-    if (evt.type === 'agent.tool_use') {
-      const toolId = String(
-        evt.payload?.id ?? evt.payload?.toolCallId ?? evt.payload?.toolUseId ?? evt.id,
-      );
-      const toolName = String(evt.payload?.name ?? evt.payload?.toolName ?? 'tool');
-      const input = evt.payload?.input != null ? JSON.stringify(evt.payload.input) : undefined;
-      setMessages(prev => {
-        // Adopt the preview block (id = the event id) and finalize its id to the
-        // tool-call id so tool_result can match it later.
-        const cur = openMsgIdRef.current;
-        if (cur) {
-          const existing = prev.find(m => m.id === cur);
-          if (existing && !existing.closed) {
-            const idx = existing.blocks.findIndex(
-              b => b.kind === 'tool' && (b.id === toolId || b.id === evt.id),
-            );
-            if (idx >= 0) {
-              return prev.map(m =>
-                m.id === cur
-                  ? {
-                      ...m,
-                      blocks: m.blocks.map((b, i) =>
-                        i === idx ? { ...b, id: toolId, toolName, text: b.text ?? input } : b),
-                      pending: false,
-                    }
-                  : m);
-            }
-          }
-        }
-        return append(prev, evt.id, { kind: 'tool', id: toolId, toolName, text: input });
-      });
-      return;
-    }
-
-    if (evt.type === 'agent.tool_result') {
-      const toolUseId = String(
-        evt.payload?.tool_use_id ?? evt.payload?.toolCallId ?? evt.payload?.id ?? '',
-      );
-      const output = evt.payload?.output != null
-        ? String(evt.payload.output)
-        : payloadText(evt.payload);
-      if (!toolUseId) return;
-      setMessages(prev => {
-        let updated = false;
-        const next = prev.map(m => {
-          const idx = m.blocks.findIndex(b => b.kind === 'tool' && b.id === toolUseId);
-          if (idx < 0) return m;
-          updated = true;
-          return { ...m, blocks: m.blocks.map((b, i) => (i === idx ? { ...b, result: output } : b)) };
-        });
-        return updated ? next : prev;
       });
       return;
     }
@@ -800,7 +942,7 @@ export default function ChatPanel({
             <MessageBlock
               key={m.id}
               role={m.role}
-              blocks={m.blocks}
+              blocks={m.displayState ? chatDisplayBlocks(m.displayState) : m.blocks}
               pending={m.pending}
               defaultOpen={i === lastAssistant}
             />
