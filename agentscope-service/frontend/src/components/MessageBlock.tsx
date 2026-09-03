@@ -22,6 +22,9 @@ import ToolCallBlock from './ToolCallBlock';
 export interface ContentBlock {
   kind: 'text' | 'tool';
   id: string;
+  renderKey?: string;
+  sourceId?: string;
+  presentation?: 'commentary' | 'thinking' | 'pending' | 'preview' | 'final';
   /** Text content, or the tool-call input when kind === 'tool'. */
   text?: string;
   toolName?: string;
@@ -38,6 +41,14 @@ export interface MessageBlockProps {
 
 const PREVIEW_CHARS = 120;
 const EXPANDED_BODY_MAX_PX = 280;
+
+const presentationLabels: Record<NonNullable<ContentBlock['presentation']>, string> = {
+  commentary: 'Commentary',
+  thinking: 'Thinking',
+  pending: 'Draft',
+  preview: 'Preview',
+  final: 'Final answer',
+};
 
 function normalizePreview(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
@@ -155,7 +166,36 @@ const s: Record<string, React.CSSProperties> = {
   pending: {
     color: '#94a3b8',
   },
+  textBlock: {
+    borderRadius: 8,
+    padding: '8px 10px',
+  },
+  textLabel: {
+    marginBottom: 4,
+    color: '#64748b',
+    fontSize: '0.7rem',
+    fontWeight: 700,
+    letterSpacing: '0.05em',
+    textTransform: 'uppercase',
+  },
 };
+
+function presentationStyle(presentation?: ContentBlock['presentation']): React.CSSProperties {
+  switch (presentation) {
+    case 'commentary':
+      return { background: '#f8fafc', borderLeft: '3px solid #94a3b8', color: '#475569' };
+    case 'thinking':
+      return { background: '#f5f3ff', borderLeft: '3px solid #a78bfa', color: '#5b21b6' };
+    case 'pending':
+      return { background: '#eff6ff', borderLeft: '3px solid #60a5fa' };
+    case 'preview':
+      return { background: '#f8fafc', borderLeft: '3px solid #cbd5e1' };
+    case 'final':
+      return { background: '#ffffff', borderLeft: '3px solid #10b981' };
+    default:
+      return {};
+  }
+}
 
 export default function MessageBlock({
   role,
@@ -164,12 +204,22 @@ export default function MessageBlock({
   defaultOpen = false,
 }: MessageBlockProps) {
   const [open, setOpen] = useState(defaultOpen);
-  const text = useMemo(
+  const allText = useMemo(
     () => blocks.filter(b => b.kind === 'text').map(b => b.text ?? '').join(''),
     [blocks],
   );
+  const previewText = useMemo(() => {
+    const primary = blocks.filter(block => block.kind === 'text'
+      && block.presentation !== 'commentary'
+      && block.presentation !== 'thinking');
+    if (primary.length > 0) return primary.map(block => block.text ?? '').join('');
+    const context = [...blocks].reverse().find(block => block.kind === 'text');
+    if (!context) return '';
+    const label = context.presentation ? presentationLabels[context.presentation] : 'Context';
+    return `${label}: ${context.text ?? ''}`;
+  }, [blocks]);
   const toolCount = useMemo(() => blocks.filter(b => b.kind === 'tool').length, [blocks]);
-  const preview = useMemo(() => messagePreviewLine(text, pending), [text, pending]);
+  const preview = useMemo(() => messagePreviewLine(previewText, pending), [previewText, pending]);
   const toolHint = toolCount > 0 ? `${toolCount} tool${toolCount === 1 ? '' : 's'}` : '';
 
   const empty = blocks.length === 0;
@@ -185,7 +235,7 @@ export default function MessageBlock({
         <span style={s.chevron}>{open ? '▾' : '▸'}</span>
         <span style={s.role}>{role}</span>
         {!open && (
-          <span style={s.preview} title={normalizePreview(text) || undefined}>
+          <span style={s.preview} title={normalizePreview(previewText) || undefined}>
             {preview || (toolHint ? `${toolHint}…` : pending ? 'Generating…' : '(empty)')}
           </span>
         )}
@@ -203,17 +253,26 @@ export default function MessageBlock({
               ? (
                 role === 'assistant'
                   ? (
-                    <div key={b.id} className="md-text" style={{ wordBreak: 'break-word' }}>
-                      <ReactMarkdown>{b.text}</ReactMarkdown>
+                    <div
+                      key={b.renderKey ?? b.id}
+                      style={{ ...s.textBlock, ...presentationStyle(b.presentation) }}
+                      data-presentation={b.presentation}
+                    >
+                      {b.presentation && (
+                        <div style={s.textLabel}>{presentationLabels[b.presentation]}</div>
+                      )}
+                      <div className="md-text" style={{ wordBreak: 'break-word' }}>
+                        <ReactMarkdown>{b.text}</ReactMarkdown>
+                      </div>
                     </div>
                   )
                   : (
-                    <div key={b.id} style={s.text}>{b.text}</div>
+                    <div key={b.renderKey ?? b.id} style={s.text}>{b.text}</div>
                   )
               )
               : (
                 <ToolCallBlock
-                  key={b.id}
+                  key={b.renderKey ?? b.id}
                   toolName={b.toolName ?? 'tool'}
                   toolCallId={b.id}
                   input={b.text}
@@ -223,7 +282,7 @@ export default function MessageBlock({
           ))}
           {empty && pending && <div style={{ ...s.text, ...s.pending }}>…</div>}
           {empty && !pending && <div style={{ ...s.text, ...s.pending }}>—</div>}
-          {!empty && pending && text.trim() === '' && toolCount === 0 && (
+          {!empty && pending && allText.trim() === '' && toolCount === 0 && (
             <div style={{ ...s.text, ...s.pending }}>…</div>
           )}
         </div>
