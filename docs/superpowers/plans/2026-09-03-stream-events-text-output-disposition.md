@@ -131,13 +131,13 @@ git commit -m "feat(core): 新增文本输出处置事件"
 ### Task 2: 统一回复生命周期跟踪器
 
 **Files:**
-- Create: `agentscope-core/src/main/java/io/agentscope/core/event/ReplyLifecycleTracker.java`
-- Create: `agentscope-core/src/test/java/io/agentscope/core/event/ReplyLifecycleTrackerTest.java`
+- Create: `agentscope-core/src/main/java/io/agentscope/core/internal/stream/ReplyLifecycleTracker.java`
+- Create: `agentscope-core/src/test/java/io/agentscope/core/internal/stream/ReplyLifecycleTrackerTest.java`
 - Modify: `agentscope-core/src/main/java/io/agentscope/core/middleware/FinalAnswerFilterMiddleware.java`
 - Modify: `agentscope-core/src/test/java/io/agentscope/core/middleware/FinalAnswerFilterMiddlewareTest.java`
 
 **Interfaces:**
-- Produces package-private `ReplyLifecycleTracker`，按 `source + taskId` 生成 `SourceKey`。
+- Produces 位于明确 internal 包中的 `ReplyLifecycleTracker`，按 `source + taskId` 生成 `SourceKey`；类型跨包可见但不属于稳定公共 API。
 - Produces `Observation observe(AgentEvent event)`，至少返回 `replyId`、`textSeen`、`toolCallSeen`、`textBecameIntermediate` 和来源键。
 - Consumes Task 1 的事件类型，但跟踪器本身不发送事件、不缓存文本内容。
 
@@ -208,7 +208,7 @@ Expected: PASS，且 `FinalAnswerFilterMiddleware` 的事件序列不变。
 - [ ] **Step 6: 提交**
 
 ```bash
-git add agentscope-core/src/main/java/io/agentscope/core/event/ReplyLifecycleTracker.java agentscope-core/src/main/java/io/agentscope/core/middleware/FinalAnswerFilterMiddleware.java agentscope-core/src/test/java/io/agentscope/core/event/ReplyLifecycleTrackerTest.java agentscope-core/src/test/java/io/agentscope/core/middleware/FinalAnswerFilterMiddlewareTest.java
+git add agentscope-core/src/main/java/io/agentscope/core/internal/stream/ReplyLifecycleTracker.java agentscope-core/src/main/java/io/agentscope/core/middleware/FinalAnswerFilterMiddleware.java agentscope-core/src/test/java/io/agentscope/core/internal/stream/ReplyLifecycleTrackerTest.java agentscope-core/src/test/java/io/agentscope/core/middleware/FinalAnswerFilterMiddlewareTest.java
 git commit -m "refactor(core): 统一回复生命周期跟踪规则"
 ```
 
