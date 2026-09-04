@@ -169,17 +169,19 @@ describe('chat display state', () => {
     state = applyChatFrame(state, startFrame('tool-preview-1', 'agent.tool_use'));
     state = applyChatFrame(state, persistedToolUse('tool-preview-1', 'tool-call-1', 'lookup'));
     state = applyChatFrame(state, deltaFrame('reply-1', 'writing'));
-    state = applyChatFrame(state, updateFrame('reply-1', { disposition: 'INTERMEDIATE' }));
     state = applyChatFrame(state, deltaFrame('reply-1', 'answer'));
-    state = applyChatFrame(state, persistedAgentMessage('reply-1', 'final answer'));
+    state = applyChatFrame(state, persistedAgentMessage('authoritative-final', 'final answer'));
 
     const blocks = chatDisplayBlocks(state);
     expect(blocks.map(block => [block.presentation ?? 'tool', block.text])).toEqual([
       ['commentary', 'checking'],
       ['tool', ''],
-      ['commentary', 'writing'],
+      ['commentary', 'writinganswer'],
       ['final', 'final answer'],
     ]);
+    expect(Object.keys(state.pendingSegments)).toHaveLength(0);
+    expect(blocks.some(block => block.presentation === 'pending')).toBe(false);
+    expect(blocks.some(block => block.presentation === 'preview')).toBe(false);
     expect(new Set(blocks.map(block => block.id)).size).toBe(blocks.length);
 
     const html = renderToStaticMarkup(

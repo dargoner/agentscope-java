@@ -553,7 +553,7 @@ it('moves intermediate preview to commentary and confirms only authoritative res
 
 - [ ] **Step 2: 运行前端测试并确认失败**
 
-Run: `npm test -- --run ChatPanel.test.tsx`
+Run: `npm test -- ChatPanel.test.tsx`
 
 Workdir: `agentscope-service/frontend`
 
@@ -565,7 +565,7 @@ Expected: FAIL，客户端不识别 `event_update`。
 
 - [ ] **Step 4: 运行前端测试和构建**
 
-Run: `npm test -- --run && npm run build`
+Run: `npm test && npm run build`
 
 Workdir: `agentscope-service/frontend`
 
@@ -623,7 +623,7 @@ Expected: PASS。Windows 上另行记录 `DangerousPathBypassTest` 两个 symlin
 
 - [ ] **Step 4: 运行前端回归**
 
-Run: `npm test -- --run && npm run build`
+Run: `npm test && npm run build`
 
 Workdir: `agentscope-service/frontend`
 

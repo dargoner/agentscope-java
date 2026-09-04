@@ -78,6 +78,8 @@ export interface ChatDisplayState {
   finalAnswer?: ChatTextSegment;
   displayOrder: ChatDisplayEntry[];
   activePendingSegmentIds: Record<string, string>;
+  activeCommentarySegmentIds: Record<string, string>;
+  knownDispositions: Record<string, 'INTERMEDIATE' | 'TERMINAL'>;
   nextSequence: number;
 }
 
@@ -89,6 +91,8 @@ export function createChatDisplayState(): ChatDisplayState {
     toolExecutions: {},
     displayOrder: [],
     activePendingSegmentIds: {},
+    activeCommentarySegmentIds: {},
+    knownDispositions: {},
     nextSequence: 1,
   };
 }
@@ -102,6 +106,8 @@ function cloneDisplayState(state: ChatDisplayState): ChatDisplayState {
     toolExecutions: { ...state.toolExecutions },
     displayOrder: [...state.displayOrder],
     activePendingSegmentIds: { ...state.activePendingSegmentIds },
+    activeCommentarySegmentIds: { ...state.activeCommentarySegmentIds },
+    knownDispositions: { ...state.knownDispositions },
   };
 }
 
@@ -134,6 +140,30 @@ function ensurePendingSegment(state: ChatDisplayState, sourceId: string): string
   return segmentId;
 }
 
+function ensureCommentarySegment(state: ChatDisplayState, sourceId: string): string {
+  const activeId = state.activeCommentarySegmentIds[sourceId];
+  if (activeId && state.commentarySegments[activeId]) return activeId;
+  const segmentId = uniqueDisplayKey(state, sourceId);
+  state.commentarySegments[segmentId] = {
+    id: segmentId,
+    sourceId,
+    text: '',
+    pending: false,
+  };
+  state.activeCommentarySegmentIds[sourceId] = segmentId;
+  state.displayOrder.push({
+    key: segmentId,
+    kind: 'text',
+    refId: segmentId,
+    presentation: 'commentary',
+  });
+  return segmentId;
+}
+
+function closeActiveCommentarySegments(state: ChatDisplayState): void {
+  state.activeCommentarySegmentIds = {};
+}
+
 function ensureToolExecution(state: ChatDisplayState, eventId: string): ChatToolExecution {
   const existing = state.toolExecutions[eventId];
   if (existing) return existing;
@@ -157,11 +187,16 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
     if (!eventId) return state;
     if (targetType === 'agent.message') {
       const next = cloneDisplayState(state);
-      ensurePendingSegment(next, eventId);
+      if (next.knownDispositions[eventId] === 'INTERMEDIATE') {
+        ensureCommentarySegment(next, eventId);
+      } else {
+        ensurePendingSegment(next, eventId);
+      }
       return next;
     }
     if (targetType === 'agent.tool_use') {
       const next = cloneDisplayState(state);
+      closeActiveCommentarySegments(next);
       ensureToolExecution(next, eventId);
       return next;
     }
@@ -173,12 +208,20 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
     if (!eventId || !delta) return state;
     if (targetType === 'agent.message') {
       const next = cloneDisplayState(state);
-      const segmentId = ensurePendingSegment(next, eventId);
-      next.pendingSegments[segmentId] = {
-        ...next.pendingSegments[segmentId],
-        text: `${next.pendingSegments[segmentId].text}${delta}`,
-        pending: true,
-      };
+      if (next.knownDispositions[eventId] === 'INTERMEDIATE') {
+        const segmentId = ensureCommentarySegment(next, eventId);
+        next.commentarySegments[segmentId] = {
+          ...next.commentarySegments[segmentId],
+          text: `${next.commentarySegments[segmentId].text}${delta}`,
+        };
+      } else {
+        const segmentId = ensurePendingSegment(next, eventId);
+        next.pendingSegments[segmentId] = {
+          ...next.pendingSegments[segmentId],
+          text: `${next.pendingSegments[segmentId].text}${delta}`,
+          pending: true,
+        };
+      }
       return next;
     }
     if (targetType === 'agent.thinking') {
@@ -204,6 +247,7 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
     }
     if (targetType === 'agent.tool_use') {
       const next = cloneDisplayState(state);
+      closeActiveCommentarySegments(next);
       const current = ensureToolExecution(next, eventId);
       next.toolExecutions[eventId] = {
         ...current,
@@ -219,11 +263,13 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
     if (attributes.disposition === 'INTERMEDIATE') {
       const segmentId = state.activePendingSegmentIds[eventId];
       const pending = segmentId ? state.pendingSegments[segmentId] : undefined;
-      if (!pending) return state;
       const next = cloneDisplayState(state);
+      next.knownDispositions[eventId] = 'INTERMEDIATE';
+      if (!pending) return next;
       delete next.pendingSegments[segmentId];
       delete next.activePendingSegmentIds[eventId];
       next.commentarySegments[segmentId] = { ...pending, pending: false };
+      next.activeCommentarySegmentIds[eventId] = segmentId;
       next.displayOrder = next.displayOrder.map(entry => entry.refId === segmentId
         ? { ...entry, presentation: 'commentary' }
         : entry);
@@ -232,8 +278,9 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
     if (attributes.disposition === 'TERMINAL') {
       const segmentId = state.activePendingSegmentIds[eventId];
       const pending = segmentId ? state.pendingSegments[segmentId] : undefined;
-      if (!pending) return state;
       const next = cloneDisplayState(state);
+      next.knownDispositions[eventId] = 'TERMINAL';
+      if (!pending) return next;
       next.pendingSegments[segmentId] = { ...pending, pending: false };
       delete next.activePendingSegmentIds[eventId];
       next.displayOrder = next.displayOrder.map(entry => entry.refId === segmentId
@@ -258,18 +305,15 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
   if (event.type === 'agent.message') {
     const text = payloadText(event.payload);
     const next = cloneDisplayState(state);
-    const removedEntries = next.displayOrder.filter(entry => {
-      const segment = next.pendingSegments[entry.refId];
-      return segment?.sourceId === event.id;
-    });
+    const removedEntries = next.displayOrder.filter(entry => next.pendingSegments[entry.refId]);
     const insertionIndex = removedEntries.length > 0
       ? next.displayOrder.findIndex(entry => entry.key === removedEntries[0].key)
       : next.displayOrder.length;
-    const removedIds = Object.values(next.pendingSegments)
-      .filter(segment => segment.sourceId === event.id)
-      .map(segment => segment.id);
+    const removedIds = Object.keys(next.pendingSegments);
     for (const id of removedIds) delete next.pendingSegments[id];
-    delete next.activePendingSegmentIds[event.id];
+    next.activePendingSegmentIds = {};
+    next.activeCommentarySegmentIds = {};
+    next.knownDispositions = {};
     next.displayOrder = next.displayOrder.filter(entry =>
       !removedIds.includes(entry.refId) && entry.presentation !== 'final');
     next.finalAnswer = text
@@ -291,6 +335,7 @@ export function applyChatFrame(state: ChatDisplayState, event: SessionEvent): Ch
     const toolId = String(payload.id ?? payload.toolCallId ?? payload.toolUseId ?? event.id);
     if (!toolId) return state;
     const next = cloneDisplayState(state);
+    closeActiveCommentarySegments(next);
     const preview = next.toolExecutions[event.id];
     if (!preview) ensureToolExecution(next, event.id);
     const source = preview ?? next.toolExecutions[event.id];

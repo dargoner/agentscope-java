@@ -140,6 +140,36 @@ class SessionEventMapperTest {
         assertThat(result.persisted().orElseThrow().eventId()).isEqualTo(previewId);
     }
 
+    @Test
+    void agentEndReusesLastModelPreviewWhenInvocationReplyIdDiffers() {
+        mapper.map(new ModelCallStartEvent("model-reply"), previewIds);
+        String previewId =
+                mapper.map(
+                                new TextBlockDeltaEvent("model-reply", "text-block", "preview"),
+                                previewIds)
+                        .preview()
+                        .orElseThrow()
+                        .eventId();
+        mapper.map(new ModelCallEndEvent("model-reply", null), previewIds);
+
+        Msg msg =
+                Msg.builder()
+                        .role(MsgRole.ASSISTANT)
+                        .textContent("authoritative")
+                        .generateReason(GenerateReason.MODEL_STOP)
+                        .build();
+        mapper.map(new AgentResultEvent(msg), previewIds);
+        mapper.map(
+                new TextOutputDispositionEvent(
+                        "model-reply", TextOutputDisposition.TERMINAL, GenerateReason.MODEL_STOP),
+                previewIds);
+
+        SessionEventMapper.MappingResult result =
+                mapper.map(new AgentEndEvent("invocation-reply"), previewIds);
+
+        assertThat(result.persisted().orElseThrow().eventId()).isEqualTo(previewId);
+    }
+
     /** Each model request opens a fresh preview window; the result reconciles with the last one. */
     @Test
     void multiRoundTurnReusesLastRoundPreviewMessageEventId() {
