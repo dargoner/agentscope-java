@@ -158,7 +158,7 @@ public class SessionEventMapper {
                             thinking.getDelta()));
         }
         if (event instanceof TextOutputDispositionEvent disposition) {
-            String eventId = previewIds.messageEventIdIfPresent(disposition);
+            String eventId = previewIds.dispositionMessageEventId(disposition);
             if (eventId == null) {
                 return MappingResult.empty();
             }
@@ -411,6 +411,7 @@ public class SessionEventMapper {
 
         private final Map<PreviewKey, String> messageIdsByReply = new LinkedHashMap<>();
         private final Set<PreviewKey> intermediateReplies = new HashSet<>();
+        private final Map<InvocationKey, PreviewKey> terminalReplies = new LinkedHashMap<>();
         private final Map<InvocationKey, String> thinkingIds = new LinkedHashMap<>();
         private final Map<InvocationKey, AgentResultEvent> topLevelResults = new LinkedHashMap<>();
         private final Map<ToolKey, ToolBuffers.ToolUseBuffer> toolUses = new LinkedHashMap<>();
@@ -422,13 +423,25 @@ public class SessionEventMapper {
             return messageIdsByReply.computeIfAbsent(previewKey, ignored -> newEventId());
         }
 
-        public String messageEventIdIfPresent(TextOutputDispositionEvent event) {
-            return messageIdsByReply.get(previewKey(event, event.getReplyId()));
+        public String dispositionMessageEventId(TextOutputDispositionEvent event) {
+            PreviewKey previewKey = previewKey(event, event.getReplyId());
+            String eventId = messageIdsByReply.get(previewKey);
+            if (eventId != null && event.getDisposition() == TextOutputDisposition.TERMINAL) {
+                terminalReplies.put(previewKey.invocation(), previewKey);
+            }
+            return eventId;
         }
 
-        /** Returns and clears the preview id for this invocation and reply. */
+        /** Returns and clears the preview id finalized for this invocation. */
         public String consumeMessageEventId(AgentEndEvent event) {
-            PreviewKey previewKey = previewKey(event, event.getReplyId());
+            InvocationKey invocationKey = invocationKey(event);
+            PreviewKey terminalReply = terminalReplies.remove(invocationKey);
+            PreviewKey previewKey =
+                    terminalReply != null ? terminalReply : previewKey(event, event.getReplyId());
+            return removeMessageEventId(previewKey);
+        }
+
+        private String removeMessageEventId(PreviewKey previewKey) {
             intermediateReplies.remove(previewKey);
             return messageIdsByReply.remove(previewKey);
         }
