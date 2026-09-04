@@ -716,6 +716,8 @@ class ReActAgentPerSessionStateTest {
             manager.resetForTesting();
             manager.setConfig(GracefulShutdownConfig.DEFAULT);
         }
+    }
+
     @Test
     @DisplayName("shutdown retry clears and uses the current non-default session state")
     void shutdownRetryUsesCurrentSessionState() {
