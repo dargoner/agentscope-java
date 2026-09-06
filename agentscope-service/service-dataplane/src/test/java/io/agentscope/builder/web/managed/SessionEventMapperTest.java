@@ -47,6 +47,7 @@ import io.agentscope.core.message.ToolResultState;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -502,6 +503,17 @@ class SessionEventMapperTest {
     @Test
     void previewBusAndControllerPassUpdateAttributesThroughToSse() throws Exception {
         SessionEventPreviewBus previewBus = new SessionEventPreviewBus();
+        CompletableFuture<SessionEventDto> preview =
+                previewBus.subscribe("session-1").next().toFuture();
+        previewBus.emitUpdate(
+                "session-1",
+                SessionEventTypes.AGENT_MESSAGE,
+                "evt_preview",
+                Map.of("disposition", "INTERMEDIATE", "custom", Map.of("nested", true)));
+        SessionEventDto previewEvent = preview.get(5, TimeUnit.SECONDS);
+
+        SessionEventPreviewBus controllerPreviewBus = mock(SessionEventPreviewBus.class);
+        when(controllerPreviewBus.subscribe("session-1")).thenReturn(Flux.just(previewEvent));
         DataSessionService sessionService = mock(DataSessionService.class);
         SessionEventLog eventLog = mock(SessionEventLog.class);
         Authentication authentication = mock(Authentication.class);
@@ -512,7 +524,7 @@ class SessionEventMapperTest {
                 new DataSessionApiController(
                         sessionService,
                         eventLog,
-                        previewBus,
+                        controllerPreviewBus,
                         mock(ToolConfirmationCoordinator.class),
                         mock(SessionTurnRunner.class),
                         new ObjectMapper(),
@@ -527,12 +539,6 @@ class SessionEventMapperTest {
                         .next()
                         .toFuture();
 
-        previewBus.emitUpdate(
-                "session-1",
-                SessionEventTypes.AGENT_MESSAGE,
-                "evt_preview",
-                Map.of("disposition", "INTERMEDIATE", "custom", Map.of("nested", true)));
-
         ServerSentEvent<String> sse = next.get(5, TimeUnit.SECONDS);
         assertThat(sse.event()).isEqualTo(SessionEventTypes.EVENT_UPDATE);
         @SuppressWarnings("unchecked")
@@ -544,6 +550,67 @@ class SessionEventMapperTest {
                 .containsEntry("type", SessionEventTypes.AGENT_MESSAGE)
                 .containsEntry("disposition", "INTERMEDIATE");
         assertThat(((Map<?, ?>) payload.get("custom")).get("nested")).isEqualTo(true);
+    }
+
+    @Test
+    void previewBusDoesNotReplayFramesEmittedBeforeSubscription() throws Exception {
+        SessionEventPreviewBus previewBus = new SessionEventPreviewBus();
+        previewBus.emitDelta(
+                "session-1", SessionEventTypes.AGENT_MESSAGE, "evt_stale", "stale preview");
+
+        CompletableFuture<SessionEventDto> next =
+                previewBus.subscribe("session-1").next().toFuture();
+        previewBus.emitDelta(
+                "session-1", SessionEventTypes.AGENT_MESSAGE, "evt_live", "live preview");
+
+        SessionEventDto event = next.get(5, TimeUnit.SECONDS);
+        assertThat(event.payload())
+                .containsEntry("event_id", "evt_live")
+                .containsEntry("delta", "live preview");
+    }
+
+    @Test
+    void previewBusSerializesConcurrentSessionEmissions() throws Exception {
+        SessionEventPreviewBus previewBus = new SessionEventPreviewBus();
+        int eventsPerSession = 1_000;
+        CompletableFuture<List<SessionEventDto>> sessionA =
+                previewBus.subscribe("session-a").take(eventsPerSession).collectList().toFuture();
+        CompletableFuture<List<SessionEventDto>> sessionB =
+                previewBus.subscribe("session-b").take(eventsPerSession).collectList().toFuture();
+        CountDownLatch start = new CountDownLatch(1);
+
+        CompletableFuture<Void> producerA =
+                CompletableFuture.runAsync(
+                        () ->
+                                emitConcurrentFrames(
+                                        previewBus, "session-a", eventsPerSession, start));
+        CompletableFuture<Void> producerB =
+                CompletableFuture.runAsync(
+                        () ->
+                                emitConcurrentFrames(
+                                        previewBus, "session-b", eventsPerSession, start));
+        start.countDown();
+        CompletableFuture.allOf(producerA, producerB).get(5, TimeUnit.SECONDS);
+
+        assertThat(sessionA.get(5, TimeUnit.SECONDS)).hasSize(eventsPerSession);
+        assertThat(sessionB.get(5, TimeUnit.SECONDS)).hasSize(eventsPerSession);
+    }
+
+    private static void emitConcurrentFrames(
+            SessionEventPreviewBus previewBus, String sessionId, int count, CountDownLatch start) {
+        try {
+            start.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting to emit preview frames", e);
+        }
+        for (int i = 0; i < count; i++) {
+            previewBus.emitDelta(
+                    sessionId,
+                    SessionEventTypes.AGENT_MESSAGE,
+                    "evt_" + sessionId + "_" + i,
+                    "delta-" + i);
+        }
     }
 
     @Test
