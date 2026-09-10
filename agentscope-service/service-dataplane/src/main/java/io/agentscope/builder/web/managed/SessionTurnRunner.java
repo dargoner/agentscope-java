@@ -199,8 +199,7 @@ public class SessionTurnRunner {
             long dispatchGeneration,
             String turnId,
             String reason) {
-        String abortReason =
-                reason != null && !reason.isBlank() ? reason : "managed_attempt_abort";
+        String abortReason = reason != null && !reason.isBlank() ? reason : "managed_attempt_abort";
         if (interruptLocal(sessionId, abortReason)) {
             return;
         }
