@@ -25,6 +25,7 @@ import io.agentscope.core.agui.processor.AguiRequestProcessor;
 import io.agentscope.core.agui.registry.AguiAgentRegistry;
 import io.agentscope.core.agui.runtime.AguiRuntimeContextRequest;
 import io.agentscope.core.agui.runtime.AguiRuntimeContextResolver;
+import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.spring.boot.agui.common.DefaultAgentResolver;
 import io.agentscope.spring.boot.agui.common.ThreadSessionManager;
 import jakarta.servlet.http.HttpServletRequest;
@@ -93,6 +94,7 @@ public class AguiMvcController {
                                         ? builder.config
                                         : AguiAdapterConfig.defaultConfig())
                         .adapterFactory(builder.adapterFactory)
+                        .resumeStateStore(builder.resumeStateStore)
                         .runtimeContextResolver(builder.runtimeContextResolver)
                         .build();
         this.encoder = new AguiEventEncoder();
@@ -186,7 +188,11 @@ public class AguiMvcController {
                                         logger.error(
                                                 "Error during AG-UI run: {}", error.getMessage());
                                         sendErrorAndComplete(
-                                                emitter, threadId, runId, error.getMessage());
+                                                emitter,
+                                                threadId,
+                                                runId,
+                                                error.getMessage(),
+                                                !AguiRequestProcessor.isCoordinatorFailure(error));
                                     }
 
                                     @Override
@@ -244,10 +250,10 @@ public class AguiMvcController {
 
                     } catch (AguiException.AgentNotFoundException e) {
                         logger.error("Agent not found: {}", e.getMessage());
-                        sendErrorAndComplete(emitter, threadId, runId, e.getMessage());
+                        sendErrorAndComplete(emitter, threadId, runId, e.getMessage(), true);
                     } catch (Exception e) {
                         logger.error("Error processing AG-UI request: {}", e.getMessage());
-                        sendErrorAndComplete(emitter, threadId, runId, e.getMessage());
+                        sendErrorAndComplete(emitter, threadId, runId, e.getMessage(), true);
                     }
                 });
 
@@ -311,14 +317,21 @@ public class AguiMvcController {
     }
 
     private void sendErrorAndComplete(
-            SseEmitter emitter, String threadId, String runId, String errorMessage) {
+            SseEmitter emitter,
+            String threadId,
+            String runId,
+            String errorMessage,
+            boolean includeFinished) {
         try {
             String errorJson =
                     encoder.encodeToJson(
                             new AguiEvent.Raw(threadId, runId, Map.of("error", errorMessage)));
-            String finishJson = encoder.encodeToJson(new AguiEvent.RunFinished(threadId, runId));
             emitter.send(SseEmitter.event().data(errorJson, MediaType.APPLICATION_JSON));
-            emitter.send(SseEmitter.event().data(finishJson, MediaType.APPLICATION_JSON));
+            if (includeFinished) {
+                String finishJson =
+                        encoder.encodeToJson(new AguiEvent.RunFinished(threadId, runId));
+                emitter.send(SseEmitter.event().data(finishJson, MediaType.APPLICATION_JSON));
+            }
             emitter.complete();
         } catch (IOException e) {
             logger.debug("Failed to send error event: {}", e.getMessage());
@@ -360,6 +373,7 @@ public class AguiMvcController {
         private boolean interruptOnDisconnect = true;
         private AguiRuntimeContextResolver runtimeContextResolver;
         private AguiAgentAdapterFactory adapterFactory;
+        private AgentStateStore resumeStateStore;
 
         /**
          * Set the agent registry.
@@ -457,6 +471,12 @@ public class AguiMvcController {
          */
         public Builder adapterFactory(AguiAgentAdapterFactory adapterFactory) {
             this.adapterFactory = adapterFactory;
+            return this;
+        }
+
+        /** Set the versioned store used for distributed AG-UI resume coordination. */
+        public Builder resumeStateStore(AgentStateStore resumeStateStore) {
+            this.resumeStateStore = resumeStateStore;
             return this;
         }
 

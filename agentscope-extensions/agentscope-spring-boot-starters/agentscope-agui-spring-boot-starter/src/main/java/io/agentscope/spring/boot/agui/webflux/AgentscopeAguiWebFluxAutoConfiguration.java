@@ -23,7 +23,9 @@ import io.agentscope.core.agui.adapter.strategy.AguiEventEnricher;
 import io.agentscope.core.agui.registry.AguiAgentRegistry;
 import io.agentscope.core.agui.runtime.AguiRequestBodyParser;
 import io.agentscope.core.agui.runtime.AguiRuntimeContextResolver;
+import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.spring.boot.agui.common.AguiProperties;
+import io.agentscope.spring.boot.agui.common.AguiResumeStateStoreResolver;
 import io.agentscope.spring.boot.agui.common.ThreadSessionManager;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -104,6 +106,7 @@ public class AgentscopeAguiWebFluxAutoConfiguration {
             ObjectProvider<AguiEventEnricher> eventEnrichersProvider,
             ObjectProvider<AguiRuntimeContextResolver> runtimeContextResolverProvider,
             ObjectProvider<AguiAgentAdapterFactory> adapterFactoryProvider,
+            ObjectProvider<AgentStateStore> stateStoreProvider,
             AguiRequestBodyParser requestBodyParser) {
         AguiAdapterConfig config =
                 AguiAdapterConfig.builder()
@@ -127,6 +130,7 @@ public class AgentscopeAguiWebFluxAutoConfiguration {
                 .interruptOnDisconnect(props.isInterruptOnDisconnect())
                 .runtimeContextResolver(runtimeContextResolverProvider.getIfAvailable())
                 .adapterFactory(adapterFactoryProvider.getIfAvailable())
+                .resumeStateStore(AguiResumeStateStoreResolver.resolve(props, stateStoreProvider))
                 .requestBodyParser(requestBodyParser)
                 .config(config)
                 .build();

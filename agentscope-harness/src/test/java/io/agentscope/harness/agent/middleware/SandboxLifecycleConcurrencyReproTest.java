@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.core.state.InMemoryAgentStateStore;
 import io.agentscope.harness.agent.filesystem.sandbox.SandboxBackedFilesystem;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.Sandbox;
@@ -131,7 +132,8 @@ class SandboxLifecycleConcurrencyReproTest {
             Map<String, RecordingSandbox> sandboxBySession,
             Map<String, RecordingLease> leaseBySession) {
         SandboxClient<?> client = mock(SandboxClient.class);
-        SessionSandboxStateStore stateStore = mock(SessionSandboxStateStore.class);
+        SessionSandboxStateStore stateStore =
+                new SessionSandboxStateStore(new InMemoryAgentStateStore(), "repro-agent");
         return new SandboxManager(client, stateStore, "repro-agent") {
             @Override
             public SandboxAcquireResult acquire(

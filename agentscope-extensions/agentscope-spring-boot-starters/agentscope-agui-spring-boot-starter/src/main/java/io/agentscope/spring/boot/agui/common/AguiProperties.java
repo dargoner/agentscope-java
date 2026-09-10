@@ -126,6 +126,9 @@ public class AguiProperties {
      */
     private long sseTimeout = 600000L;
 
+    /** Resume-specific options. */
+    private final ResumeProperties resume = new ResumeProperties();
+
     /** Whether to interrupt the agent when the client disconnects. */
     private boolean interruptOnDisconnect = true;
 
@@ -263,6 +266,31 @@ public class AguiProperties {
 
     public void setSseTimeout(long sseTimeout) {
         this.sseTimeout = sseTimeout;
+    }
+
+    public boolean isResumeDistributedEnabled() {
+        return resume.isDistributedEnabled();
+    }
+
+    public void setResumeDistributedEnabled(boolean resumeDistributedEnabled) {
+        resume.setDistributedEnabled(resumeDistributedEnabled);
+    }
+
+    public ResumeProperties getResume() {
+        return resume;
+    }
+
+    /** Options controlling AG-UI resume coordination. */
+    public static class ResumeProperties {
+        private boolean distributedEnabled;
+
+        public boolean isDistributedEnabled() {
+            return distributedEnabled;
+        }
+
+        public void setDistributedEnabled(boolean distributedEnabled) {
+            this.distributedEnabled = distributedEnabled;
+        }
     }
 
     public boolean isInterruptOnDisconnect() {

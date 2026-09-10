@@ -19,8 +19,10 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.harness.agent.filesystem.sandbox.SandboxBackedFilesystem;
 import io.agentscope.harness.agent.sandbox.Sandbox;
 import io.agentscope.harness.agent.sandbox.SandboxAcquireResult;
+import io.agentscope.harness.agent.sandbox.SandboxBindingKey;
 import io.agentscope.harness.agent.sandbox.SandboxContext;
 import io.agentscope.harness.agent.sandbox.SandboxManager;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,6 +62,8 @@ public class SandboxLifecycleMiddleware implements HarnessRuntimeMiddleware {
     private final SandboxManager sandboxManager;
     private final SandboxBackedFilesystem filesystemProxy;
     private volatile Consumer<RuntimeContext> beforeStartCallback;
+    private final ConcurrentHashMap<String, SandboxAcquireResult> acquireResults =
+            new ConcurrentHashMap<>();
 
     public SandboxLifecycleMiddleware(
             SandboxManager sandboxManager, SandboxBackedFilesystem filesystemProxy) {
@@ -80,11 +84,13 @@ public class SandboxLifecycleMiddleware implements HarnessRuntimeMiddleware {
     }
 
     /**
-     * Acquires the sandbox for the current call. Called from
-     * {@code ReActAgent.beforeAgentExecution()} to ensure the sandbox is available
-     * for both the {@code call()} and {@code streamEvents()} paths.
+     * Acquires the sandbox for the current call, binding it under the call's session key.
      *
-     * @param ctx the per-call RuntimeContext (must not be null)
+     * <p>Intended to be wrapped by the caller in a {@code Mono.using}/{@code Flux.using} so that
+     * {@link #releaseForCall} is always invoked on termination (complete/error/cancel). This
+     * method does <b>not</b> serialize same-session concurrency; callers must ensure per-session
+     * non-concurrency at the entry point, or configure a distributed {@code SandboxExecutionGuard}
+     * whose lease serializes by {@code SandboxIsolationKey}.
      */
     public void acquireForCall(RuntimeContext ctx) {
         if (ctx == null) {
@@ -94,6 +100,30 @@ public class SandboxLifecycleMiddleware implements HarnessRuntimeMiddleware {
         if (sandboxContext == null) {
             return;
         }
+        String sessionKey = SandboxBindingKey.resolve(ctx);
+        if (sessionKey == null) {
+            return;
+        }
+        doAcquire(ctx, sandboxContext, sessionKey);
+    }
+
+    /**
+     * Releases the sandbox acquired by {@link #acquireForCall}. Intended as the cleanup step of
+     * a {@code Mono.using}/{@code Flux.using} wrapper; failures are logged but do not propagate.
+     */
+    public void releaseForCall(RuntimeContext ctx) {
+        doRelease(ctx);
+    }
+
+    /**
+     * Acquires a sandbox session: runs the optional {@link #beforeStartCallback},
+     * obtains a lease via {@link SandboxManager#acquire}, starts the sandbox, and
+     * binds it to the filesystem proxy under {@code sessionKey}.
+     *
+     * <p>On failure after acquire, the sandbox is released and the lease closed to
+     * prevent resource leaks.
+     */
+    private void doAcquire(RuntimeContext ctx, SandboxContext sandboxContext, String sessionKey) {
         try {
             Consumer<RuntimeContext> cb = beforeStartCallback;
             if (cb != null) {
@@ -111,19 +141,34 @@ public class SandboxLifecycleMiddleware implements HarnessRuntimeMiddleware {
             Sandbox sandbox = result.getSandbox();
             try {
                 sandbox.start();
-                // Bind the acquired sandbox per-call on this invocation's RuntimeContext rather
-                // than only on a shared agent-level slot. Distinct (userId, sessionId) sessions
-                // run in parallel on the same agent bean, so a shared slot lets concurrent calls
-                // corrupt each other's binding (issue #2490). The filesystem proxy resolves the
-                // sandbox from this context first; the field below is a best-effort fallback for
-                // context-free callers (e.g. WorkspaceMessageBus) that do not thread a per-call.
+                // RuntimeContext is the concurrency-safe binding for this exact invocation.
                 ctx.put(SandboxAcquireResult.class, result);
+                // Keep the session map and legacy field for callers that cannot propagate it.
+                filesystemProxy.bindSandbox(sessionKey, sandbox);
                 filesystemProxy.setSandbox(sandbox);
+                SandboxAcquireResult previous = acquireResults.putIfAbsent(sessionKey, result);
+                if (previous != null) {
+                    // Same-session serialization is enforced above this middleware (ReActAgent
+                    // slot lock + optional SandboxExecutionGuard). A pre-existing entry here
+                    // means that invariant was violated. Log loudly so the leak is diagnosable;
+                    // we deliberately do not attempt recovery, since the previous binding was
+                    // already overwritten by bindSandbox above and any rollback would be
+                    // best-effort at best.
+                    log.warn(
+                            "[sandbox-mw] Overwriting sandbox binding for sessionKey {}:"
+                                    + " previous acquire result was never released. Same-session"
+                                    + " serialization pre-condition violated; the previous sandbox"
+                                    + " will leak.",
+                            sessionKey);
+                }
                 log.debug(
-                        "[sandbox-mw] Acquired sandbox {}",
-                        sandbox.getState() != null ? sandbox.getState().getSessionId() : "?");
+                        "[sandbox-mw] Acquired sandbox {} for session {}",
+                        sandbox.getState() != null ? sandbox.getState().getSessionId() : "?",
+                        sessionKey);
             } catch (Exception e) {
                 ctx.put(SandboxAcquireResult.class, null);
+                acquireResults.remove(sessionKey, result);
+                filesystemProxy.unbindSandbox(sessionKey);
                 filesystemProxy.clearSandboxIfCurrent(sandbox);
                 try {
                     sandboxManager.release(result);
@@ -143,18 +188,26 @@ public class SandboxLifecycleMiddleware implements HarnessRuntimeMiddleware {
     }
 
     /**
-     * Releases the sandbox after the current call. Called from
-     * {@code ReActAgent.afterAgentExecution()} to ensure cleanup for both paths.
+     * Releases a previously acquired sandbox session: persists state, releases the
+     * sandbox via {@link SandboxManager#release}, closes the lease, and unbinds the
+     * filesystem proxy.
      *
-     * @param ctx the per-call RuntimeContext (captured at acquire time)
+     * <p>Failures during persist or release are logged but do not propagate, ensuring
+     * the agent call result is always delivered to the caller.
      */
-    public void releaseForCall(RuntimeContext ctx) {
+    private void doRelease(RuntimeContext ctx) {
         if (ctx == null) {
             return;
         }
-        // Read back the binding this same call established in acquireForCall, so a call only ever
-        // tears down its own sandbox — never a concurrent session's (issue #2490).
+        String sessionKey = SandboxBindingKey.resolve(ctx);
+        // Prefer the binding established by this exact invocation. The map remains a compatibility
+        // fallback for older callers that did not preserve RuntimeContext state.
         SandboxAcquireResult result = ctx.get(SandboxAcquireResult.class);
+        if (result == null && sessionKey != null) {
+            result = acquireResults.remove(sessionKey);
+        } else if (result != null && sessionKey != null) {
+            acquireResults.remove(sessionKey, result);
+        }
         if (result == null) {
             return;
         }
@@ -174,5 +227,6 @@ public class SandboxLifecycleMiddleware implements HarnessRuntimeMiddleware {
             log.warn("[sandbox-mw] Failed to release sandbox session: {}", e.getMessage(), e);
         }
         result.getLease().close();
+        filesystemProxy.unbindSandbox(sessionKey);
     }
 }

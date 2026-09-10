@@ -62,6 +62,10 @@ public class SandboxManager {
         this.client = Objects.requireNonNull(client, "client must not be null");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore must not be null");
         this.agentId = Objects.requireNonNull(agentId, "agentId must not be null");
+        if (!this.agentId.equals(stateStore.agentId())) {
+            throw new IllegalArgumentException(
+                    "SandboxManager agentId must match SessionSandboxStateStore agentId");
+        }
         this.executionGuard =
                 executionGuard != null ? executionGuard : SandboxExecutionGuard.noop();
     }
@@ -90,6 +94,8 @@ public class SandboxManager {
         Optional<SandboxIsolationKey> scopeKey =
                 SandboxIsolationKey.resolve(
                         sandboxContext.getIsolationScope(), runtimeContext, agentId);
+        Optional<SandboxWorkspaceKey> workspaceKey =
+                scopeKey.map(key -> SandboxWorkspaceKey.from(key, agentId));
 
         SandboxLease lease = SandboxLease.noop();
         if (scopeKey.isPresent()) {
@@ -116,7 +122,7 @@ public class SandboxManager {
                         if (state.getSnapshot() != null) {
                             persistedSnapshotId = state.getSnapshot().getId();
                         }
-                        Sandbox sandbox = client.resume(state);
+                        Sandbox sandbox = client.resume(state, workspaceKey.orElseThrow());
                         return SandboxAcquireResult.selfManaged(sandbox, lease);
                     }
                 } catch (Exception e) {
@@ -138,11 +144,21 @@ public class SandboxManager {
             @SuppressWarnings("unchecked")
             SandboxClient<SandboxClientOptions> typedClient =
                     (SandboxClient<SandboxClientOptions>) client;
-            Sandbox sandbox =
-                    typedClient.create(
-                            spec,
-                            sandboxContext.getSnapshotSpec(),
-                            sandboxContext.getClientOptions());
+            Sandbox sandbox;
+            if (workspaceKey.isPresent()) {
+                sandbox =
+                        typedClient.create(
+                                spec,
+                                sandboxContext.getSnapshotSpec(),
+                                sandboxContext.getClientOptions(),
+                                workspaceKey.get());
+            } else {
+                sandbox =
+                        typedClient.create(
+                                spec,
+                                sandboxContext.getSnapshotSpec(),
+                                sandboxContext.getClientOptions());
+            }
             carryOverPersistedSnapshotId(
                     sandbox, persistedSnapshotId, sandboxContext.getSnapshotSpec());
             return SandboxAcquireResult.selfManaged(sandbox, lease);

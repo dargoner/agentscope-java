@@ -20,6 +20,7 @@ import io.agentscope.harness.agent.sandbox.AbstractBaseSandbox;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.SandboxErrorCode;
 import io.agentscope.harness.agent.sandbox.SandboxException;
+import io.agentscope.harness.agent.sandbox.SandboxFileTransfer;
 import io.agentscope.harness.agent.sandbox.WorkspaceMountSupport;
 import io.agentscope.harness.agent.sandbox.layout.BindMountEntry;
 import io.agentscope.harness.agent.sandbox.layout.WorkspaceEntry;
@@ -29,9 +30,13 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -57,12 +62,18 @@ import org.slf4j.LoggerFactory;
  *
  * <h2>Workspace Operations</h2>
  * <ul>
- *   <li>Exec: {@code docker exec -w <root> <containerId> sh -c <command>}</li>
+ *   <li>Exec: {@code docker exec -i -w <root> <containerId> sh -s}, with the command sent via
+ *       stdin</li>
  *   <li>PersistWorkspace: {@code docker exec <containerId> tar -cf - -C <root> .}</li>
  *   <li>HydrateWorkspace: {@code docker exec -i <containerId> tar -xf - -C <root>}</li>
+ *   <li>UploadFile / DownloadFile ({@link SandboxFileTransfer}): a host temp file round-tripped
+ *       through {@code docker cp}, so file bytes never pass through exec argv or the stdout
+ *       capture cap. Scoped to the workspace subtree by lexical validation; uploads land with
+ *       mode 0644, matching the archive-hydrate fallback. Symlinks inside the sandbox are not
+ *       resolved — the isolation boundary is the container, not the subtree.</li>
  * </ul>
  */
-public class DockerSandbox extends AbstractBaseSandbox {
+public class DockerSandbox extends AbstractBaseSandbox implements SandboxFileTransfer {
 
     private static final Logger log = LoggerFactory.getLogger(DockerSandbox.class);
 
@@ -98,7 +109,11 @@ public class DockerSandbox extends AbstractBaseSandbox {
     @Override
     public void shutdown() throws Exception {
         String containerId = dockerState.getContainerId();
-        if (containerId == null || containerId.isBlank()) {
+        String containerReference =
+                containerId == null || containerId.isBlank()
+                        ? dockerState.getContainerName()
+                        : containerId;
+        if (containerReference == null || containerReference.isBlank()) {
             return;
         }
         if (!dockerState.isContainerOwned()) {
@@ -107,93 +122,121 @@ public class DockerSandbox extends AbstractBaseSandbox {
                     containerId);
             return;
         }
-        try {
-            runDockerCliBlocking(
-                    CONTAINER_STOP_TIMEOUT_SECONDS * 2,
-                    "docker",
-                    "stop",
-                    "--time=" + CONTAINER_STOP_TIMEOUT_SECONDS,
-                    containerId);
-            log.debug("[sandbox-docker] Container stopped: {}", containerId);
-        } catch (Exception e) {
-            log.warn(
-                    "[sandbox-docker] Failed to stop container {}: {}",
-                    containerId,
-                    e.getMessage());
-        }
-        try {
-            runDockerCliBlocking(30, "docker", "rm", "--force", containerId);
-            log.debug("[sandbox-docker] Container removed: {}", containerId);
-        } catch (Exception e) {
-            log.warn(
-                    "[sandbox-docker] Failed to remove container {}: {}",
-                    containerId,
-                    e.getMessage());
-        }
+        removeOwnedContainer(containerReference, true);
+        dockerState.setContainerId(null);
+        dockerState.setContainerName(null);
+        log.debug("[sandbox-docker] Container removed: {}", containerReference);
     }
 
     @Override
     protected ExecResult doExec(RuntimeContext runtimeContext, String command, int timeoutSeconds)
             throws Exception {
         String containerId = dockerState.getContainerId();
-        String workspaceRoot = dockerState.getWorkspaceRoot();
+        String workspaceRoot = dockerState.getWorkspaceSpec().getRoot();
 
-        List<String> cmd = new ArrayList<>();
-        cmd.add("docker");
-        cmd.add("exec");
-        cmd.add("-w");
-        cmd.add(workspaceRoot);
-        cmd.add(containerId);
-        cmd.add("sh");
-        cmd.add("-c");
-        cmd.add(command);
-
-        ProcessBuilder pb = new ProcessBuilder(cmd);
+        ProcessBuilder pb = new ProcessBuilder(buildExecCommand(containerId, workspaceRoot));
         Process process = pb.start();
 
-        ExecutorService drainer =
-                Executors.newFixedThreadPool(
-                        2,
-                        r -> {
-                            Thread t =
-                                    new Thread(
-                                            r,
-                                            "sandbox-docker-drain-" + dockerState.getSessionId());
-                            t.setDaemon(true);
-                            return t;
-                        });
+        return executeProcess(
+                process,
+                command,
+                timeoutSeconds,
+                "sandbox-docker-drain-" + dockerState.getSessionId());
+    }
 
-        Future<String> stdoutFuture =
-                drainer.submit(() -> readStream(process.getInputStream(), OUTPUT_TRUNCATE_BYTES));
-        Future<String> stderrFuture =
-                drainer.submit(() -> readStream(process.getErrorStream(), OUTPUT_TRUNCATE_BYTES));
-        drainer.shutdown();
+    static ExecResult executeProcess(
+            Process process, String command, int timeoutSeconds, String drainerThreadName)
+            throws Exception {
+        Objects.requireNonNull(process, "process must not be null");
+        ExecutorService drainer = null;
+        try {
+            Objects.requireNonNull(command, "command must not be null");
+            Objects.requireNonNull(drainerThreadName, "drainerThreadName must not be null");
+            drainer =
+                    Executors.newFixedThreadPool(
+                            2,
+                            r -> {
+                                Thread t = new Thread(r, drainerThreadName);
+                                t.setDaemon(true);
+                                return t;
+                            });
+            Future<String> stdoutFuture =
+                    drainer.submit(
+                            () -> readStream(process.getInputStream(), OUTPUT_TRUNCATE_BYTES));
+            Future<String> stderrFuture =
+                    drainer.submit(
+                            () -> readStream(process.getErrorStream(), OUTPUT_TRUNCATE_BYTES));
+            drainer.shutdown();
 
-        boolean exited = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-        if (!exited) {
+            try (OutputStream stdin = process.getOutputStream()) {
+                writeShellProgram(stdin, command);
+            }
+
+            boolean exited = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+            if (!exited) {
+                throw new SandboxException.ExecTimeoutException(command, timeoutSeconds);
+            }
+
+            String stdout = stdoutFuture.get();
+            String stderr = stderrFuture.get();
+            int exitCode = process.exitValue();
+
+            boolean truncated =
+                    stdout.length() >= OUTPUT_TRUNCATE_BYTES
+                            || stderr.length() >= OUTPUT_TRUNCATE_BYTES;
+            ExecResult result = new ExecResult(exitCode, stdout, stderr, truncated);
+            if (!result.ok()) {
+                throw new SandboxException.ExecException(exitCode, stdout, stderr);
+            }
+            return result;
+        } catch (Exception | Error failure) {
+            terminateProcess(process);
+            throw failure;
+        } finally {
+            if (drainer != null) {
+                drainer.shutdownNow();
+            }
+        }
+    }
+
+    static void terminateProcess(Process process) {
+        boolean interrupted = false;
+        if (process.isAlive()) {
+            process.destroy();
+        }
+        long gracefulDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(250);
+        long forcedDeadline = gracefulDeadline + TimeUnit.SECONDS.toNanos(2);
+        while (process.isAlive() && System.nanoTime() < forcedDeadline) {
+            if (System.nanoTime() >= gracefulDeadline) {
+                process.destroyForcibly();
+            }
+            try {
+                process.waitFor(50, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException exception) {
+                interrupted = true;
+                process.destroyForcibly();
+            }
+        }
+        if (process.isAlive()) {
             process.destroyForcibly();
-            drainer.shutdownNow();
-            throw new SandboxException.ExecTimeoutException(command, timeoutSeconds);
         }
-
-        String stdout = stdoutFuture.get();
-        String stderr = stderrFuture.get();
-        int exitCode = process.exitValue();
-
-        boolean truncated =
-                stdout.length() >= OUTPUT_TRUNCATE_BYTES
-                        || stderr.length() >= OUTPUT_TRUNCATE_BYTES;
-        ExecResult result = new ExecResult(exitCode, stdout, stderr, truncated);
-        if (!result.ok()) {
-            throw new SandboxException.ExecException(exitCode, stdout, stderr);
+        if (interrupted) {
+            Thread.currentThread().interrupt();
         }
-        return result;
+    }
+
+    static List<String> buildExecCommand(String containerId, String workspaceRoot) {
+        return List.of("docker", "exec", "-i", "-w", workspaceRoot, containerId, "sh", "-s");
+    }
+
+    static void writeShellProgram(OutputStream stdin, String command) throws IOException {
+        stdin.write(command.getBytes(StandardCharsets.UTF_8));
     }
 
     @Override
     protected InputStream doPersistWorkspace() throws Exception {
         String containerId = dockerState.getContainerId();
-        String workspaceRoot = dockerState.getWorkspaceRoot();
+        String workspaceRoot = dockerState.getWorkspaceSpec().getRoot();
 
         List<String> tarCmd = new ArrayList<>();
         tarCmd.add("docker");
@@ -252,7 +295,7 @@ public class DockerSandbox extends AbstractBaseSandbox {
     @Override
     protected void doHydrateWorkspace(InputStream archive) throws Exception {
         String containerId = dockerState.getContainerId();
-        String workspaceRoot = dockerState.getWorkspaceRoot();
+        String workspaceRoot = dockerState.getWorkspaceSpec().getRoot();
 
         // Ensure the workspace directory exists inside the container
         runDockerCliBlocking(30, "docker", "exec", containerId, "mkdir", "-p", workspaceRoot);
@@ -326,14 +369,14 @@ public class DockerSandbox extends AbstractBaseSandbox {
     @Override
     protected void doSetupWorkspace() throws Exception {
         String containerId = dockerState.getContainerId();
-        String workspaceRoot = dockerState.getWorkspaceRoot();
+        String workspaceRoot = dockerState.getWorkspaceSpec().getRoot();
         runDockerCliBlocking(30, "docker", "exec", containerId, "mkdir", "-p", workspaceRoot);
     }
 
     @Override
     protected void doDestroyWorkspace() throws Exception {
         String containerId = dockerState.getContainerId();
-        String workspaceRoot = dockerState.getWorkspaceRoot();
+        String workspaceRoot = dockerState.getWorkspaceSpec().getRoot();
         if (containerId != null && !containerId.isBlank()) {
             try {
                 runDockerCliBlocking(30, "docker", "exec", containerId, "rm", "-rf", workspaceRoot);
@@ -348,8 +391,126 @@ public class DockerSandbox extends AbstractBaseSandbox {
     }
 
     @Override
-    protected String getWorkspaceRoot() {
-        return dockerState.getWorkspaceRoot();
+    public String getWorkspaceRoot() {
+        return dockerState.getWorkspaceSpec().getRoot();
+    }
+
+    @Override
+    public boolean supportsFileTransfer(String path) {
+        try {
+            requireTransferPath(path);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    @Override
+    public void uploadFile(String path, byte[] content) throws Exception {
+        if (content == null) {
+            throw new IllegalArgumentException("File content must not be null");
+        }
+        String containerPath = requireTransferPath(path);
+        Path temp = Files.createTempFile("agentscope-docker-upload-", ".bin");
+        applyUploadFileMode(temp);
+        try {
+            Files.write(temp, content);
+            int slash = containerPath.lastIndexOf('/');
+            String parent = slash > 0 ? containerPath.substring(0, slash) : "/";
+            runDockerCliBlocking(
+                    30, "docker", "exec", dockerState.getContainerId(), "mkdir", "-p", parent);
+            runDockerCliBlocking(
+                    TAR_TIMEOUT_SECONDS,
+                    "docker",
+                    "cp",
+                    temp.toString(),
+                    dockerState.getContainerId() + ":" + containerPath);
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    @Override
+    public byte[] downloadFile(String path) throws Exception {
+        String containerPath = requireTransferPath(path);
+        Path temp = Files.createTempFile("agentscope-docker-download-", ".bin");
+        try {
+            runDockerCliBlocking(
+                    TAR_TIMEOUT_SECONDS,
+                    "docker",
+                    "cp",
+                    dockerState.getContainerId() + ":" + containerPath,
+                    temp.toString());
+            return Files.readAllBytes(temp);
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    private String requireTransferPath(String path) {
+        if (dockerState.getContainerId() == null || dockerState.getContainerId().isBlank()) {
+            throw new IllegalArgumentException("Docker container is unavailable");
+        }
+        String resolved = resolveContainerPath(path);
+        String root = normalizeAbsolutePath(dockerState.getWorkspaceSpec().getRoot());
+        if (root == null
+                || resolved.equals(root)
+                || !resolved.startsWith("/".equals(root) ? "/" : root + "/")) {
+            throw new IllegalArgumentException("Path is outside the sandbox workspace: " + path);
+        }
+        return resolved;
+    }
+
+    private String resolveContainerPath(String path) {
+        if (path == null || path.isBlank()) {
+            throw new IllegalArgumentException("Path must identify a file");
+        }
+        String normalized = path.replace('\\', '/');
+        while (normalized.startsWith("./")) {
+            normalized = normalized.substring(2);
+        }
+        String[] parts = normalized.split("/", -1);
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i];
+            if (((i > 0 || !normalized.startsWith("/")) && part.isEmpty())
+                    || ".".equals(part)
+                    || "..".equals(part)) {
+                throw new IllegalArgumentException("Path contains traversal segments: " + path);
+            }
+        }
+        if (path.startsWith("/") || normalized.startsWith("/")) {
+            return normalizeAbsolutePath(normalized);
+        }
+        String root = normalizeAbsolutePath(dockerState.getWorkspaceSpec().getRoot());
+        if (root == null) {
+            throw new IllegalArgumentException("Sandbox workspace root is unavailable");
+        }
+        return "/".equals(root) ? "/" + normalized : root + "/" + normalized;
+    }
+
+    private static String normalizeAbsolutePath(String path) {
+        if (path == null || path.isBlank() || !path.startsWith("/")) {
+            return null;
+        }
+        String normalized = path.replace('\\', '/');
+        while (normalized.endsWith("/") && normalized.length() > 1) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
+    }
+
+    /**
+     * Gives the upload temp file mode 0644 so {@code docker cp}, which preserves the source
+     * mode, matches the archive fallback's tar default instead of {@code createTempFile}'s
+     * 0600 — uploads must stay readable when the container runs as a non-root user. Skipped on
+     * filesystems without POSIX permissions (e.g. Windows), which carry no mode to preserve.
+     */
+    private static void applyUploadFileMode(Path temp) throws IOException {
+        try {
+            Files.setPosixFilePermissions(temp, PosixFilePermissions.fromString("rw-r--r--"));
+        } catch (UnsupportedOperationException e) {
+            // No POSIX permissions on this filesystem — nothing to align.
+        }
     }
 
     // -----------------------------------------------------------------
@@ -421,13 +582,34 @@ public class DockerSandbox extends AbstractBaseSandbox {
                 drainer.submit(() -> readStream(process.getErrorStream(), 64 * 1024));
         drainer.shutdown();
 
-        boolean exited = process.waitFor(CONTAINER_START_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        boolean exited;
+        try {
+            exited = process.waitFor(CONTAINER_START_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
+            try {
+                removeOwnedContainer(containerName, true);
+            } catch (Exception cleanupFailure) {
+                interrupted.addSuppressed(cleanupFailure);
+            }
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        }
         if (!exited) {
             process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
             drainer.shutdownNow();
-            throw new SandboxException.SandboxRuntimeException(
-                    SandboxErrorCode.WORKSPACE_START_ERROR,
-                    "docker run timed out for image: " + dockerState.getImage());
+            SandboxException.SandboxRuntimeException timeout =
+                    new SandboxException.SandboxRuntimeException(
+                            SandboxErrorCode.WORKSPACE_START_ERROR,
+                            "docker run timed out for image: " + dockerState.getImage());
+            try {
+                removeOwnedContainer(containerName, true);
+            } catch (Exception cleanupFailure) {
+                timeout.addSuppressed(cleanupFailure);
+            }
+            throw timeout;
         }
 
         int exitCode = process.exitValue();
@@ -513,7 +695,7 @@ public class DockerSandbox extends AbstractBaseSandbox {
                     }
                     String containerPath =
                             WorkspaceMountSupport.containerMountPath(
-                                    dockerState.getWorkspaceRoot(), e.getKey());
+                                    dockerState.getWorkspaceSpec().getRoot(), e.getKey());
                     String mode = bm.isReadOnly() ? "ro" : "rw";
                     cmd.add("-v");
                     cmd.add(host + ":" + containerPath + ":" + mode);
@@ -581,7 +763,9 @@ public class DockerSandbox extends AbstractBaseSandbox {
      * @param command        command and arguments
      * @throws SandboxException.SandboxRuntimeException if the command fails or times out
      */
-    private void runDockerCliBlocking(int timeoutSeconds, String... command) throws Exception {
+    // Visible for testing so unit tests can intercept the docker CLI round trip
+    // (upload/download temp-file plumbing) without a live Docker daemon.
+    void runDockerCliBlocking(int timeoutSeconds, String... command) throws Exception {
         ProcessBuilder pb = new ProcessBuilder(command);
         Process process = pb.start();
 
@@ -612,6 +796,20 @@ public class DockerSandbox extends AbstractBaseSandbox {
             throw new SandboxException.SandboxRuntimeException(
                     SandboxErrorCode.WORKSPACE_START_ERROR,
                     "docker command failed (exit=" + exitCode + "): " + stderr);
+        }
+    }
+
+    private void removeOwnedContainer(String containerReference, boolean allowMissing)
+            throws Exception {
+        try {
+            runDockerCliBlocking(30, "docker", "rm", "--force", containerReference);
+        } catch (SandboxException.SandboxRuntimeException exception) {
+            if (allowMissing
+                    && exception.getMessage() != null
+                    && exception.getMessage().contains("No such container")) {
+                return;
+            }
+            throw exception;
         }
     }
 

@@ -25,6 +25,7 @@ import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentEventEmitter;
 import io.agentscope.core.event.AgentStartEvent;
 import io.agentscope.core.event.ModelCallEndEvent;
+import io.agentscope.core.event.RequestStopEvent;
 import io.agentscope.core.event.ToolCallEndEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
@@ -303,6 +304,56 @@ class ReActAgentNewLoopE2ETest {
     }
 
     @Test
+    void actingMiddlewareStopPersistsCompletedToolResult() {
+        ScriptedModel model =
+                new ScriptedModel(
+                        List.of(() -> Flux.just(toolUseResponse("terminal-1", "respond", "done"))));
+        Toolkit toolkit = new Toolkit();
+        toolkit.registerAgentTool(new AlwaysAllowTool("respond"));
+        MiddlewareBase terminalMiddleware =
+                new MiddlewareBase() {
+                    @Override
+                    public Flux<AgentEvent> onActing(
+                            Agent agent,
+                            RuntimeContext ctx,
+                            ActingInput input,
+                            Function<ActingInput, Flux<AgentEvent>> next) {
+                        return next.apply(input)
+                                .concatWith(
+                                        Flux.just(new RequestStopEvent("terminal tool completed")));
+                    }
+                };
+        ReActAgent agent =
+                ReActAgent.builder()
+                        .name("asst")
+                        .sysPrompt("use the terminal tool")
+                        .model(model)
+                        .toolkit(toolkit)
+                        .middleware(terminalMiddleware)
+                        .build();
+
+        Msg result =
+                agent.call(
+                                List.of(
+                                        Msg.builder()
+                                                .role(MsgRole.USER)
+                                                .textContent("respond now")
+                                                .build()))
+                        .block();
+
+        assertNotNull(result);
+        assertEquals(1, model.calls.get(), "stop must skip the next reasoning iteration");
+        assertTrue(
+                agent.getAgentState().getContext().stream()
+                        .flatMap(msg -> msg.getContent().stream())
+                        .anyMatch(
+                                block ->
+                                        block instanceof ToolResultBlock toolResult
+                                                && "terminal-1".equals(toolResult.getId())),
+                "completed tool result must be stored before honoring the stop request");
+    }
+
+    @Test
     void toolReturningErrorBlockEmitsErrorResultEndState() {
         ScriptedModel model =
                 new ScriptedModel(
@@ -338,6 +389,41 @@ class ReActAgentNewLoopE2ETest {
                         .findFirst()
                         .orElseThrow();
         assertEquals(ToolResultState.ERROR, end.getState());
+    }
+
+    @Test
+    void streamEventsRestoresEmitterWhenActingContextLosesEventKeys() {
+        ScriptedModel model =
+                new ScriptedModel(
+                        List.of(
+                                () -> Flux.just(toolUseResponse("c1", "search", "alpha")),
+                                () -> Flux.just(textResponse("done"))));
+        Toolkit tk = new Toolkit();
+        tk.registerAgentTool(new AlwaysAllowTool("search"));
+
+        ReActAgent agent =
+                ReActAgent.builder()
+                        .name("asst")
+                        .sysPrompt("you are helpful")
+                        .model(model)
+                        .toolkit(tk)
+                        .middleware(new StripToolEventContextMiddleware())
+                        .build();
+
+        List<AgentEvent> events =
+                agent.streamEvents(
+                                List.of(
+                                        Msg.builder()
+                                                .role(MsgRole.USER)
+                                                .textContent("find alpha")
+                                                .build()))
+                        .collectList()
+                        .block();
+
+        assertNotNull(events);
+        assertEquals(1L, events.stream().filter(ToolResultEndEvent.class::isInstance).count());
+        assertTrue(events.get(0) instanceof AgentStartEvent);
+        assertTrue(events.get(events.size() - 1) instanceof AgentEndEvent);
     }
 
     @Test
@@ -380,40 +466,5 @@ class ReActAgentNewLoopE2ETest {
                 .filter(ToolResultTextDeltaEvent.class::isInstance)
                 .map(ToolResultTextDeltaEvent.class::cast)
                 .forEach(e -> assertEquals(expected, e.getMetadata()));
-    }
-
-    @Test
-    void streamEventsRestoresEmitterWhenActingContextLosesEventKeys() {
-        ScriptedModel model =
-                new ScriptedModel(
-                        List.of(
-                                () -> Flux.just(toolUseResponse("c1", "search", "alpha")),
-                                () -> Flux.just(textResponse("done"))));
-        Toolkit tk = new Toolkit();
-        tk.registerAgentTool(new AlwaysAllowTool("search"));
-
-        ReActAgent agent =
-                ReActAgent.builder()
-                        .name("asst")
-                        .sysPrompt("you are helpful")
-                        .model(model)
-                        .toolkit(tk)
-                        .middleware(new StripToolEventContextMiddleware())
-                        .build();
-
-        List<AgentEvent> events =
-                agent.streamEvents(
-                                List.of(
-                                        Msg.builder()
-                                                .role(MsgRole.USER)
-                                                .textContent("find alpha")
-                                                .build()))
-                        .collectList()
-                        .block();
-
-        assertNotNull(events);
-        assertEquals(1L, events.stream().filter(ToolResultEndEvent.class::isInstance).count());
-        assertTrue(events.get(0) instanceof AgentStartEvent);
-        assertTrue(events.get(events.size() - 1) instanceof AgentEndEvent);
     }
 }

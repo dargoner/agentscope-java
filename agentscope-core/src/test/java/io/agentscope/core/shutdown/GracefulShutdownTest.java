@@ -429,6 +429,9 @@ class GracefulShutdownTest {
         @DisplayName("resetForTesting restores initial state")
         void resetForTesting() {
             TestableAgent agent = createTestAgent("agent-1");
+            manager.setConfig(
+                    new GracefulShutdownConfig(
+                            Duration.ofSeconds(1), PartialReasoningPolicy.DISCARD));
             manager.registerRequest(agent);
             manager.performGracefulShutdown();
 
@@ -437,6 +440,7 @@ class GracefulShutdownTest {
             assertEquals(ShutdownState.RUNNING, manager.getState());
             assertEquals(0, manager.getActiveRequestCount());
             assertTrue(manager.isAcceptingRequests());
+            assertEquals(GracefulShutdownConfig.DEFAULT, manager.getConfig());
         }
 
         @Test

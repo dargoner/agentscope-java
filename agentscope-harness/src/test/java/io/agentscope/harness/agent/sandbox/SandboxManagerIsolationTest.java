@@ -18,7 +18,9 @@ package io.agentscope.harness.agent.sandbox;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -55,6 +57,7 @@ class SandboxManagerIsolationTest {
 
     @BeforeEach
     void setUp() {
+        when(stateStore.agentId()).thenReturn(AGENT_ID);
         manager = new SandboxManager(client, stateStore, AGENT_ID);
     }
 
@@ -69,6 +72,7 @@ class SandboxManagerIsolationTest {
         assertSame(externalSandbox, result.getSandbox());
         assertEquals(false, result.isSelfManaged());
         verify(stateStore, never()).load(any());
+        verify(client, never()).resume(any(), any());
     }
 
     // ---- Priority 2: explicit session state ----
@@ -85,6 +89,7 @@ class SandboxManagerIsolationTest {
         assertSame(resumedSandbox, result.getSandbox());
         assertEquals(true, result.isSelfManaged());
         verify(stateStore, never()).load(any());
+        verify(client, never()).resume(any(), any());
     }
 
     // ---- Priority 3: state store hit (session scope) ----
@@ -93,7 +98,7 @@ class SandboxManagerIsolationTest {
     void priority3_stateStoreHit_resumesSession() throws Exception {
         when(stateStore.load(any())).thenReturn(Optional.of(STATE_JSON));
         when(client.deserializeState(STATE_JSON, null)).thenReturn(resumedState);
-        when(client.resume(resumedState)).thenReturn(resumedSandbox);
+        when(client.resume(any(), any())).thenReturn(resumedSandbox);
 
         RuntimeContext rtx = RuntimeContext.builder().sessionId("sess-1").build();
         SandboxContext sCtx =
@@ -103,7 +108,7 @@ class SandboxManagerIsolationTest {
 
         assertSame(resumedSandbox, result.getSandbox());
         assertEquals(true, result.isSelfManaged());
-        verify(client, never()).create(any(), any(), any());
+        verify(client, never()).create(any(), any(), any(), any());
     }
 
     // ---- Priority 3: state store miss → Priority 4 fresh create ----
@@ -111,7 +116,7 @@ class SandboxManagerIsolationTest {
     @Test
     void priority3_stateStoreMiss_createsFreshSession() throws Exception {
         when(stateStore.load(any())).thenReturn(Optional.empty());
-        when(client.create(any(), any(), any())).thenReturn(freshSandbox);
+        when(client.create(any(), any(), any(), any())).thenReturn(freshSandbox);
 
         RuntimeContext rtx = RuntimeContext.builder().sessionId("sess-2").build();
         SandboxContext sCtx =
@@ -123,7 +128,7 @@ class SandboxManagerIsolationTest {
         SandboxAcquireResult result = manager.acquire(sCtx, rtx);
 
         assertSame(freshSandbox, result.getSandbox());
-        verify(client).create(any(), any(), any());
+        verify(client).create(any(), any(), any(), any());
     }
 
     // ---- Priority 4 (no session key → scope key empty → fresh create) ----
@@ -139,6 +144,7 @@ class SandboxManagerIsolationTest {
 
         assertSame(freshSandbox, result.getSandbox());
         verify(stateStore, never()).load(any());
+        verify(client, never()).create(any(), any(), any(), any());
     }
 
     // ---- USER scope ----
@@ -147,7 +153,7 @@ class SandboxManagerIsolationTest {
     void userScope_withUserId_loadsFromStore() throws Exception {
         when(stateStore.load(any())).thenReturn(Optional.of(STATE_JSON));
         when(client.deserializeState(STATE_JSON, null)).thenReturn(resumedState);
-        when(client.resume(resumedState)).thenReturn(resumedSandbox);
+        when(client.resume(any(), any())).thenReturn(resumedSandbox);
 
         RuntimeContext rtx = RuntimeContext.builder().userId("user-42").build();
         SandboxContext sCtx = SandboxContext.builder().isolationScope(IsolationScope.USER).build();
@@ -161,7 +167,7 @@ class SandboxManagerIsolationTest {
     void priority3_stateStoreHit_passesSnapshotSpecToDeserialize() throws Exception {
         when(stateStore.load(any())).thenReturn(Optional.of(STATE_JSON));
         when(client.deserializeState(STATE_JSON, snapshotSpec)).thenReturn(resumedState);
-        when(client.resume(resumedState)).thenReturn(resumedSandbox);
+        when(client.resume(any(), any())).thenReturn(resumedSandbox);
 
         RuntimeContext rtx = RuntimeContext.builder().sessionId("sess-1").build();
         SandboxContext sCtx =
@@ -213,8 +219,10 @@ class SandboxManagerIsolationTest {
     private SandboxAcquireResult acquireAfterFailedResume() throws Exception {
         when(stateStore.load(any())).thenReturn(Optional.of(STATE_JSON));
         when(client.deserializeState(STATE_JSON, snapshotSpec)).thenReturn(resumedState);
-        when(client.resume(resumedState)).thenThrow(new RuntimeException("claim gone"));
-        when(client.create(any(), any(), any())).thenReturn(freshSandbox);
+        when(client.resume(eq(resumedState), any(SandboxWorkspaceKey.class)))
+                .thenThrow(new RuntimeException("claim gone"));
+        when(client.create(any(), any(), any(), any(SandboxWorkspaceKey.class)))
+                .thenReturn(freshSandbox);
 
         RuntimeContext rtx = RuntimeContext.builder().sessionId("sess-1").build();
         SandboxContext sCtx =
@@ -235,7 +243,7 @@ class SandboxManagerIsolationTest {
                 };
         manager = new SandboxManager(client, stateStore, AGENT_ID, guard);
         when(stateStore.load(any())).thenReturn(Optional.empty());
-        when(client.create(any(), any(), any())).thenReturn(freshSandbox);
+        when(client.create(any(), any(), any(), any())).thenReturn(freshSandbox);
 
         RuntimeContext rtx = RuntimeContext.builder().userId("user-42").build();
         SandboxContext sCtx = SandboxContext.builder().isolationScope(IsolationScope.USER).build();
@@ -265,7 +273,7 @@ class SandboxManagerIsolationTest {
     @Test
     void agentScope_alwaysHasScopeKey() throws Exception {
         when(stateStore.load(any())).thenReturn(Optional.empty());
-        when(client.create(any(), any(), any())).thenReturn(freshSandbox);
+        when(client.create(any(), any(), any(), any())).thenReturn(freshSandbox);
 
         SandboxContext sCtx = SandboxContext.builder().isolationScope(IsolationScope.AGENT).build();
 
@@ -280,7 +288,7 @@ class SandboxManagerIsolationTest {
     @Test
     void globalScope_alwaysHasScopeKey() throws Exception {
         when(stateStore.load(any())).thenReturn(Optional.empty());
-        when(client.create(any(), any(), any())).thenReturn(freshSandbox);
+        when(client.create(any(), any(), any(), any())).thenReturn(freshSandbox);
 
         SandboxContext sCtx =
                 SandboxContext.builder().isolationScope(IsolationScope.GLOBAL).build();
@@ -289,6 +297,67 @@ class SandboxManagerIsolationTest {
 
         assertNotNull(result.getSandbox());
         verify(stateStore).load(any());
+    }
+
+    @Test
+    void workspaceAwareClientReceivesResolvedUserKeyOnCreate() throws Exception {
+        RecordingContextClient recording = new RecordingContextClient();
+        recording.createResult = freshSandbox;
+        manager = new SandboxManager(recording, stateStore, AGENT_ID);
+        when(stateStore.load(any())).thenReturn(Optional.empty());
+
+        RuntimeContext context =
+                RuntimeContext.builder().userId("user-1").sessionId("session-1").build();
+        manager.acquire(
+                SandboxContext.builder().isolationScope(IsolationScope.USER).build(), context);
+
+        assertEquals(IsolationScope.USER, recording.createKey.getScope());
+        assertEquals(AGENT_ID, recording.createKey.getAgentId());
+        assertEquals(
+                SandboxWorkspaceKey.from(userKey("user-1"), AGENT_ID).getStableId(),
+                recording.createKey.getStableId());
+        assertEquals(0, recording.originalCreateCalls);
+    }
+
+    @Test
+    void workspaceAwareClientReceivesResolvedKeyOnPersistedResume() throws Exception {
+        RecordingContextClient recording = new RecordingContextClient();
+        recording.deserializeResult = resumedState;
+        recording.resumeResult = resumedSandbox;
+        manager = new SandboxManager(recording, stateStore, AGENT_ID);
+        when(stateStore.load(any())).thenReturn(Optional.of(STATE_JSON));
+
+        RuntimeContext context = RuntimeContext.builder().sessionId("session-2").build();
+        manager.acquire(
+                SandboxContext.builder().isolationScope(IsolationScope.SESSION).build(), context);
+
+        assertEquals(IsolationScope.SESSION, recording.resumeKey.getScope());
+        assertEquals(AGENT_ID, recording.resumeKey.getAgentId());
+        assertEquals(
+                SandboxWorkspaceKey.from(sessionKey("session-2"), AGENT_ID).getStableId(),
+                recording.resumeKey.getStableId());
+        assertEquals(0, recording.originalResumeCalls);
+    }
+
+    @Test
+    void missingIdentityUsesOriginalCreateMethod() throws Exception {
+        RecordingContextClient recording = new RecordingContextClient();
+        recording.createResult = freshSandbox;
+        manager = new SandboxManager(recording, stateStore, AGENT_ID);
+
+        manager.acquire(SandboxContext.builder().build(), RuntimeContext.builder().build());
+
+        assertEquals(null, recording.createKey);
+        assertEquals(1, recording.originalCreateCalls);
+    }
+
+    @Test
+    void mismatchedManagerAndStateStoreAgentIdsAreRejected() {
+        when(stateStore.agentId()).thenReturn("other-agent");
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new SandboxManager(client, stateStore, AGENT_ID));
     }
 
     // ---- persistState ----
@@ -336,5 +405,71 @@ class SandboxManagerIsolationTest {
         manager.clearState(sCtx, rtx);
 
         verify(stateStore).delete(any());
+    }
+
+    private static final class RecordingContextClient
+            implements SandboxClient<SandboxClientOptions> {
+
+        private Sandbox createResult;
+        private Sandbox resumeResult;
+        private SandboxState deserializeResult;
+        private SandboxWorkspaceKey createKey;
+        private SandboxWorkspaceKey resumeKey;
+        private int originalCreateCalls;
+        private int originalResumeCalls;
+
+        @Override
+        public Sandbox create(
+                WorkspaceSpec workspaceSpec,
+                SandboxSnapshotSpec snapshotSpec,
+                SandboxClientOptions options) {
+            originalCreateCalls++;
+            return createResult;
+        }
+
+        @Override
+        public Sandbox create(
+                WorkspaceSpec workspaceSpec,
+                SandboxSnapshotSpec snapshotSpec,
+                SandboxClientOptions options,
+                SandboxWorkspaceKey workspaceKey) {
+            createKey = workspaceKey;
+            return createResult;
+        }
+
+        @Override
+        public Sandbox resume(SandboxState state) {
+            originalResumeCalls++;
+            return resumeResult;
+        }
+
+        @Override
+        public Sandbox resume(SandboxState state, SandboxWorkspaceKey workspaceKey) {
+            resumeKey = workspaceKey;
+            return resumeResult;
+        }
+
+        @Override
+        public void delete(Sandbox sandbox) {}
+
+        @Override
+        public String serializeState(SandboxState state) {
+            return STATE_JSON;
+        }
+
+        @Override
+        public SandboxState deserializeState(String json) {
+            return deserializeResult;
+        }
+    }
+
+    private static SandboxIsolationKey userKey(String userId) {
+        RuntimeContext context = RuntimeContext.builder().userId(userId).build();
+        return SandboxIsolationKey.resolve(IsolationScope.USER, context, AGENT_ID).orElseThrow();
+    }
+
+    private static SandboxIsolationKey sessionKey(String sessionId) {
+        RuntimeContext context = RuntimeContext.builder().sessionId(sessionId).build();
+        return SandboxIsolationKey.resolve(IsolationScope.SESSION, context, AGENT_ID).orElseThrow();
     }
 }

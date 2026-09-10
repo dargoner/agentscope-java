@@ -55,7 +55,7 @@ class AguiMvcControllerTest {
             SseEmitter emitter = fixture.controller.handle(input("run-1"), null);
 
             assertTrue(fixture.firstRunTerminated.await(5, TimeUnit.SECONDS));
-            assertTrue((Boolean) ReflectionTestUtils.getField(emitter, "complete"));
+            assertTrue(awaitEmitterComplete(emitter));
             assertEquals(1, fixture.runCount.get());
         } finally {
             fixture.executor.shutdownNow();
@@ -70,7 +70,7 @@ class AguiMvcControllerTest {
             SseEmitter emitter = fixture.controller.handle(input("run-1"), null);
 
             assertTrue(fixture.firstRunTerminated.await(5, TimeUnit.SECONDS));
-            assertTrue((Boolean) ReflectionTestUtils.getField(emitter, "complete"));
+            assertTrue(awaitEmitterComplete(emitter));
             assertEquals(1, fixture.runCount.get());
         } finally {
             fixture.executor.shutdownNow();
@@ -188,6 +188,17 @@ class AguiMvcControllerTest {
         Object errorCallback = ReflectionTestUtils.getField(emitter, "errorCallback");
         ReflectionTestUtils.invokeMethod(
                 errorCallback, "accept", new IOException("client disconnected"));
+    }
+
+    private static boolean awaitEmitterComplete(SseEmitter emitter) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            if (Boolean.TRUE.equals(ReflectionTestUtils.getField(emitter, "complete"))) {
+                return true;
+            }
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+        }
+        return Boolean.TRUE.equals(ReflectionTestUtils.getField(emitter, "complete"));
     }
 
     /**

@@ -15,6 +15,9 @@
  */
 package io.agentscope.harness.agent.sandbox;
 
+import io.agentscope.harness.agent.sandbox.snapshot.RemoteSandboxSnapshot;
+import io.agentscope.harness.agent.sandbox.snapshot.RemoteSnapshotSpec;
+import io.agentscope.harness.agent.sandbox.snapshot.SandboxSnapshot;
 import io.agentscope.harness.agent.sandbox.snapshot.SandboxSnapshotSpec;
 
 /**
@@ -32,9 +35,32 @@ public interface SandboxClient<O extends SandboxClientOptions> {
     Sandbox create(WorkspaceSpec workspaceSpec, SandboxSnapshotSpec snapshotSpec, O options);
 
     /**
+     * Creates a sandbox with the resolved harness workspace identity.
+     *
+     * <p>The default implementation preserves compatibility with clients that do not need cluster
+     * workspace identity.
+     */
+    default Sandbox create(
+            WorkspaceSpec workspaceSpec,
+            SandboxSnapshotSpec snapshotSpec,
+            O options,
+            SandboxWorkspaceKey workspaceKey) {
+        return create(workspaceSpec, snapshotSpec, options);
+    }
+
+    /**
      * Resumes a sandbox from previously serialized {@link SandboxState}.
      */
     Sandbox resume(SandboxState state);
+
+    /**
+     * Resumes a sandbox with the resolved harness workspace identity.
+     *
+     * <p>The default implementation preserves compatibility with existing clients.
+     */
+    default Sandbox resume(SandboxState state, SandboxWorkspaceKey workspaceKey) {
+        return resume(state);
+    }
 
     void delete(Sandbox sandbox);
 
@@ -42,7 +68,35 @@ public interface SandboxClient<O extends SandboxClientOptions> {
 
     SandboxState deserializeState(String json);
 
+    /**
+     * Deserializes sandbox state and rebinds a {@link
+     * io.agentscope.harness.agent.sandbox.snapshot.RemoteSnapshotClient} when the given snapshot
+     * spec is a {@link RemoteSnapshotSpec}.
+     *
+     * <p>{@link RemoteSandboxSnapshot} only persists its {@code id} across JSON serialization; the
+     * client must be re-injected from the live {@link RemoteSnapshotSpec} on resume.
+     */
     default SandboxState deserializeState(String json, SandboxSnapshotSpec snapshotSpec) {
-        return deserializeState(json);
+        SandboxState state = deserializeState(json);
+        rebindRemoteSnapshot(state, snapshotSpec);
+        return state;
+    }
+
+    /**
+     * Rebinds {@link RemoteSandboxSnapshot} with the client from {@link RemoteSnapshotSpec}.
+     *
+     * <p>No-op when the spec is not remote, the snapshot is missing/non-remote, or the snapshot
+     * id is null.
+     */
+    static void rebindRemoteSnapshot(SandboxState state, SandboxSnapshotSpec snapshotSpec) {
+        if (state == null || !(snapshotSpec instanceof RemoteSnapshotSpec remoteSnapshotSpec)) {
+            return;
+        }
+        SandboxSnapshot snapshot = state.getSnapshot();
+        if (!(snapshot instanceof RemoteSandboxSnapshot) || snapshot.getId() == null) {
+            return;
+        }
+        state.setSnapshot(
+                new RemoteSandboxSnapshot(remoteSnapshotSpec.getClient(), snapshot.getId()));
     }
 }

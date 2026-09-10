@@ -24,6 +24,7 @@ import io.agentscope.harness.agent.IsolationScope;
 import io.agentscope.harness.agent.filesystem.remote.store.BaseStore;
 import io.agentscope.harness.agent.filesystem.spec.LocalFilesystemSpec;
 import io.agentscope.harness.agent.filesystem.spec.RemoteFilesystemSpec;
+import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -91,7 +92,8 @@ public class EnvironmentSpecFactory {
             case EnvironmentTypes.TYPE_REMOTE -> applyRemote(builder, scope);
             case EnvironmentTypes.TYPE_SELF_HOSTED ->
                     applySelfHosted(builder, scope, environment.config());
-            default -> applyLocal(builder, scope);
+            case "local" -> applyLocal(builder, scope);
+            default -> throw new IllegalArgumentException("Unsupported environment type: " + type);
         }
     }
 
@@ -190,7 +192,9 @@ public class EnvironmentSpecFactory {
                         stringConfig(config, "workspaceRoot"),
                         e2bProperties.getWorkspaceRoot(),
                         "/home/user");
-        spec.workspaceRoot(workspaceRoot);
+        WorkspaceSpec workspaceSpec = new WorkspaceSpec();
+        workspaceSpec.setRoot(workspaceRoot);
+        spec.workspaceSpec(workspaceSpec);
 
         int timeout =
                 intConfig(
@@ -244,11 +248,8 @@ public class EnvironmentSpecFactory {
                 || store instanceof io.agentscope.core.state.InMemoryAgentStateStore
                 || store instanceof io.agentscope.core.state.JsonFileAgentStateStore
                 || baseStore.isEmpty()) {
-            log.warn(
-                    "remote environment requested but distributed BaseStore/AgentStateStore is"
-                            + " unavailable; falling back to local filesystem");
-            applyLocal(builder, scope);
-            return;
+            throw new IllegalStateException(
+                    "Remote environment requires distributed BaseStore and AgentStateStore");
         }
         builder.filesystem(
                 new RemoteFilesystemSpec(baseStore.get())

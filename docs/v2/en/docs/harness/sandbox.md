@@ -1,9 +1,9 @@
 ---
-title: "Sandbox"
-description: "Isolated execution + cross-call recovery + multi-replica deployment"
+title: Sandbox
+description: Isolated execution + cross-call recovery + multi-replica deployment
 ---
 
-> For the three filesystem-mode comparison see [Filesystem](./filesystem.md). This page focuses on sandbox mode usage.
+> For the three filesystem-mode comparison see [Filesystem](/v2/en/docs/harness/filesystem). This page focuses on sandbox mode usage.
 
 ## What sandbox solves
 
@@ -184,9 +184,90 @@ Pass the same `externalSandbox` to each agent's `call()`, then `shutdown()` it y
 | **Kubernetes** | Self-hosted K8s; fully based on [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) (SandboxClaim / WarmPool), workspace persistence via PVC (see below) |
 | **Daytona** | Generic managed sandbox HTTP API |
 | **E2B** | Generic managed sandbox + native platform snapshots |
+| **OpenSandbox** | Self-hosted or managed OpenSandbox service with lifecycle, command execution, native file transfer, and Harness snapshots |
 | **AgentRun** | Aliyun-managed sandbox (Function Compute FC 3.0); per-instance NAS / OSS auto-mount; mainland-China low latency. Treated as a regular `SandboxFilesystemSpec` — full setup details (templates, RAM permissions, NAS-first config) live in the integration docs |
 
 All stores implement the same interface; agent code, toolkit, and `AGENTS.md` don't change.
+
+### OpenSandbox
+
+Add the standalone extension module:
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-sandbox-opensandbox</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+```java
+new OpenSandboxFilesystemSpec()
+        .endpoint("http://localhost:8080")
+        .apiKey(System.getenv("OPEN_SANDBOX_API_KEY"))
+        .image("ubuntu:22.04")
+        .workspaceRoot("/workspace");
+```
+
+Inject the API key from the environment or external configuration; it is never serialized into sandbox state. The OpenSandbox adapter owns sandbox lifecycle, shell commands, and file transfer only. MCP processes and connections remain host-side.
+
+#### Clustered OpenSandbox lifecycle with Redis
+
+For stable workspace reuse across application replicas, use the Redis coordination module. It requires an application-configured `RedissonClient`; the module does not create a Redis connection or read Redis passwords.
+
+```xml
+<dependency>
+    <groupId>io.agentscope</groupId>
+    <artifactId>agentscope-extensions-sandbox-opensandbox-redis</artifactId>
+    <version>${agentscope.version}</version>
+</dependency>
+```
+
+```java
+// Defaults: http://localhost:8080, no API key, USER isolation,
+// 60-minute idle TTL, and a 5-minute sweep interval.
+RedisOpenSandboxFilesystemSpec filesystemSpec =
+        new RedisOpenSandboxFilesystemSpec(redissonClient);
+```
+
+Configure optional control-plane credentials only when they are present:
+
+```java
+OpenSandboxClientOptions openSandboxOptions = new OpenSandboxClientOptions();
+String endpoint = System.getenv("OPEN_SANDBOX_ENDPOINT");
+if (endpoint != null && !endpoint.isBlank()) {
+    openSandboxOptions.setEndpoint(endpoint);
+}
+String apiKey = System.getenv("OPEN_SANDBOX_API_KEY");
+if (apiKey != null && !apiKey.isBlank()) {
+    openSandboxOptions.setApiKey(apiKey);
+}
+
+OpenSandboxRedisLifecycleOptions lifecycleOptions =
+        new OpenSandboxRedisLifecycleOptions();
+WorkspaceSpec workspaceSpec = new WorkspaceSpec();
+workspaceSpec.setRoot("/workspace");
+
+filesystemSpec
+        .clientOptions(openSandboxOptions)
+        .lifecycleOptions(lifecycleOptions)
+        .workspaceSpec(workspaceSpec)
+        .isolationScope(IsolationScope.USER);
+```
+
+`redissonClient` above is created and configured by the application. `USER` is the default isolation scope and derives a stable workspace identity from `userId + agentId`; `SESSION`, `AGENT`, and `GLOBAL` are available when their sharing boundaries fit the deployment better. The OpenSandbox endpoint and API key are client-level credentials and must remain stable for the lifetime of a `RedisOpenSandboxClient`; switching either credential per call fails closed.
+
+The image and entrypoint form the runtime profile of a workspace and must also remain stable while that workspace exists. A different profile fails closed: explicitly delete the workspace and then recreate it with the new profile. Delete removes its historical native snapshots and advances the tombstone so the old generation cannot be rediscovered. Parameters that apply only during remote creation, such as resource limits and initial metadata, are not reapplied when an existing sandbox is reused.
+
+The Redis lifecycle lock protects short create, resume, pause, snapshot, delete, and metadata transitions. It does **not** cover an entire Turn, so Turns and Subagents may use independent leases concurrently. The spec preconfigures the official no-op `SandboxExecutionGuard` and a `NoopSnapshotSpec` marker so `distributedStore(...)` does not auto-wire its full-Turn guard or tar snapshot backend into this native-snapshot mode; the distributed store can still provide agent state, task, messaging, and other facilities. Do not configure any other `SandboxExecutionGuard` for this mode. Concurrent writes to the same shared files can still conflict; coordinate them at the application level when write order matters. A detached process does not renew a lease by itself: keep a Turn active while it must run, or adjust the lifecycle settings.
+
+Defaults are an idle TTL of 60 minutes, a sweep every 5 minutes, and a 5-minute pause retention. Eviction grace and snapshot readiness waiting come from `OpenSandboxRedisLifecycleOptions` (both default to 5 minutes). After native snapshot and pause complete, the remote sandbox is renewed for `pauseRetention` (5 minutes by default) and is ultimately reclaimed according to OpenSandbox `expiresAt`.
+
+This mode uses OpenSandbox **native snapshots**, which preserve the remote filesystem and may therefore contain source, generated artifacts, credentials, or other sensitive files. Apply the OpenSandbox service's access controls, encryption, retention, and deletion policy accordingly. Redis stores only workspace and snapshot IDs, lifecycle metadata, delete tombstones, and active leases. It stores neither file contents nor the OpenSandbox API key. Do not configure a persistence-enabled tar `SandboxSnapshotSpec` alongside native snapshots; only `null` or `NoopSnapshotSpec` is accepted.
+
+Recovery tries the current native snapshot and then the previous one, and fails closed instead of silently starting an empty workspace when both known snapshots fail. If Redis metadata is lost, the client deterministically discovers matching OpenSandbox sandboxes and native snapshots and rebuilds metadata; a prior explicit delete is fenced by its tombstone so deleted generations cannot be resurrected. Explicit delete advances that tombstone before remote cleanup.
+
+The application owns and closes the injected Redisson client. Any prebuilt sandbox client injected with `.client(...)`, client used directly outside `HarnessAgent.builder().filesystem(...)`, or client supplied through a per-call `SandboxContext` remains caller-owned and is never closed by the agent. When the spec constructs the default `RedisOpenSandboxClient`, the agent owns that client and closes it once from `HarnessAgent.close()`, stopping its daemon sweeper scheduler. The internally constructed Redis client creates its OpenSandbox SDK/control-plane object from `clientOptions`; there is currently no separate public close operation for that object. Closing a borrowed sandbox handle releases that handle's lease. Neither closing the Redis client nor closing a borrowed handle shuts down Redisson. This module does not provide MCP integration, and MCP connection lifecycle is outside its scope.
 
 ## Runtime image contract
 
@@ -295,6 +376,6 @@ To integrate a non-Docker isolation environment (self-hosted remote executor, co
 
 ## Related pages
 
-- [Filesystem](./filesystem.md) — three declarative modes compared
-- [Workspace](./workspace.md) — which files under `workspace/` sync into the sandbox
-- [Architecture](./architecture.md) — where sandbox acquire / release sits in the call() timeline
+- [Filesystem](/v2/en/docs/harness/filesystem) — three declarative modes compared
+- [Workspace](/v2/en/docs/harness/workspace) — which files under `workspace/` sync into the sandbox
+- [Architecture](/v2/en/docs/harness/architecture) — where sandbox acquire / release sits in the call() timeline

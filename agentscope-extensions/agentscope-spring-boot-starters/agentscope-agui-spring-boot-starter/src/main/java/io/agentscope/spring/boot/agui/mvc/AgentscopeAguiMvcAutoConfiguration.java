@@ -23,7 +23,9 @@ import io.agentscope.core.agui.adapter.strategy.AguiEventEnricher;
 import io.agentscope.core.agui.registry.AguiAgentRegistry;
 import io.agentscope.core.agui.runtime.AguiRequestBodyParser;
 import io.agentscope.core.agui.runtime.AguiRuntimeContextResolver;
+import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.spring.boot.agui.common.AguiProperties;
+import io.agentscope.spring.boot.agui.common.AguiResumeStateStoreResolver;
 import io.agentscope.spring.boot.agui.common.ThreadSessionManager;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -100,7 +102,8 @@ public class AgentscopeAguiMvcAutoConfiguration {
             ObjectProvider<AgentEventConverter> eventConvertersProvider,
             ObjectProvider<AguiEventEnricher> eventEnrichersProvider,
             ObjectProvider<AguiRuntimeContextResolver> runtimeContextResolverProvider,
-            ObjectProvider<AguiAgentAdapterFactory> adapterFactoryProvider) {
+            ObjectProvider<AguiAgentAdapterFactory> adapterFactoryProvider,
+            ObjectProvider<AgentStateStore> stateStoreProvider) {
         AguiAdapterConfig config =
                 AguiAdapterConfig.builder()
                         .toolMergeMode(props.getDefaultToolMergeMode())
@@ -124,6 +127,7 @@ public class AgentscopeAguiMvcAutoConfiguration {
                 .interruptOnDisconnect(props.isInterruptOnDisconnect())
                 .runtimeContextResolver(runtimeContextResolverProvider.getIfAvailable())
                 .adapterFactory(adapterFactoryProvider.getIfAvailable())
+                .resumeStateStore(AguiResumeStateStoreResolver.resolve(props, stateStoreProvider))
                 .config(config)
                 .build();
     }

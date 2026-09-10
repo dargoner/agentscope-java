@@ -93,6 +93,8 @@ import io.agentscope.core.model.ExecutionConfig;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ModelRegistry;
+import io.agentscope.core.model.StructuredOutputReminder;
+import io.agentscope.core.model.ToolChoice;
 import io.agentscope.core.model.ToolSchema;
 import io.agentscope.core.permission.PermissionBehavior;
 import io.agentscope.core.permission.PermissionContextState;
@@ -1140,6 +1142,40 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
     }
 
     /**
+     * Stream fine-grained {@link AgentEvent}s and constrain the final result to the supplied Java
+     * class.
+     *
+     * <p>The stream ends with an {@link AgentResultEvent} whose {@link Msg} carries the validated
+     * structured output in its metadata.
+     *
+     * @param msgs input messages
+     * @param structuredOutputClass class defining the structured output
+     * @param context runtime context to propagate into the call
+     * @return event stream covering the full agent invocation lifecycle
+     */
+    public Flux<AgentEvent> streamEvents(
+            List<Msg> msgs, Class<?> structuredOutputClass, RuntimeContext context) {
+        return buildAgentStream(msgs, context, messages -> doCall(messages, structuredOutputClass));
+    }
+
+    /**
+     * Stream fine-grained {@link AgentEvent}s and constrain the final result to the supplied JSON
+     * Schema.
+     *
+     * <p>The stream ends with an {@link AgentResultEvent} whose {@link Msg} carries the validated
+     * structured output in its metadata.
+     *
+     * @param msgs input messages
+     * @param outputSchema JSON Schema defining the structured output
+     * @param context runtime context to propagate into the call
+     * @return event stream covering the full agent invocation lifecycle
+     */
+    public Flux<AgentEvent> streamEvents(
+            List<Msg> msgs, JsonNode outputSchema, RuntimeContext context) {
+        return buildAgentStream(msgs, context, messages -> doCall(messages, outputSchema));
+    }
+
+    /**
      * Stream fine-grained {@link AgentEvent}s for a single input message with a caller-supplied
      * {@link RuntimeContext}.
      *
@@ -1149,6 +1185,17 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
      */
     public Flux<AgentEvent> streamEvents(Msg msg, RuntimeContext context) {
         return streamEvents(List.of(msg), context);
+    }
+
+    /** Stream structured-output events for a single input message and Java output class. */
+    public Flux<AgentEvent> streamEvents(
+            Msg msg, Class<?> structuredOutputClass, RuntimeContext context) {
+        return streamEvents(List.of(msg), structuredOutputClass, context);
+    }
+
+    /** Stream structured-output events for a single input message and JSON Schema. */
+    public Flux<AgentEvent> streamEvents(Msg msg, JsonNode outputSchema, RuntimeContext context) {
+        return streamEvents(List.of(msg), outputSchema, context);
     }
 
     /**
@@ -1171,6 +1218,18 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
      */
     public Flux<AgentEvent> streamEvents(String text, RuntimeContext context) {
         return streamEvents(new UserMessage(text), context);
+    }
+
+    /** Stream structured-output events for plain text input and a Java output class. */
+    public Flux<AgentEvent> streamEvents(
+            String text, Class<?> structuredOutputClass, RuntimeContext context) {
+        return streamEvents(new UserMessage(text), structuredOutputClass, context);
+    }
+
+    /** Stream structured-output events for plain text input and a JSON Schema. */
+    public Flux<AgentEvent> streamEvents(
+            String text, JsonNode outputSchema, RuntimeContext context) {
+        return streamEvents(new UserMessage(text), outputSchema, context);
     }
 
     // ==================== Protected API ====================
@@ -1215,7 +1274,12 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                     }
                     return scope.doCallInner(msgs)
                             .onErrorResume(error -> saveStateAfterCallFailure(scope, error))
-                            .flatMap(result -> saveStateToSession(scope).thenReturn(result));
+                            .flatMap(result -> saveStateToSession(scope).thenReturn(result))
+                            .switchIfEmpty(
+                                    Mono.defer(
+                                            () ->
+                                                    saveStateToSession(scope)
+                                                            .then(Mono.<Msg>empty())));
                 });
     }
 
@@ -1255,6 +1319,12 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                 hasTools
                         ? model.supportsNativeStructuredOutputWithTools()
                         : model.supportsNativeStructuredOutput();
+        log.debug(
+                "Structured output routing: native={}, hasTools={} (agent={}#{})",
+                useNative,
+                hasTools,
+                getAgentId(),
+                getName());
         if (useNative) {
             return doNativeStructuredCall(msgs, jsonSchema)
                     .onErrorResume(
@@ -1302,6 +1372,11 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                             .schema(jsonSchema)
                                             .strict(true)
                                             .build());
+                    log.debug(
+                            "Native structured output path: injected response_format schema"
+                                    + " (agent={}#{})",
+                            getAgentId(),
+                            getName());
 
                     int contextSizeBefore = scope.state.contextMutable().size();
 
@@ -1311,6 +1386,11 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                         Msg out = wrapNativeStructuredResult(result);
                                         return saveStateToSession(scope).thenReturn(out);
                                     })
+                            .switchIfEmpty(
+                                    Mono.defer(
+                                            () ->
+                                                    saveStateToSession(scope)
+                                                            .then(Mono.<Msg>empty())))
                             .doOnError(
                                     e -> {
                                         List<Msg> ctx = scope.state.contextMutable();
@@ -1347,6 +1427,12 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                     }
 
                     scope.soTool = createStructuredOutputTool(jsonSchema);
+                    log.debug(
+                            "Fallback structured output path: injected '{}' synthetic tool"
+                                    + " (agent={}#{})",
+                            STRUCTURED_OUTPUT_TOOL_NAME,
+                            getAgentId(),
+                            getName());
 
                     return scope.doCallInner(msgs)
                             .onErrorResume(error -> saveStateAfterCallFailure(scope, error))
@@ -1354,6 +1440,12 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                     result -> {
                                         Msg out = result;
                                         if (scope.soCompleted && scope.soResultMsg != null) {
+                                            log.debug(
+                                                    "Structured output completed via '{}';"
+                                                            + " compressing context (agent={}#{})",
+                                                    STRUCTURED_OUTPUT_TOOL_NAME,
+                                                    getAgentId(),
+                                                    getName());
                                             ChatUsage aggregatedUsage =
                                                     collectAggregatedUsage(scope.state);
                                             ThinkingBlock aggregatedThinking =
@@ -1371,7 +1463,12 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                             scope.state.contextMutable().add(out);
                                         }
                                         return saveStateToSession(scope).thenReturn(out);
-                                    });
+                                    })
+                            .switchIfEmpty(
+                                    Mono.defer(
+                                            () ->
+                                                    saveStateToSession(scope)
+                                                            .then(Mono.<Msg>empty())));
                 });
     }
 
@@ -1474,6 +1571,86 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
             }
         }
         return last;
+    }
+
+    /**
+     * Build the {@code <system-reminder>} banner injected when the agent enters structured-output
+     * tool mode. This is a persistent message (no metadata) — never cleaned — so consecutive
+     * structured-output calls see a stable context and prompt-cache prefixes stay intact.
+     */
+    private Msg buildSoToolEnterReminder() {
+        return SystemMessage.builder()
+                .name("system")
+                .content(
+                        TextBlock.builder()
+                                .text(
+                                        "<system-reminder>\n"
+                                                + "STRUCTURED OUTPUT mode is now active. Your final"
+                                                + " response MUST be produced by calling the `"
+                                                + STRUCTURED_OUTPUT_TOOL_NAME
+                                                + "` tool with a JSON object that conforms to the"
+                                                + " required output schema. Do NOT output free-form"
+                                                + " text as the final answer.\n"
+                                                + "</system-reminder>")
+                                .build())
+                .build();
+    }
+
+    /**
+     * Build the {@code <system-reminder>} banner injected when the agent leaves structured-output
+     * tool mode. Persistent (no metadata), mirroring {@link #buildSoToolEnterReminder()}.
+     */
+    private Msg buildSoToolExitReminder() {
+        return SystemMessage.builder()
+                .name("system")
+                .content(
+                        TextBlock.builder()
+                                .text(
+                                        "<system-reminder>\n"
+                                            + "STRUCTURED OUTPUT mode has ended. You are back in"
+                                            + " normal conversation mode; you no longer need to"
+                                            + " call the `"
+                                                + STRUCTURED_OUTPUT_TOOL_NAME
+                                                + "` tool.\n"
+                                                + "</system-reminder>")
+                                .build())
+                .build();
+    }
+
+    /**
+     * Build the one-shot prompt reminder used to force {@code generate_response} on providers that
+     * do not support {@link ToolChoice.Specific}. Wrapped in {@code <system-reminder>} so the model
+     * treats it as a high-priority directive, mirroring {@link #buildSoToolEnterReminder()}. Carries
+     * the {@link MessageMetadataKeys#STRUCTURED_OUTPUT_REMINDER} flag (read by
+     * {@link #compressStructuredOutputContext} for cleanup) and the
+     * {@link MessageMetadataKeys#STRUCTURED_OUTPUT_REMINDER_TYPE} marker set to
+     * {@link StructuredOutputReminder#PROMPT} (informational only, not read for cleanup). Also sets
+     * {@link MessageMetadataKeys#CACHE_CONTROL} to {@code false} so the transient reminder is
+     * excluded from caching.
+     */
+    private Msg buildSoToolForceReminder() {
+        return SystemMessage.builder()
+                .name("system")
+                .content(
+                        TextBlock.builder()
+                                .text(
+                                        "<system-reminder>\n"
+                                                + "You MUST call the `"
+                                                + STRUCTURED_OUTPUT_TOOL_NAME
+                                                + "` tool to generate your final structured"
+                                                + " response. Do NOT output free-form text as the"
+                                                + " final answer.\n"
+                                                + "</system-reminder>")
+                                .build())
+                .metadata(
+                        Map.of(
+                                MessageMetadataKeys.STRUCTURED_OUTPUT_REMINDER,
+                                true,
+                                MessageMetadataKeys.STRUCTURED_OUTPUT_REMINDER_TYPE,
+                                StructuredOutputReminder.PROMPT,
+                                MessageMetadataKeys.CACHE_CONTROL,
+                                false))
+                .build();
     }
 
     /**
@@ -1694,6 +1871,14 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
         /** The tool result message from the successful {@code generate_response} call. */
         Msg soResultMsg;
 
+        /**
+         * Cumulative count of forced {@code generate_response} calls. {@code 0} = never forced;
+         * when greater than {@code 0} the next reasoning round consumes the flag to force
+         * {@code tool_choice} (or a prompt reminder), and the value doubles as the retry cap: at
+         * {@code 3} we stop forcing and finish without structured data to avoid a deadlock loop.
+         */
+        int soForceToolChoiceCount;
+
         /** Native structured-output format set on the per-call scope for native-path calls. */
         ResponseFormat nativeResponseFormat;
 
@@ -1728,6 +1913,30 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
         }
 
         private Mono<Msg> doCallInner(List<Msg> msgs) {
+            // Structured-output tool mode enter/exit reminders (Issue 2): inject a one-shot
+            // <system-reminder> at the transition boundary and flip the persistent flag so
+            // consecutive same-mode calls do not repeat it. Only the fallback path sets soTool, so
+            // native structured output never trips these. Unlike the finish-phase force reminder
+            // (STRUCTURED_OUTPUT_REMINDER metadata, cleaned on completion), these reminders carry
+            // no metadata and are never cleaned.
+            if (soTool != null && !state.isSoToolActive()) {
+                state.contextMutable().add(buildSoToolEnterReminder());
+                state.setSoToolActive(true);
+                log.debug(
+                        "Entering structured-output mode: injected enter <system-reminder>"
+                                + " (agent={}#{})",
+                        getAgentId(),
+                        getName());
+            } else if (soTool == null && state.isSoToolActive()) {
+                state.contextMutable().add(buildSoToolExitReminder());
+                state.setSoToolActive(false);
+                log.debug(
+                        "Leaving structured-output mode: injected exit <system-reminder>"
+                                + " (agent={}#{})",
+                        getAgentId(),
+                        getName());
+            }
+
             // Graceful-shutdown deduplication: if the agent's session was previously interrupted
             // by shutdown, the client is likely retrying with the same user prompt that already
             // exists in memory. Discard the duplicate input so the agent resumes purely from its
@@ -1797,7 +2006,6 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
          * Pull all {@link ConfirmResult}s out of the {@link Msg#METADATA_CONFIRM_RESULTS} metadata
          * key across the incoming message list.
          */
-        @SuppressWarnings("unchecked")
         private List<ConfirmResult> extractConfirmResults(List<Msg> msgs) {
             if (msgs == null || msgs.isEmpty()) {
                 return List.of();
@@ -2299,6 +2507,22 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
 
             ReasoningContext context = new ReasoningContext(getName());
 
+            // Prompt-based force reminder (providers without ToolChoice.Specific, e.g. GLM /
+            // MiniMax): inject BEFORE firePreReasoning so it is captured in the input-messages
+            // snapshot — PreReasoningEvent defensively copies the context list, so a late
+            // injection here would be invisible to the model on this round.
+            if (soForceToolChoiceCount > 0
+                    && soTool != null
+                    && !model.supportsToolChoiceSpecific()) {
+                state.contextMutable().add(buildSoToolForceReminder());
+                log.debug(
+                        "Forcing '{}' via prompt reminder (strategy B), retry {} (agent={}#{})",
+                        STRUCTURED_OUTPUT_TOOL_NAME,
+                        soForceToolChoiceCount,
+                        getAgentId(),
+                        getName());
+            }
+
             return checkInterrupted()
                     .then(
                             hookDispatcher.firePreReasoning(
@@ -2316,6 +2540,29 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                                             .responseFormat(nativeResponseFormat)
                                                             .build(),
                                                     options);
+                                }
+                                // Force generate_response when the previous round finished
+                                // without calling it. Mutually exclusive with nativeResponseFormat
+                                // above: soForceToolChoiceCount is only set on the fallback path
+                                // (soTool != null), where nativeResponseFormat is always null.
+                                if (soForceToolChoiceCount > 0
+                                        && soTool != null
+                                        && model.supportsToolChoiceSpecific()) {
+                                    options =
+                                            GenerateOptions.mergeOptions(
+                                                    GenerateOptions.builder()
+                                                            .toolChoice(
+                                                                    new ToolChoice.Specific(
+                                                                            STRUCTURED_OUTPUT_TOOL_NAME))
+                                                            .build(),
+                                                    options);
+                                    log.debug(
+                                            "Forcing '{}' via tool_choice (strategy A), retry {}"
+                                                    + " (agent={}#{})",
+                                            STRUCTURED_OUTPUT_TOOL_NAME,
+                                            soForceToolChoiceCount,
+                                            getAgentId(),
+                                            getName());
                                 }
                                 List<Msg> modelInput =
                                         prependSystemMsg(
@@ -2391,19 +2638,7 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                     .onErrorResume(
                             InterruptedException.class,
                             error -> {
-                                Msg msg = context.buildFinalMessage();
-                                if (msg != null) {
-                                    boolean discard =
-                                            state.interruptControl().getSource()
-                                                            == InterruptSource.SYSTEM
-                                                    && shutdownManager
-                                                                    .getConfig()
-                                                                    .partialReasoningPolicy()
-                                                            == PartialReasoningPolicy.DISCARD;
-                                    if (!discard) {
-                                        state.contextMutable().add(msg);
-                                    }
-                                }
+                                persistInterruptedReasoningMessage(context.buildFinalMessage());
                                 return Mono.error(error);
                             })
                     .flatMap(
@@ -2429,15 +2664,13 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                     .flatMap(
                             event -> {
                                 Msg eventMsg = event.getReasoningMessage();
-                                if (eventMsg != null) {
-                                    state.contextMutable().add(eventMsg);
-                                }
 
                                 // HITL stop
                                 if (event.isStopRequested()) {
                                     if (eventMsg == null) {
                                         return Mono.empty();
                                     }
+                                    state.contextMutable().add(eventMsg);
                                     return Mono.just(
                                             eventMsg.withGenerateReason(
                                                     GenerateReason.REASONING_STOP_REQUESTED));
@@ -2445,6 +2678,9 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
 
                                 // gotoReasoning requested (e.g., by a PostReasoning hook)
                                 if (event.isGotoReasoningRequested()) {
+                                    if (eventMsg != null) {
+                                        state.contextMutable().add(eventMsg);
+                                    }
                                     List<Msg> gotoMsgs = event.getGotoReasoningMsgs();
                                     if (gotoMsgs != null) {
                                         state.contextMutable().addAll(gotoMsgs);
@@ -2454,6 +2690,33 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
 
                                 // Check finish conditions
                                 if (isFinished(eventMsg)) {
+                                    // Structured output still pending: force the model to call
+                                    // generate_response (Issue 1). Retry up to 3 times, then give
+                                    // up to avoid a deadlock loop when the model refuses to call
+                                    // it.
+                                    if (soTool != null && !soCompleted) {
+                                        if (soForceToolChoiceCount < 3) {
+                                            soForceToolChoiceCount++;
+                                            log.debug(
+                                                    "Structured output still pending after finish;"
+                                                            + " forcing retry {} (agent={}#{})",
+                                                    soForceToolChoiceCount,
+                                                    getAgentId(),
+                                                    getName());
+                                            return reasoning(iter + 1, true);
+                                        }
+                                        log.warn(
+                                                "Structured output tool '{}' not called after {} "
+                                                        + "forced retries; finishing without "
+                                                        + "structured data (agent={}#{})",
+                                                STRUCTURED_OUTPUT_TOOL_NAME,
+                                                soForceToolChoiceCount,
+                                                getAgentId(),
+                                                getName());
+                                    }
+                                    if (eventMsg != null) {
+                                        state.contextMutable().add(eventMsg);
+                                    }
                                     return Mono.justOrEmpty(eventMsg);
                                 }
 
@@ -2461,17 +2724,34 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                 // (e.g. a reasoning model that wrote its whole answer into the
                                 // reasoning channel and left the content channel empty). Loop
                                 // back to reasoning with a synthetic reminder.
-                                if (!hasToolCalls(eventMsg)) {
+                                boolean emptyFinalResponse = !hasToolCalls(eventMsg);
+                                if (emptyFinalResponse) {
                                     log.warn(
                                             "Final response has no visible content (empty reply),"
                                                     + " model: {}, iter: {}",
                                             model.getModelName(),
                                             iter);
-                                    state.contextMutable().add(buildEmptyResponseReminder());
                                 }
 
                                 // Continue to acting
-                                return checkInterrupted().then(acting(iter));
+                                return checkInterrupted()
+                                        .onErrorResume(
+                                                InterruptedException.class,
+                                                error -> {
+                                                    persistInterruptedReasoningMessage(eventMsg);
+                                                    return Mono.error(error);
+                                                })
+                                        .then(
+                                                Mono.defer(
+                                                        () -> {
+                                                            state.contextMutable().add(eventMsg);
+                                                            if (emptyFinalResponse) {
+                                                                state.contextMutable()
+                                                                        .add(
+                                                                                buildEmptyResponseReminder());
+                                                            }
+                                                            return acting(iter);
+                                                        }));
                             })
                     .switchIfEmpty(
                             Mono.defer(
@@ -2479,6 +2759,24 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                         // No message was produced
                                         return Mono.justOrEmpty((Msg) null);
                                     }));
+        }
+
+        /** Persist partial reasoning after an interrupt. */
+        private void persistInterruptedReasoningMessage(Msg msg) {
+            if (msg == null) {
+                return;
+            }
+
+            InterruptSource source = state.interruptControl().getSource();
+            boolean discard =
+                    source == InterruptSource.SYSTEM
+                            && shutdownManager.getConfig().partialReasoningPolicy()
+                                    == PartialReasoningPolicy.DISCARD;
+            if (discard) {
+                return;
+            }
+
+            state.contextMutable().add(msg);
         }
 
         /**
@@ -2595,14 +2893,19 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                 blockLifecycle.startText(events);
                 if (tb.getText() != null && !tb.getText().isEmpty()) {
                     events.add(
-                            new TextBlockDeltaEvent(blockLifecycle.replyId, "text", tb.getText()));
+                            new TextBlockDeltaEvent(
+                                    blockLifecycle.replyId,
+                                    blockLifecycle.currentTextBlockId(),
+                                    tb.getText()));
                 }
             } else if (block instanceof ThinkingBlock tb) {
                 blockLifecycle.startThinking(events);
                 if (tb.getThinking() != null && !tb.getThinking().isEmpty()) {
                     events.add(
                             new ThinkingBlockDeltaEvent(
-                                    blockLifecycle.replyId, "thinking", tb.getThinking()));
+                                    blockLifecycle.replyId,
+                                    blockLifecycle.currentThinkingBlockId(),
+                                    tb.getThinking()));
                 }
             } else if (withToolEvents && block instanceof ToolUseBlock tub) {
                 String toolId = resolveToolCallId(tub, context);
@@ -2624,13 +2927,17 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
          *
          * <p>The model stream is consumed through {@code concatMap}, but the state holders keep the
          * previous thread-safe shape because model providers may deliver chunk content
-         * unpredictably. This helper only changes when pending end events are flushed; it does not
-         * change the block identity or event payloads.
+         * unpredictably. Each contiguous text or thinking segment receives its own block ID so its
+         * start, delta, and end events can be correlated independently.
          */
         private final class ModelCallBlockLifecycle {
             private final String replyId;
             private final AtomicBoolean textStarted = new AtomicBoolean(false);
+            private final AtomicLong textSegmentSequence = new AtomicLong(0);
+            private final AtomicReference<String> currentTextBlockId = new AtomicReference<>();
             private final AtomicBoolean thinkingStarted = new AtomicBoolean(false);
+            private final AtomicLong thinkingSegmentSequence = new AtomicLong(0);
+            private final AtomicReference<String> currentThinkingBlockId = new AtomicReference<>();
             private final Map<String, String> startedToolCalls = new ConcurrentHashMap<>();
 
             private ModelCallBlockLifecycle(String replyId) {
@@ -2640,14 +2947,28 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
             private void startText(List<AgentEvent> events) {
                 flushThinking(events);
                 if (textStarted.compareAndSet(false, true)) {
-                    events.add(new TextBlockStartEvent(replyId, "text"));
+                    long segment = textSegmentSequence.incrementAndGet();
+                    String blockId = segment == 1 ? "text" : "text-" + segment;
+                    currentTextBlockId.set(blockId);
+                    events.add(new TextBlockStartEvent(replyId, blockId));
                 }
+            }
+
+            private String currentTextBlockId() {
+                return currentTextBlockId.get();
             }
 
             private void startThinking(List<AgentEvent> events) {
                 if (thinkingStarted.compareAndSet(false, true)) {
-                    events.add(new ThinkingBlockStartEvent(replyId, "thinking"));
+                    long segment = thinkingSegmentSequence.incrementAndGet();
+                    String blockId = segment == 1 ? "thinking" : "thinking-" + segment;
+                    currentThinkingBlockId.set(blockId);
+                    events.add(new ThinkingBlockStartEvent(replyId, blockId));
                 }
+            }
+
+            private String currentThinkingBlockId() {
+                return currentThinkingBlockId.get();
             }
 
             private void startToolCall(String toolId, String toolName, List<AgentEvent> events) {
@@ -2665,13 +2986,15 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
 
             private void flushText(List<AgentEvent> events) {
                 if (textStarted.compareAndSet(true, false)) {
-                    events.add(new TextBlockEndEvent(replyId, "text"));
+                    String blockId = currentTextBlockId.getAndSet(null);
+                    events.add(new TextBlockEndEvent(replyId, blockId));
                 }
             }
 
             private void flushThinking(List<AgentEvent> events) {
                 if (thinkingStarted.compareAndSet(true, false)) {
-                    events.add(new ThinkingBlockEndEvent(replyId, "thinking"));
+                    String blockId = currentThinkingBlockId.getAndSet(null);
+                    events.add(new ThinkingBlockEndEvent(replyId, blockId));
                 }
             }
 
@@ -2755,9 +3078,19 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                             })
                     .flatMap(
                             results -> {
+                                List<Map.Entry<ToolUseBlock, ToolResultBlock>> successPairs =
+                                        results.stream()
+                                                .filter(e -> !e.getValue().isSuspended())
+                                                .toList();
+                                List<Map.Entry<ToolUseBlock, ToolResultBlock>> pendingPairs =
+                                        results.stream()
+                                                .filter(e -> e.getValue().isSuspended())
+                                                .toList();
+
                                 // Middleware requested stop during acting — return immediately with
-                                // the requested GenerateReason, preserving any results already
-                                // collected.
+                                // the requested GenerateReason. Persist completed tool results
+                                // through the same post-acting path as a normal iteration first,
+                                // otherwise the preceding tool_use remains orphaned in history.
                                 RequestStopEvent rs = actingStopRequested.get();
                                 if (rs != null) {
                                     if (rs.getGenerateReason()
@@ -2769,17 +3102,20 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                                             GenerateReason.PERMISSION_ASKING));
                                         }
                                     }
-                                    Msg stopMsg = buildStopMsg(results, rs.getGenerateReason());
-                                    return Mono.just(stopMsg);
+                                    Mono<Void> persistResults =
+                                            successPairs.isEmpty()
+                                                    ? Mono.empty()
+                                                    : Flux.fromIterable(successPairs)
+                                                            .concatMap(this::notifyPostActingHook)
+                                                            .then();
+                                    return persistResults.then(
+                                            Mono.fromSupplier(
+                                                    () -> {
+                                                        syncToolkitToState(state);
+                                                        return buildStopMsg(
+                                                                results, rs.getGenerateReason());
+                                                    }));
                                 }
-                                List<Map.Entry<ToolUseBlock, ToolResultBlock>> successPairs =
-                                        results.stream()
-                                                .filter(e -> !e.getValue().isSuspended())
-                                                .toList();
-                                List<Map.Entry<ToolUseBlock, ToolResultBlock>> pendingPairs =
-                                        results.stream()
-                                                .filter(e -> e.getValue().isSuspended())
-                                                .toList();
 
                                 if (successPairs.isEmpty()) {
                                     if (!pendingPairs.isEmpty()) {
@@ -3491,6 +3827,12 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                     soCompleted = true;
                                     soResultMsg = e.getToolResultMsg();
                                     e.stopAgent();
+                                    log.debug(
+                                            "Structured output tool '{}' called successfully;"
+                                                    + " stopping agent (agent={}#{})",
+                                            STRUCTURED_OUTPUT_TOOL_NAME,
+                                            getAgentId(),
+                                            getName());
                                 }
                                 Msg resultMsg = e.getToolResultMsg();
                                 state.contextMutable().add(resultMsg);
@@ -3654,7 +3996,8 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                                                             new TextBlockDeltaEvent(
                                                                                     blockLifecycle
                                                                                             .replyId,
-                                                                                    "text",
+                                                                                    blockLifecycle
+                                                                                            .currentTextBlockId(),
                                                                                     tb.getText()));
                                                                 }
                                                             } else if (block
@@ -3668,7 +4011,8 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                                                             new ThinkingBlockDeltaEvent(
                                                                                     blockLifecycle
                                                                                             .replyId,
-                                                                                    "thinking",
+                                                                                    blockLifecycle
+                                                                                            .currentThinkingBlockId(),
                                                                                     tb
                                                                                             .getThinking()));
                                                                 }
@@ -3722,6 +4066,8 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                                                     + " generating summary: %s",
                                                             maxIters, error.getMessage()))
                                             .build())
+                            .metadata(Map.of(MessageMetadataKeys.SUMMARY_FAILED, true))
+                            .generateReason(GenerateReason.MAX_ITERATIONS)
                             .build();
             state.contextMutable().add(errorMsg);
             return Mono.just(errorMsg);
@@ -4186,6 +4532,7 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
     public void clearStateCache() {
         stateCache.clear();
         permissionEngineCache.clear();
+        slotVersions.clear();
     }
 
     /**
@@ -4216,6 +4563,7 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
         String slot = slotKey(userId, sid);
         stateCache.remove(slot);
         permissionEngineCache.remove(slot);
+        slotVersions.remove(slot);
     }
 
     /**

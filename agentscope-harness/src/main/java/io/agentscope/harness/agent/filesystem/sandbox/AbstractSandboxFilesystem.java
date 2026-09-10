@@ -34,6 +34,28 @@ public interface AbstractSandboxFilesystem extends AbstractFilesystem {
     String id();
 
     /**
+     * Returns the workspace root path for this filesystem.
+     *
+     * @return workspace root path string
+     */
+    default String getWorkspaceRoot() {
+        return "/workspace";
+    }
+
+    /**
+     * Returns the workspace root for the current call context.
+     *
+     * <p>Most filesystems have a stable root and can use the no-argument implementation. Proxies
+     * serving multiple sandbox sessions override this method to resolve the active binding.
+     *
+     * @param runtimeContext per-call agent context
+     * @return workspace root path string
+     */
+    default String getWorkspaceRoot(RuntimeContext runtimeContext) {
+        return getWorkspaceRoot();
+    }
+
+    /**
      * Execute a shell command in the environment backing this filesystem.
      *
      * @param runtimeContext per-call agent context; may be {@code null} when unavailable

@@ -19,6 +19,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
@@ -43,6 +45,8 @@ import io.agentscope.core.agui.runtime.AguiRuntimeContextRequest;
 import io.agentscope.core.event.AgentEndEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.state.AgentStateStore;
+import io.agentscope.core.state.InMemoryAgentStateStore;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -54,6 +58,67 @@ import reactor.core.publisher.Flux;
 
 /** Unit tests for AguiRequestProcessor. */
 class AguiRequestProcessorTest {
+
+    @Test
+    void builderRejectsNonVersionedResumeStore() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        when(store.supportsVersioning()).thenReturn(false);
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () ->
+                        AguiRequestProcessor.builder()
+                                .agentResolver(mock(AgentResolver.class))
+                                .resumeStateStore(store)
+                                .build());
+    }
+
+    @Test
+    void processorsSharingStoreCanResumeEachOthersInterrupts() {
+        InMemoryAgentStateStore store = new InMemoryAgentStateStore();
+        AgentResolver resolver = mock(AgentResolver.class);
+        ReActAgent agent = mock(ReActAgent.class);
+        when(resolver.resolveAgent("default", "thread-1", null)).thenReturn(agent);
+        when(resolver.hasMemory(any(RuntimeContext.class))).thenReturn(false);
+        when(agent.streamEvents(anyList(), any(RuntimeContext.class)))
+                .thenReturn(Flux.just(new AgentEndEvent("reply")));
+
+        AguiRequestProcessor first =
+                AguiRequestProcessor.builder()
+                        .agentResolver(resolver)
+                        .resumeStateStore(store)
+                        .adapterFactory(InterruptingAdapter::new)
+                        .build();
+        first.process(request(input("run-1"))).events().collectList().block();
+
+        ArgumentCaptor<List<Msg>> messages = ArgumentCaptor.forClass(List.class);
+        when(agent.streamEvents(messages.capture(), any(RuntimeContext.class)))
+                .thenReturn(Flux.just(new AgentEndEvent("reply-2")));
+        AguiRequestProcessor second =
+                AguiRequestProcessor.builder()
+                        .agentResolver(resolver)
+                        .resumeStateStore(store)
+                        .build();
+        second.process(
+                        request(
+                                RunAgentInput.builder()
+                                        .threadId("thread-1")
+                                        .runId("run-2")
+                                        .resume(
+                                                List.of(
+                                                        new AguiResume(
+                                                                "interrupt-from-server",
+                                                                AguiResume.STATUS_RESOLVED,
+                                                                Map.of("approved", true))))
+                                        .build()))
+                .events()
+                .collectList()
+                .block();
+
+        assertEquals(
+                "tool-call-from-server",
+                messages.getValue().get(0).getFirstContentBlock(ToolResultBlock.class).getId());
+    }
 
     @Test
     void extractLatestUserMessagePreservesFullRunInputMetadata() {
@@ -291,24 +356,31 @@ class AguiRequestProcessorTest {
     }
 
     @Test
-    void processRejectsConcurrentRunOnSameThreadUntilActiveRunFinishes() {
+    void processRejectsConcurrentRunOnSameThreadUntilActiveRunFinishes() throws Exception {
         AgentResolver resolver = mock(AgentResolver.class);
         ReActAgent agent = mock(ReActAgent.class);
         when(resolver.resolveAgent(eq("default"), eq("thread-1"), nullable(String.class)))
                 .thenReturn(agent);
         AtomicInteger adapterCount = new AtomicInteger();
+        java.util.concurrent.atomic.AtomicBoolean activeSubscribed =
+                new java.util.concurrent.atomic.AtomicBoolean();
         AguiRequestProcessor processor =
                 AguiRequestProcessor.builder()
                         .agentResolver(resolver)
                         .adapterFactory(
                                 (resolvedAgent, config) -> {
                                     adapterCount.incrementAndGet();
+                                    activeSubscribed.set(true);
                                     return new NeverEndingAdapter(resolvedAgent, config);
                                 })
                         .build();
 
         Disposable activeRun = processor.process(request(input("run-1"))).events().subscribe();
         try {
+            for (int i = 0; i < 100 && !activeSubscribed.get(); i++) {
+                Thread.sleep(10L);
+            }
+            assertTrue(activeSubscribed.get());
             List<AguiEvent> rejectedEvents =
                     processor.process(request(input("run-2"))).events().collectList().block();
 
@@ -320,6 +392,9 @@ class AguiRequestProcessorTest {
 
         Disposable nextRun = processor.process(request(input("run-3"))).events().subscribe();
         try {
+            for (int i = 0; i < 100 && adapterCount.get() < 2; i++) {
+                Thread.sleep(10L);
+            }
             assertEquals(2, adapterCount.get());
         } finally {
             nextRun.dispose();
