@@ -15,6 +15,7 @@
  */
 package io.agentscope.builder.web.managed;
 
+import io.agentscope.builder.control.ControlPlaneClient;
 import io.agentscope.builder.web.api.error.ApiErrorDetail;
 import io.agentscope.builder.web.api.error.ApiErrorType;
 import io.agentscope.builder.web.api.error.ApiException;
@@ -23,6 +24,7 @@ import io.agentscope.builder.web.coord.CoordinationStore;
 import io.agentscope.builder.web.coord.TurnLeaseService;
 import io.agentscope.builder.web.managed.service.DeletedSessionRegistry;
 import io.agentscope.builder.web.managed.service.SessionEventLog;
+import io.agentscope.builder.web.toolbus.ToolConfirmationCoordinator;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentEventStreams;
@@ -100,6 +102,33 @@ public class SessionTurnRunner {
         this.turnLeaseService = turnLeaseService;
         this.coordinationStore = coordinationStore;
         this.deletedSessions = deletedSessions;
+    }
+
+    /** Compatibility constructor retained for control-plane tests and integrations. */
+    public SessionTurnRunner(
+            HarnessAgentBuildService agentBuildService,
+            @Lazy DataSessionService sessionService,
+            SessionEventLog eventLog,
+            SessionEventMapper eventMapper,
+            SessionEventPreviewBus previewBus,
+            DataEnvironmentService environmentService,
+            HandsLeaseService handsLeaseService,
+            TurnLeaseService turnLeaseService,
+            CoordinationStore coordinationStore,
+            DeletedSessionRegistry deletedSessions,
+            ControlPlaneClient controlPlaneClient,
+            @Lazy ToolConfirmationCoordinator confirmationCoordinator) {
+        this(
+                agentBuildService,
+                sessionService,
+                eventLog,
+                eventMapper,
+                previewBus,
+                environmentService,
+                handsLeaseService,
+                turnLeaseService,
+                coordinationStore,
+                deletedSessions);
     }
 
     /** Runs a turn asynchronously so inbound HTTP handlers can return quickly. */
@@ -204,6 +233,14 @@ public class SessionTurnRunner {
             return;
         }
         coordinationStore.requestTurnInterrupt(sessionId, abortReason);
+    }
+
+    /** Compatibility no-op for the control-plane heartbeat hook absent from this branch. */
+    public void heartbeatManagedExecution(
+            String sessionId,
+            ControlPlaneClient.ManagedExecutionScope scope,
+            TurnLeaseService.TurnLease lease) {
+        // Control-plane heartbeats are not part of this branch's execution model.
     }
 
     /**
