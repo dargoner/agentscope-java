@@ -187,6 +187,27 @@ public class SessionTurnRunner {
     }
 
     /**
+     * Compatibility entry point for the managed-attempt abort API introduced on main.
+     *
+     * <p>This stream branch does not carry the control-plane execution scope, so local turns are
+     * cancelled immediately and remote turns receive the regular coordination interrupt request.
+     */
+    public void abortManagedAttempt(
+            String sessionId,
+            String agentTaskId,
+            String attemptId,
+            long dispatchGeneration,
+            String turnId,
+            String reason) {
+        String abortReason =
+                reason != null && !reason.isBlank() ? reason : "managed_attempt_abort";
+        if (interruptLocal(sessionId, abortReason)) {
+            return;
+        }
+        coordinationStore.requestTurnInterrupt(sessionId, abortReason);
+    }
+
+    /**
      * Performs local turn cancellation when this JVM holds the active agent. Returns {@code true}
      * when a local turn was interrupted.
      */
