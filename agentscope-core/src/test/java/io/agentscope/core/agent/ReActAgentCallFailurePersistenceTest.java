@@ -222,7 +222,15 @@ class ReActAgentCallFailurePersistenceTest {
         AgentState persisted =
                 store.get(null, agent.getDefaultSessionId(), "agent_state", AgentState.class)
                         .orElseThrow();
-        assertEquals(List.of("empty fallback request"), textContents(persisted.getContext()));
+        // The structured-output mode banner is intentionally persisted for prompt-cache
+        // stability (see ReActAgentStructuredOutputTest#testStructuredOutputEnterExitReminders),
+        // so filter it out before asserting that no model-produced content leaked into the
+        // durable conversation state.
+        List<String> conversationText =
+                textContents(persisted.getContext()).stream()
+                        .filter(text -> !text.contains("STRUCTURED OUTPUT mode is now active"))
+                        .toList();
+        assertEquals(List.of("empty fallback request"), conversationText);
     }
 
     @Test
