@@ -351,7 +351,7 @@ class AguiAgentAdapterV2Test {
                             AguiEventType.RUN_FINISHED),
                     types(events));
             assertEquals(
-                    List.of("reply-legacy", "reply-legacy", "reply-legacy"),
+                    List.of("reply-legacy-text-1", "reply-legacy-text-1", "reply-legacy-text-1"),
                     events.stream()
                             .filter(
                                     event ->
@@ -389,12 +389,12 @@ class AguiAgentAdapterV2Test {
 
             assertEquals(
                     List.of(
-                            "reply-1:text:0",
-                            "reply-1:text:0",
-                            "reply-1:text:0",
-                            "reply-1:text:1",
-                            "reply-1:text:1",
-                            "reply-1:text:1"),
+                            "reply-1-text-1",
+                            "reply-1-text-1",
+                            "reply-1-text-1",
+                            "reply-1-text-2",
+                            "reply-1-text-2",
+                            "reply-1-text-2"),
                     events.stream()
                             .filter(
                                     event ->
@@ -424,7 +424,7 @@ class AguiAgentAdapterV2Test {
                             "replyId",
                             "reply-1",
                             "messageIds",
-                            List.of("reply-1:text:0", "reply-1:text:1"),
+                            List.of("reply-1-text-1", "reply-1-text-2"),
                             "disposition",
                             "INTERMEDIATE"),
                     customValue(disposition).entrySet().stream()
@@ -456,12 +456,12 @@ class AguiAgentAdapterV2Test {
 
             assertEquals(
                     List.of(
-                            "reply-1:text:0",
-                            "reply-1:text:0",
-                            "reply-1:text:0",
-                            "reply-1:text:1",
-                            "reply-1:text:1",
-                            "reply-1:text:1"),
+                            "reply-1-text-1",
+                            "reply-1-text-1",
+                            "reply-1-text-1",
+                            "reply-1-text-2",
+                            "reply-1-text-2",
+                            "reply-1-text-2"),
                     events.stream()
                             .filter(
                                     event ->
@@ -490,9 +490,9 @@ class AguiAgentAdapterV2Test {
                             .toList();
             assertEquals(2, dispositions.size());
             assertEquals(
-                    List.of("reply-1:text:0"), customValue(dispositions.get(0)).get("messageIds"));
+                    List.of("reply-1-text-1"), customValue(dispositions.get(0)).get("messageIds"));
             assertEquals(
-                    List.of("reply-1:text:0", "reply-1:text:1"),
+                    List.of("reply-1-text-1", "reply-1-text-2"),
                     customValue(dispositions.get(1)).get("messageIds"));
             assertEquals("INTERMEDIATE", customValue(dispositions.get(1)).get("disposition"));
             assertFalse(
@@ -673,7 +673,7 @@ class AguiAgentAdapterV2Test {
             assertFalse(
                     snapshot.messages().stream()
                             .map(AguiMessage::getId)
-                            .anyMatch(id -> id.contains(":text:")));
+                            .anyMatch(id -> id.matches("^.+-text(-\\d+)?$")));
         }
 
         @Test
@@ -707,12 +707,12 @@ class AguiAgentAdapterV2Test {
             Msg user = Msg.builder().id("session-user").role(MsgRole.USER).textContent("q").build();
             Msg liveSegment =
                     AssistantMessage.builder()
-                            .id("reply-preview:text:7")
+                            .id("reply-preview-text-7")
                             .content(TextBlock.builder().text("preview").build())
                             .build();
             Msg ordinaryColonId =
                     AssistantMessage.builder()
-                            .id("reply-preview:text:final")
+                            .id("reply-preview-text-final")
                             .content(TextBlock.builder().text("kept").build())
                             .build();
             AgentState state =
@@ -725,7 +725,7 @@ class AguiAgentAdapterV2Test {
                     runTerminalDisposition(GenerateReason.MODEL_STOP, callerContext);
 
             assertEquals(
-                    List.of("session-user", "reply-preview:text:final", "reply-final"),
+                    List.of("session-user", "reply-preview-text-final", "reply-final"),
                     messageIds(snapshot(events)));
         }
 
