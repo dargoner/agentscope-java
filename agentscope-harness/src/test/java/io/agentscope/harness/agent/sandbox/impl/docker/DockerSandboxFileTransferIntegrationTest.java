@@ -64,9 +64,7 @@ class DockerSandboxFileTransferIntegrationTest {
         state.setContainerId(""); // empty → force a fresh container on start()
         state.setImage(TEST_IMAGE);
         state.setContainerOwned(true);
-        WorkspaceSpec workspace = new WorkspaceSpec();
-        workspace.setRoot("/workspace");
-        state.setWorkspaceSpec(workspace);
+        state.setWorkspaceSpec(new WorkspaceSpec());
 
         sandbox = new DockerSandbox(state);
         sandbox.start();
@@ -188,11 +186,11 @@ class DockerSandboxFileTransferIntegrationTest {
             DockerSandboxState rootState = new DockerSandboxState();
             rootState.setSessionId("it-root-" + Long.toHexString(System.nanoTime()));
             rootState.setContainerId("");
+            WorkspaceSpec rootSpec = new WorkspaceSpec();
+            rootSpec.setRoot("/");
             rootState.setImage(TEST_IMAGE);
             rootState.setContainerOwned(true);
-            WorkspaceSpec workspace = new WorkspaceSpec();
-            workspace.setRoot("/");
-            rootState.setWorkspaceSpec(workspace);
+            rootState.setWorkspaceSpec(rootSpec);
 
             other = new DockerSandbox(rootState);
             other.start();

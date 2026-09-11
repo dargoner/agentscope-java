@@ -62,7 +62,11 @@ public class SandboxManager {
         this.client = Objects.requireNonNull(client, "client must not be null");
         this.stateStore = Objects.requireNonNull(stateStore, "stateStore must not be null");
         this.agentId = Objects.requireNonNull(agentId, "agentId must not be null");
-        if (!this.agentId.equals(stateStore.agentId())) {
+        // A store that does not expose an agentId cannot conflict with this manager. That case is
+        // only reachable for test doubles: the real SessionSandboxStateStore rejects a null
+        // agentId in its constructor, so production stores always declare one.
+        String storeAgentId = stateStore.agentId();
+        if (storeAgentId != null && !this.agentId.equals(storeAgentId)) {
             throw new IllegalArgumentException(
                     "SandboxManager agentId must match SessionSandboxStateStore agentId");
         }
