@@ -153,7 +153,7 @@ class SandboxBackedFilesystemTest {
         filesystem.setSandbox(sandbox);
 
         List<FileDownloadResponse> responses =
-                filesystem.downloadFiles(RT, List.of("/tmp/truncated.bin"));
+                filesystem.downloadFiles(RuntimeContext.empty(), List.of("/tmp/truncated.bin"));
 
         assertTrue(!responses.get(0).isSuccess());
         assertEquals("File download output was truncated by the sandbox", responses.get(0).error());
