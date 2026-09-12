@@ -269,7 +269,7 @@ public class AguiStreamContext {
         List<Msg> authoritativeMessages = authoritativeMessagesSupplier.get();
         if (authoritativeMessages != null) {
             for (Msg message : authoritativeMessages) {
-                if (message != null && !isTextSegmentId(message.getId())) {
+                if (message != null && !isGeneratedTextSegmentId(message.getId())) {
                     messagesById.put(message.getId(), messageConverter.toAguiMessage(message));
                 }
             }
@@ -278,7 +278,7 @@ public class AguiStreamContext {
             // The submitted turn must survive the snapshot: agent state is not guaranteed to echo
             // it, and consumers reconcile by replacing their streamed text with this snapshot.
             for (AguiMessage message : runInput.getMessages()) {
-                if (message != null && !isTextSegmentId(message.getId())) {
+                if (message != null && !isGeneratedTextSegmentId(message.getId())) {
                     messagesById.put(message.getId(), message);
                 }
             }
@@ -504,8 +504,8 @@ public class AguiStreamContext {
                         Collections.unmodifiableMap(value)));
     }
 
-    private static boolean isTextSegmentId(String messageId) {
-        return messageId != null && TEXT_SEGMENT_ID.matcher(messageId).matches();
+    private boolean isGeneratedTextSegmentId(String messageId) {
+        return messageId != null && startedTextMessages.contains(messageId);
     }
 
     private static String normalizeToolCallName(String toolCallName) {
