@@ -82,7 +82,10 @@ public final class ReplyLifecycleTracker {
             ReplySnapshot before,
             ReplySnapshot after) {}
 
-    private final Map<SourceKey, ReplyState> states =
+    // Keep the active top-level reply outside the child cap so fan-out cannot evict it.
+    private ReplyState topLevelState;
+
+    private final Map<SourceKey, ReplyState> childStates =
             new LinkedHashMap<>() {
                 @Override
                 protected boolean removeEldestEntry(Map.Entry<SourceKey, ReplyState> eldest) {
@@ -102,7 +105,7 @@ public final class ReplyLifecycleTracker {
     public Observation observe(AgentEvent event) {
         Objects.requireNonNull(event, "event");
         SourceKey sourceKey = sourceKey(event);
-        ReplyState state = states.get(sourceKey);
+        ReplyState state = state(sourceKey);
         ReplySnapshot before = state != null ? state.snapshot() : ReplyState.emptySnapshot();
         EventKind kind = eventKind(event);
         String eventReplyId = replyId(event);
@@ -115,7 +118,7 @@ public final class ReplyLifecycleTracker {
             case MODEL_CALL_START -> {
                 if (state == null) {
                     state = new ReplyState();
-                    states.put(sourceKey, state);
+                    storeState(sourceKey, state);
                 }
                 state.replyId = eventReplyId;
                 state.textSeen = false;
@@ -152,12 +155,12 @@ public final class ReplyLifecycleTracker {
     }
 
     public ReplySnapshot snapshot(SourceKey sourceKey) {
-        ReplyState state = states.get(sourceKey);
+        ReplyState state = state(sourceKey);
         return state == null ? ReplyState.emptySnapshot() : state.snapshot();
     }
 
     public void markDispositionEmitted(SourceKey sourceKey) {
-        ReplyState state = states.get(sourceKey);
+        ReplyState state = state(sourceKey);
         if (state != null) {
             state.dispositionEmitted = true;
         }
@@ -170,11 +173,11 @@ public final class ReplyLifecycleTracker {
      * of the supported API surface.
      */
     public int trackedSourceCount() {
-        return states.size();
+        return (topLevelState != null ? 1 : 0) + childStates.size();
     }
 
     public void clearReply(SourceKey sourceKey) {
-        ReplyState state = states.get(sourceKey);
+        ReplyState state = state(sourceKey);
         if (state != null) {
             state.replyId = null;
             state.textSeen = false;
@@ -184,11 +187,31 @@ public final class ReplyLifecycleTracker {
     }
 
     public void clearSource(SourceKey sourceKey) {
-        states.remove(sourceKey);
+        if (sourceKey != null && sourceKey.isTopLevel()) {
+            topLevelState = null;
+        } else {
+            childStates.remove(sourceKey);
+        }
     }
 
     public void clear() {
-        states.clear();
+        topLevelState = null;
+        childStates.clear();
+    }
+
+    private ReplyState state(SourceKey sourceKey) {
+        if (sourceKey == null) {
+            return null;
+        }
+        return sourceKey.isTopLevel() ? topLevelState : childStates.get(sourceKey);
+    }
+
+    private void storeState(SourceKey sourceKey, ReplyState state) {
+        if (sourceKey.isTopLevel()) {
+            topLevelState = state;
+        } else {
+            childStates.put(sourceKey, state);
+        }
     }
 
     private static EventKind eventKind(AgentEvent event) {

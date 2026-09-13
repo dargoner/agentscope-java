@@ -282,7 +282,7 @@ public class AguiStreamContext {
             for (AguiMessage message : runInput.getMessages()) {
                 if (message != null
                         && !isGeneratedTextSegmentId(message.getId())
-                        && (!hasAuthoritativeMessages || "user".equals(message.getRole()))) {
+                        && (!hasAuthoritativeMessages || message.isUserMessage())) {
                     messagesById.putIfAbsent(message.getId(), message);
                 }
             }

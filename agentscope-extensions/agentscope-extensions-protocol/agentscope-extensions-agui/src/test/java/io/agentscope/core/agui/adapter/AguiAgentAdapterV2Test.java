@@ -681,7 +681,7 @@ class AguiAgentAdapterV2Test {
         }
 
         @Test
-        void testFinalSnapshotKeepsSubmittedTurnWhenAgentStateDoesNotEchoIt() {
+        void testFinalSnapshotKeepsSubmittedTurnWithCaseInsensitiveUserRole() {
             Msg assistantOnly =
                     AssistantMessage.builder()
                             .id("reply-previous")
@@ -696,8 +696,19 @@ class AguiAgentAdapterV2Test {
                             .content(TextBlock.builder().text("canonical result").build())
                             .generateReason(GenerateReason.MODEL_STOP)
                             .build();
+            RunAgentInput runInput =
+                    inputBuilder()
+                            .messages(
+                                    List.of(
+                                            AguiMessage.textMessage(
+                                                    "msg-1",
+                                                    "User",
+                                                    "submitted question",
+                                                    null,
+                                                    null)))
+                            .build();
 
-            List<AguiEvent> events = runTerminalDisposition(callerContext, finalResult);
+            List<AguiEvent> events = runTerminalDisposition(runInput, callerContext, finalResult);
 
             assertEquals(
                     List.of("reply-previous", "msg-1", "reply-final"),
