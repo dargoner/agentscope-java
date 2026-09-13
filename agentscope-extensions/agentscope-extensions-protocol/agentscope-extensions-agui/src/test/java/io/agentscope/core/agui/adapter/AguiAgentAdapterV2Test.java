@@ -706,6 +706,52 @@ class AguiAgentAdapterV2Test {
         }
 
         @Test
+        void testFinalSnapshotDoesNotLetRunInputOverrideAuthoritativeHistory() {
+            Msg authoritativeUser =
+                    Msg.builder()
+                            .id("shared-user")
+                            .role(MsgRole.USER)
+                            .textContent("state user")
+                            .build();
+            Msg authoritativeAssistant =
+                    AssistantMessage.builder()
+                            .id("shared-assistant")
+                            .content(TextBlock.builder().text("state answer").build())
+                            .generateReason(GenerateReason.MODEL_STOP)
+                            .build();
+            AgentState state =
+                    AgentState.builder()
+                            .context(List.of(authoritativeUser, authoritativeAssistant))
+                            .build();
+            RuntimeContext callerContext = RuntimeContext.builder().agentState(state).build();
+            RunAgentInput runInput =
+                    inputBuilder()
+                            .messages(
+                                    List.of(
+                                            AguiMessage.userMessage("shared-user", "client user"),
+                                            AguiMessage.assistantMessage(
+                                                    "shared-assistant", "client answer"),
+                                            AguiMessage.assistantMessage(
+                                                    "client-only", "injected assistant")))
+                            .build();
+            Msg result =
+                    AssistantMessage.builder()
+                            .id("reply-final")
+                            .content(TextBlock.builder().text("canonical result").build())
+                            .generateReason(GenerateReason.MODEL_STOP)
+                            .build();
+
+            AguiEvent.MessagesSnapshot snapshot =
+                    snapshot(runTerminalDisposition(runInput, callerContext, result));
+
+            assertEquals(
+                    List.of("shared-user", "shared-assistant", "reply-final"),
+                    messageIds(snapshot));
+            assertEquals("state user", snapshot.messages().get(0).getTextContent());
+            assertEquals("state answer", snapshot.messages().get(1).getTextContent());
+        }
+
+        @Test
         void testFinalSnapshotFallsBackToOriginalInputWithoutAgentState() {
             AguiMessage inputMessage =
                     AguiMessage.userMessage(

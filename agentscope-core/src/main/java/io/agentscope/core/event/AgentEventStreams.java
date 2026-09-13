@@ -79,7 +79,7 @@ public final class AgentEventStreams {
          * regression tests can assert that ended sources are reclaimed.
          */
         int retainedSourceCount() {
-            return endedSources.size() + authoritativeResults.size();
+            return endedSources.size() + authoritativeResults.size() + tracker.trackedSourceCount();
         }
 
         private List<AgentEvent> process(AgentEvent event) {

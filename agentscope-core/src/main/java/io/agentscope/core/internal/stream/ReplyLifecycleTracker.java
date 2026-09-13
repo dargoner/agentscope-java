@@ -41,6 +41,8 @@ import java.util.Objects;
  */
 public final class ReplyLifecycleTracker {
 
+    static final int MAX_TRACKED_SOURCES = 4096;
+
     public enum EventKind {
         MODEL_CALL_START,
         MODEL_CALL_END,
@@ -80,7 +82,13 @@ public final class ReplyLifecycleTracker {
             ReplySnapshot before,
             ReplySnapshot after) {}
 
-    private final Map<SourceKey, ReplyState> states = new LinkedHashMap<>();
+    private final Map<SourceKey, ReplyState> states =
+            new LinkedHashMap<>() {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<SourceKey, ReplyState> eldest) {
+                    return size() > MAX_TRACKED_SOURCES;
+                }
+            };
 
     public SourceKey sourceKey(AgentEvent event) {
         Objects.requireNonNull(event, "event");
@@ -94,15 +102,21 @@ public final class ReplyLifecycleTracker {
     public Observation observe(AgentEvent event) {
         Objects.requireNonNull(event, "event");
         SourceKey sourceKey = sourceKey(event);
-        ReplyState state = states.computeIfAbsent(sourceKey, ignored -> new ReplyState());
-        ReplySnapshot before = state.snapshot();
+        ReplyState state = states.get(sourceKey);
+        ReplySnapshot before = state != null ? state.snapshot() : ReplyState.emptySnapshot();
         EventKind kind = eventKind(event);
         String eventReplyId = replyId(event);
         boolean currentReplyEvent =
-                eventReplyId != null && Objects.equals(state.replyId, eventReplyId);
+                state != null
+                        && eventReplyId != null
+                        && Objects.equals(state.replyId, eventReplyId);
 
         switch (kind) {
             case MODEL_CALL_START -> {
+                if (state == null) {
+                    state = new ReplyState();
+                    states.put(sourceKey, state);
+                }
                 state.replyId = eventReplyId;
                 state.textSeen = false;
                 state.toolCallSeen = false;
@@ -110,7 +124,8 @@ public final class ReplyLifecycleTracker {
                 currentReplyEvent = true;
             }
             case TEXT_BLOCK_DELTA -> {
-                if (currentReplyEvent
+                if (state != null
+                        && currentReplyEvent
                         && event instanceof TextBlockDeltaEvent delta
                         && delta.getDelta() != null
                         && !delta.getDelta().isEmpty()) {
@@ -118,7 +133,7 @@ public final class ReplyLifecycleTracker {
                 }
             }
             case TOOL_CALL_START -> {
-                if (currentReplyEvent) {
+                if (state != null && currentReplyEvent) {
                     state.toolCallSeen = true;
                 }
             }
@@ -128,7 +143,12 @@ public final class ReplyLifecycleTracker {
         }
 
         return new Observation(
-                sourceKey, kind, eventReplyId, currentReplyEvent, before, state.snapshot());
+                sourceKey,
+                kind,
+                eventReplyId,
+                currentReplyEvent,
+                before,
+                state != null ? state.snapshot() : ReplyState.emptySnapshot());
     }
 
     public ReplySnapshot snapshot(SourceKey sourceKey) {
@@ -143,8 +163,13 @@ public final class ReplyLifecycleTracker {
         }
     }
 
-    /** Number of sources currently holding reply state. Package private for regression tests. */
-    int trackedSourceCount() {
+    /**
+     * Number of sources currently holding reply state.
+     *
+     * <p>Public only so internal stream annotators can account for all retained bookkeeping. Not part
+     * of the supported API surface.
+     */
+    public int trackedSourceCount() {
         return states.size();
     }
 

@@ -125,4 +125,29 @@ class ReplyLifecycleTrackerTest {
 
         assertEquals(0, tracker.trackedSourceCount());
     }
+
+    @Test
+    void eventsThatCannotEstablishAConversationDoNotCreateTrackedState() {
+        ReplyLifecycleTracker tracker = new ReplyLifecycleTracker();
+        ReplyLifecycleTracker.SourceKey topLevel = ReplyLifecycleTracker.SourceKey.topLevel();
+        tracker.observe(new ModelCallStartEvent("reply-1"));
+        tracker.observe(new TextBlockDeltaEvent("reply-1", "block-1", "answer"));
+        tracker.clearSource(topLevel);
+
+        tracker.observe(new TextBlockDeltaEvent("reply-1", "block-1", "late"));
+        tracker.observe(new ToolCallStartEvent("reply-1", "tool-1", "search"));
+
+        assertEquals(0, tracker.trackedSourceCount());
+    }
+
+    @Test
+    void capsTrackedSources() {
+        ReplyLifecycleTracker tracker = new ReplyLifecycleTracker();
+
+        for (int i = 0; i < 4097; i++) {
+            tracker.observe(new ModelCallStartEvent("reply-" + i).withSource("source-" + i));
+        }
+
+        assertEquals(4096, tracker.trackedSourceCount());
+    }
 }
