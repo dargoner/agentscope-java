@@ -30,6 +30,7 @@ import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.test.StepVerifier;
@@ -338,6 +339,45 @@ class AgentEventStreamsTest {
                 .verify();
 
         source.assertCancelled();
+    }
+
+    @Test
+    void retainsTopLevelReplyWhenChildFanOutExceedsTrackedSourceCapacity() {
+        AgentEndEvent end = new AgentEndEvent("reply-top");
+        List<AgentEvent> fanOut =
+                IntStream.rangeClosed(0, 4096)
+                        .mapToObj(
+                                i ->
+                                        (AgentEvent)
+                                                new ModelCallStartEvent("reply-" + i)
+                                                        .withSource("source-" + i))
+                        .toList();
+
+        List<AgentEvent> events =
+                AgentEventStreams.withTextOutputDisposition(
+                                Flux.concat(
+                                        Flux.just(new ModelCallStartEvent("reply-top")),
+                                        Flux.fromIterable(fanOut),
+                                        Flux.just(
+                                                new TextBlockDeltaEvent(
+                                                        "reply-top", "block-top", "answer"),
+                                                result(GenerateReason.MODEL_STOP),
+                                                end)))
+                        .collectList()
+                        .block();
+
+        TextOutputDispositionEvent terminal =
+                events.stream()
+                        .filter(TextOutputDispositionEvent.class::isInstance)
+                        .map(TextOutputDispositionEvent.class::cast)
+                        .filter(
+                                disposition ->
+                                        disposition.getDisposition()
+                                                == TextOutputDisposition.TERMINAL)
+                        .findFirst()
+                        .orElseThrow();
+        assertEquals("reply-top", terminal.getReplyId());
+        assertSame(end, events.get(events.size() - 1));
     }
 
     @Test
