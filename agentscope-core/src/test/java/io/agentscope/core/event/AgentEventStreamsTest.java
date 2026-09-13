@@ -499,6 +499,10 @@ class AgentEventStreamsTest {
                                                 "task-1"),
                                         successfulChildEnd("reply-1", "worker", "task-1"),
                                         tagged(
+                                                new TextBlockEndEvent("reply-1", "block-1"),
+                                                "worker",
+                                                "task-1"),
+                                        tagged(
                                                 new ModelCallStartEvent("reply-2"),
                                                 "worker",
                                                 "task-2"),
@@ -518,7 +522,7 @@ class AgentEventStreamsTest {
                         .collectList()
                         .block();
 
-        assertEquals(9, events.size());
+        assertEquals(10, events.size());
         assertEquals(
                 0,
                 annotator.retainedSourceCount(),
@@ -526,7 +530,7 @@ class AgentEventStreamsTest {
     }
 
     @Test
-    void releasesTopLevelBookkeepingWhenTheNextInvocationStarts() {
+    void topLevelBookkeepingDoesNotGrowAcrossInvocations() {
         AgentEventStreams.DispositionAnnotator annotator =
                 new AgentEventStreams.DispositionAnnotator();
 
@@ -543,7 +547,10 @@ class AgentEventStreamsTest {
                         .block();
 
         assertEquals(6, events.size());
-        assertEquals(0, annotator.retainedSourceCount());
+        assertEquals(
+                1,
+                annotator.retainedSourceCount(),
+                "only the active invocation state should remain after reopening the source");
     }
 
     @Test

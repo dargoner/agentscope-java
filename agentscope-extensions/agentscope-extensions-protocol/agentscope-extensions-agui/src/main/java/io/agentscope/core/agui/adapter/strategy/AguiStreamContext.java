@@ -267,6 +267,8 @@ public class AguiStreamContext {
         }
         Map<String, AguiMessage> messagesById = new LinkedHashMap<>();
         List<Msg> authoritativeMessages = authoritativeMessagesSupplier.get();
+        boolean hasAuthoritativeMessages =
+                authoritativeMessages != null && !authoritativeMessages.isEmpty();
         if (authoritativeMessages != null) {
             for (Msg message : authoritativeMessages) {
                 if (message != null && !isGeneratedTextSegmentId(message.getId())) {
@@ -278,8 +280,10 @@ public class AguiStreamContext {
             // The submitted turn must survive the snapshot: agent state is not guaranteed to echo
             // it, and consumers reconcile by replacing their streamed text with this snapshot.
             for (AguiMessage message : runInput.getMessages()) {
-                if (message != null && !isGeneratedTextSegmentId(message.getId())) {
-                    messagesById.put(message.getId(), message);
+                if (message != null
+                        && !isGeneratedTextSegmentId(message.getId())
+                        && (!hasAuthoritativeMessages || "user".equals(message.getRole()))) {
+                    messagesById.putIfAbsent(message.getId(), message);
                 }
             }
         }
