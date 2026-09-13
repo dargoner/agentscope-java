@@ -187,9 +187,9 @@ public class AguiAdapterConfig {
     }
 
     /**
-     * When {@code false} (default), AgentEvents with a non-null {@code source} (subagent events)
-     * are emitted as AG-UI {@code CUSTOM} events under the {@code subagent.*} namespace instead of
-     * native {@code TEXT_MESSAGE_*} / run lifecycle events.
+     * When {@code false} (default), AgentEvents with a non-blank {@code source} or task id (subagent
+     * events) are emitted as AG-UI {@code CUSTOM} events under the {@code subagent.*} namespace
+     * instead of native {@code TEXT_MESSAGE_*} / run lifecycle events.
      *
      * @return true to keep the legacy native presentation for subagent events
      */
@@ -424,9 +424,9 @@ public class AguiAdapterConfig {
         /**
          * Set whether subagent-sourced events should use native AG-UI event types.
          *
-         * <p>Default is {@code false}: subagent events become {@code CUSTOM} events named {@code
-         * subagent.*}. Set {@code true} to restore the previous behavior where child text and
-         * lifecycle events map to the same AG-UI types as the parent.
+         * <p>Default is {@code false}: events with a non-blank source or task id become {@code
+         * CUSTOM} events named {@code subagent.*}. Set {@code true} to restore the previous behavior
+         * where child text and lifecycle events map to the same AG-UI types as the parent.
          *
          * @param emitSubagentEventsAsNative true for legacy native presentation
          * @return This builder

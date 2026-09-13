@@ -175,9 +175,25 @@ public class AguiStreamContext {
     }
 
     public void observe(AgentEvent event) {
-        if (event instanceof AgentResultEvent resultEvent && isBlank(event.getSource())) {
+        if (event instanceof AgentResultEvent resultEvent && isTopLevelEvent(event)) {
             finalResult = resultEvent.getResult();
         }
+    }
+
+    /**
+     * Whether an event belongs to the parent invocation. A blank source with a task id still belongs
+     * to a child source, matching the correlation key used by the core event stream.
+     */
+    boolean isTopLevelEvent(AgentEvent event) {
+        Objects.requireNonNull(event, "event");
+        if (!isBlank(event.getSource())) {
+            return false;
+        }
+        Object taskId =
+                event.getMetadata() == null
+                        ? null
+                        : event.getMetadata().get(AgentEvent.METADATA_TASK_ID);
+        return taskId == null || taskId.toString().isBlank();
     }
 
     TokenUsageAccumulator getTokenUsageAccumulator() {
@@ -259,7 +275,7 @@ public class AguiStreamContext {
 
     public void emitFinalMessagesSnapshot(AgentEndEvent endEvent) {
         if (!config.isTextOutputDispositionEnabled()
-                || !isBlank(endEvent.getSource())
+                || !isTopLevelEvent(endEvent)
                 || finalResult == null
                 || !FINAL_SNAPSHOT_REASONS.contains(finalResult.getGenerateReason())
                 || !pendingInterrupts.isEmpty()) {

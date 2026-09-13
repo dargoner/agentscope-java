@@ -99,6 +99,22 @@ class SubagentEventConverterTest {
     }
 
     @Test
+    void taskIdOnlyEventsDowngradeToCustomByDefault() {
+        AgentEventConverterRegistry registry = new AgentEventConverterRegistry();
+        AguiStreamContext context =
+                new AguiStreamContext("t1", "r1", AguiAdapterConfig.defaultConfig());
+        AgentEndEvent childEnd = new AgentEndEvent("child-reply");
+        childEnd.withMetadataEntry(AgentEvent.METADATA_TASK_ID, "task-42");
+
+        List<AguiEvent> events = registry.convert(childEnd, context);
+
+        AguiEvent.Custom custom = assertInstanceOf(AguiEvent.Custom.class, events.get(0));
+        assertEquals(SubagentEventConverter.NAME_LIFECYCLE, custom.name());
+        assertEquals("AGENT_END", value(custom).get("type"));
+        assertEquals("task-42", value(custom).get("taskId"));
+    }
+
+    @Test
     void completeSubagentSequencePreservesOrderIdentityAndStructuredPayloads() {
         AgentEventConverterRegistry registry = new AgentEventConverterRegistry();
         AguiStreamContext context =
