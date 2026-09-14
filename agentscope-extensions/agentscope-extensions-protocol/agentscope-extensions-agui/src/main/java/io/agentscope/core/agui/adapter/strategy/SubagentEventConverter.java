@@ -40,9 +40,9 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Converts subagent-sourced {@link AgentEvent}s ({@code source != null}) into AG-UI {@code CUSTOM}
- * events under the {@code subagent.*} name namespace so they do not pollute the parent run lifecycle
- * or text stream.
+ * Converts subagent-sourced {@link AgentEvent}s (a non-blank {@code source} or task id) into AG-UI
+ * {@code CUSTOM} events under the {@code subagent.*} name namespace so they do not pollute the
+ * parent run lifecycle or text stream.
  */
 final class SubagentEventConverter implements AgentEventConverter {
 

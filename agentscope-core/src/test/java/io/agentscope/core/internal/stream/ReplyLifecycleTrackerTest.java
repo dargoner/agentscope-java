@@ -141,13 +141,13 @@ class ReplyLifecycleTrackerTest {
     }
 
     @Test
-    void capsTrackedSources() {
+    void capsTrackedChildSources() {
         ReplyLifecycleTracker tracker = new ReplyLifecycleTracker();
 
         for (int i = 0; i < 4097; i++) {
             tracker.observe(new ModelCallStartEvent("reply-" + i).withSource("source-" + i));
         }
 
-        assertEquals(4096, tracker.trackedSourceCount());
+        assertEquals(ReplyLifecycleTracker.MAX_TRACKED_CHILD_SOURCES, tracker.trackedSourceCount());
     }
 }

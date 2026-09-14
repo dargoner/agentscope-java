@@ -41,7 +41,7 @@ import java.util.Objects;
  */
 public final class ReplyLifecycleTracker {
 
-    static final int MAX_TRACKED_SOURCES = 4096;
+    static final int MAX_TRACKED_CHILD_SOURCES = 4096;
 
     public enum EventKind {
         MODEL_CALL_START,
@@ -89,7 +89,7 @@ public final class ReplyLifecycleTracker {
             new LinkedHashMap<>() {
                 @Override
                 protected boolean removeEldestEntry(Map.Entry<SourceKey, ReplyState> eldest) {
-                    return size() > MAX_TRACKED_SOURCES;
+                    return size() > MAX_TRACKED_CHILD_SOURCES;
                 }
             };
 
@@ -169,6 +169,9 @@ public final class ReplyLifecycleTracker {
     /**
      * Number of sources currently holding reply state.
      *
+     * <p>The active top-level reply is tracked outside the bounded child-source map, so this count
+     * can exceed {@link #MAX_TRACKED_CHILD_SOURCES} by one.
+     *
      * <p>Public only so internal stream annotators can account for all retained bookkeeping. Not part
      * of the supported API surface.
      */
@@ -207,6 +210,7 @@ public final class ReplyLifecycleTracker {
     }
 
     private void storeState(SourceKey sourceKey, ReplyState state) {
+        Objects.requireNonNull(sourceKey, "sourceKey");
         if (sourceKey.isTopLevel()) {
             topLevelState = state;
         } else {

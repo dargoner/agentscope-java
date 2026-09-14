@@ -763,6 +763,35 @@ class AguiAgentAdapterV2Test {
         }
 
         @Test
+        void testTaskIdOnlyChildEventsStayOutsideParentLifecycleAndSnapshot() {
+            Msg childResult =
+                    AssistantMessage.builder()
+                            .id("child-reply")
+                            .content(TextBlock.builder().text("child answer").build())
+                            .generateReason(GenerateReason.MODEL_STOP)
+                            .build();
+            AgentResultEvent childResultEvent = new AgentResultEvent(childResult);
+            childResultEvent.withMetadataEntry(AgentEvent.METADATA_TASK_ID, "task-42");
+            AgentEndEvent childEnd = new AgentEndEvent("child-reply");
+            childEnd.withMetadataEntry(AgentEvent.METADATA_TASK_ID, "task-42");
+
+            List<AguiEvent> events =
+                    runReActFlux(
+                            AguiAdapterConfig.builder().textOutputDispositionEnabled(true).build(),
+                            Flux.just(childResultEvent, childEnd, new AgentEndEvent("parent")));
+
+            assertFalse(events.stream().anyMatch(AguiEvent.MessagesSnapshot.class::isInstance));
+            assertEquals(
+                    2,
+                    events.stream().filter(AguiEvent.Custom.class::isInstance).count(),
+                    "both task-id-only child events must use the subagent converter");
+            assertEquals(
+                    1,
+                    events.stream().filter(AguiEvent.RunFinished.class::isInstance).count(),
+                    "only the parent end should finish the AG-UI run");
+        }
+
+        @Test
         void testFinalSnapshotFallsBackToOriginalInputWithoutAgentState() {
             AguiMessage inputMessage =
                     AguiMessage.userMessage(
