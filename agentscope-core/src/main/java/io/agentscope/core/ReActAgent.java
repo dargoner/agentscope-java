@@ -3197,8 +3197,7 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                                 new RequestStopEvent(
                                                         "permission asking",
                                                         GenerateReason.PERMISSION_ASKING)));
-                            })
-                    .doOnNext(this::publishEvent);
+                            });
         }
 
         /**
