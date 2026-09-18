@@ -213,7 +213,12 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
                 includeMemoryContext ? workspaceManager.readMemoryMd(rc).strip() : "";
         String knowledgeContent = workspaceManager.readKnowledgeMd(rc).strip();
         Path workspace = workspaceManager.getWorkspace();
-        String sessionContext = buildSessionContextSection(rc);
+        AbstractFilesystem filesystem = workspaceManager.getFilesystem();
+        Path effectiveWorkspace =
+                detectLocalUpper(filesystem) != null
+                        ? workspaceManager.resolveRuntimeDataPath(rc, "")
+                        : workspace;
+        String sessionContext = buildSessionContextSection(effectiveWorkspace, rc);
 
         String knowledgeBlock = buildKnowledgeBlock(rc, knowledgeContent, workspace);
         String additionalBlock = buildAdditionalContextBlock(rc);
@@ -233,7 +238,7 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
 
         String workspaceParagraph =
                 buildWorkspaceParagraph(
-                        workspace, workspaceManager.getFilesystem(), rc, artifactDeliveryEnabled);
+                        workspace, effectiveWorkspace, filesystem, artifactDeliveryEnabled);
         String loadedContext =
                 buildLoadedContextSection(
                         agentsContent, memoryContent, knowledgeBlock, additionalBlock);
@@ -315,8 +320,8 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
      */
     private static String buildWorkspaceParagraph(
             Path workspace,
+            Path effectiveWorkspace,
             AbstractFilesystem fs,
-            RuntimeContext rc,
             boolean artifactDeliveryEnabled) {
         StringBuilder sb = new StringBuilder("## Workspace\n");
         LocalFilesystemWithShell localUpper = detectLocalUpper(fs);
@@ -326,7 +331,7 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
                     .append(project.toAbsolutePath())
                     .append("\n");
             sb.append("Workspace (your home base — memory, sessions, skills, runtime data): ")
-                    .append(workspace.toAbsolutePath())
+                    .append(effectiveWorkspace.toAbsolutePath())
                     .append("\n");
             List<Path> extraRoots = extraRootsOf(localUpper, project, workspace);
             if (!extraRoots.isEmpty()) {
@@ -517,11 +522,20 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
         };
     }
 
-    private String buildSessionContextSection(RuntimeContext rc) {
+    private String buildSessionContextSection(Path workspace, RuntimeContext rc) {
         String today = LocalDate.now().format(DateTimeFormatter.ofPattern("EEEE MMM d, yyyy"));
+        String platform = System.getProperty("os.name") + " " + System.getProperty("os.version");
+        String tempDir = System.getProperty("java.io.tmpdir");
         String dynamicPart = buildSessionDynamicPart(rc);
 
-        return String.format(SESSION_CONTEXT_SECTION_TEMPLATE, agentName, today, dynamicPart)
+        return String.format(
+                        SESSION_CONTEXT_SECTION_TEMPLATE,
+                        agentName,
+                        today,
+                        platform,
+                        workspace.toAbsolutePath(),
+                        tempDir,
+                        dynamicPart)
                 .strip();
     }
 
