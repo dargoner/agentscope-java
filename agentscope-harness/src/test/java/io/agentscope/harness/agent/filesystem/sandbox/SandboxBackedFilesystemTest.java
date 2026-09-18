@@ -49,6 +49,8 @@ import org.junit.jupiter.api.Test;
 
 class SandboxBackedFilesystemTest {
 
+    private static final RuntimeContext RT = RuntimeContext.empty();
+
     private static RuntimeContext rc(String sessionId) {
         return RuntimeContext.builder().sessionId(sessionId).build();
     }

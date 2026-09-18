@@ -28,6 +28,7 @@ import io.agentscope.builder.web.managed.service.SessionEventLog;
 import io.agentscope.builder.web.toolbus.ToolConfirmationCoordinator;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentEventStreams;
 import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.message.GenerateReason;
 import io.agentscope.core.message.Msg;
@@ -63,6 +64,7 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.Disposable;
 import reactor.core.publisher.BaseSubscriber;
+import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 
 /** Executes a managed session turn against the harness agent and records session events. */
@@ -577,13 +579,14 @@ public class SessionTurnRunner {
         // this call, BaseSubscriber cancels immediately from onSubscribe and no middleware/tool
         // demand is issued. subscribe() is intentionally outside the mutex because always_ask may
         // synchronously block until a human decision.
+        Flux<AgentEvent> stream =
+                AgentEventStreams.withTextOutputDisposition(agent.streamEvents(inputMsgs, rc));
         try {
-            agent.streamEvents(inputMsgs, rc).subscribe(subscription);
+            stream.subscribe(subscription);
         } catch (RuntimeException ex) {
             activeTurns.remove(session.id(), subscription);
             activeAgents.remove(session.id(), agent);
             activeTurnDone.remove(session.id(), done);
-            persistRemainingThinking(session.id(), previewIds, executionScope);
             previewIdsBySession.remove(session.id(), previewIds);
             startedPreviewTypes.remove(session.id(), startedPreviews);
             subscription.dispose();
@@ -641,7 +644,6 @@ public class SessionTurnRunner {
             activeTurns.remove(session.id(), subscription);
             activeAgents.remove(session.id(), agent);
             activeTurnDone.remove(session.id(), done);
-            persistRemainingThinking(session.id(), previewIds, executionScope);
             previewIdsBySession.remove(session.id(), previewIds);
             startedPreviewTypes.remove(session.id(), startedPreviews);
             // Keep work-queue lease for suspended turns so workers can finish pending tools.
@@ -697,16 +699,8 @@ public class SessionTurnRunner {
                 previewIdsBySession.computeIfAbsent(
                         sessionId, ignored -> new SessionEventMapper.PreviewIds());
         SessionEventMapper.MappingResult mapped = eventMapper.map(event, ids);
-        mapped.preceding()
-                .forEach(
-                        persisted ->
-                                appendTurnEvent(
-                                        sessionId,
-                                        persisted.type(),
-                                        persisted.payload(),
-                                        persisted.eventId(),
-                                        executionScope));
         if (event instanceof AgentResultEvent result
+                && event.getSource() == null
                 && result.getResult() != null
                 && result.getResult().getGenerateReason() == GenerateReason.TOOL_SUSPENDED) {
             persistSuspendedToolUses(sessionId, result.getResult(), executionScope);
@@ -719,17 +713,35 @@ public class SessionTurnRunner {
                             Set<String> started =
                                     startedPreviewTypes.computeIfAbsent(
                                             sessionId, ignored -> ConcurrentHashMap.newKeySet());
-                            if (started.add(frame.targetType() + ":" + frame.eventId())) {
-                                previewBus.emitStart(
-                                        sessionId, frame.targetType(), frame.eventId());
-                            }
-                            // null delta = start-only announcement (e.g. tool_use begin)
-                            if (frame.delta() != null) {
-                                previewBus.emitDelta(
-                                        sessionId,
-                                        frame.targetType(),
-                                        frame.eventId(),
-                                        frame.delta());
+                            String previewKey = frame.targetType() + ":" + frame.eventId();
+                            switch (frame.streamType()) {
+                                case SessionEventTypes.EVENT_START -> {
+                                    if (started.add(previewKey)) {
+                                        previewBus.emitStart(
+                                                sessionId, frame.targetType(), frame.eventId());
+                                    }
+                                }
+                                case SessionEventTypes.EVENT_DELTA -> {
+                                    if (started.add(previewKey)) {
+                                        previewBus.emitStart(
+                                                sessionId, frame.targetType(), frame.eventId());
+                                    }
+                                    previewBus.emitDelta(
+                                            sessionId,
+                                            frame.targetType(),
+                                            frame.eventId(),
+                                            frame.delta());
+                                }
+                                case SessionEventTypes.EVENT_UPDATE ->
+                                        previewBus.emitUpdate(
+                                                sessionId,
+                                                frame.targetType(),
+                                                frame.eventId(),
+                                                frame.attributes());
+                                default ->
+                                        log.debug(
+                                                "Ignoring unsupported preview frame type {}",
+                                                frame.streamType());
                             }
                         });
         mapped.persisted()
@@ -742,23 +754,6 @@ public class SessionTurnRunner {
                                         persisted.eventId(),
                                         executionScope));
         return false;
-    }
-
-    private void persistRemainingThinking(
-            String sessionId, SessionEventMapper.PreviewIds ids, ManagedExecutionScope scope) {
-        try {
-            ids.consumeThinking()
-                    .ifPresent(
-                            event ->
-                                    appendTurnEvent(
-                                            sessionId,
-                                            event.type(),
-                                            event.payload(),
-                                            event.eventId(),
-                                            scope));
-        } catch (RuntimeException error) {
-            log.warn("Could not persist remaining thinking for session {}", sessionId, error);
-        }
     }
 
     static boolean isCorePermissionAsking(AgentEvent event) {
