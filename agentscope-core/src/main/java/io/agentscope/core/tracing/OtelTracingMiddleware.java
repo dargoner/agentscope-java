@@ -72,6 +72,11 @@ import reactor.util.context.ContextView;
  *   <li>{@code execute_tool <name>} — wraps each tool execution</li>
  * </ul>
  *
+ * <p>Model-call spans report input/output token usage and the available cache, reasoning, and
+ * tool-prompt token breakdowns using GenAI semantic-convention attributes. The tool-prompt
+ * breakdown uses an AgentScope-specific attribute because it is not yet defined by the GenAI
+ * convention.
+ *
  * <p>Context propagation across Reactor's asynchronous chain (including thread
  * hops via {@code publishOn} / {@code subscribeOn}) is handled by
  * {@link ContextPropagationOperator}
@@ -123,6 +128,14 @@ public class OtelTracingMiddleware implements MiddlewareBase {
             AttributeKey.longKey("gen_ai.usage.input_tokens");
     private static final AttributeKey<Long> GEN_AI_USAGE_OUTPUT_TOKENS =
             AttributeKey.longKey("gen_ai.usage.output_tokens");
+    private static final AttributeKey<Long> GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS =
+            AttributeKey.longKey("gen_ai.usage.cache_creation.input_tokens");
+    private static final AttributeKey<Long> GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS =
+            AttributeKey.longKey("gen_ai.usage.cache_read.input_tokens");
+    private static final AttributeKey<Long> GEN_AI_USAGE_REASONING_OUTPUT_TOKENS =
+            AttributeKey.longKey("gen_ai.usage.reasoning.output_tokens");
+    private static final AttributeKey<Long> AGENTSCOPE_USAGE_TOOL_USE_PROMPT_TOKENS =
+            AttributeKey.longKey("agentscope.usage.tool_use_prompt_tokens");
     private static final AttributeKey<String> GEN_AI_INPUT_MESSAGES =
             AttributeKey.stringKey("gen_ai.input.messages");
     private static final AttributeKey<String> GEN_AI_OUTPUT_MESSAGES =
@@ -649,6 +662,14 @@ public class OtelTracingMiddleware implements MiddlewareBase {
             var usage = event.getUsage();
             span.setAttribute(GEN_AI_USAGE_INPUT_TOKENS, (long) usage.getInputTokens());
             span.setAttribute(GEN_AI_USAGE_OUTPUT_TOKENS, (long) usage.getOutputTokens());
+            span.setAttribute(
+                    GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+                    (long) usage.getCacheCreationTokens());
+            span.setAttribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, (long) usage.getCachedTokens());
+            span.setAttribute(
+                    GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, (long) usage.getReasoningTokens());
+            span.setAttribute(
+                    AGENTSCOPE_USAGE_TOOL_USE_PROMPT_TOKENS, (long) usage.getToolUsePromptTokens());
         }
 
         if (recordContent) {
