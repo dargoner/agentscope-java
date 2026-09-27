@@ -93,6 +93,8 @@ class E2bSandboxOptionsAndStateTest {
     @Test
     void filesystemSpecSnapshotRetentionAndCodec() {
         E2bFilesystemSpec spec = new E2bFilesystemSpec();
+        WorkspaceSpec workspaceSpec = new WorkspaceSpec();
+        workspaceSpec.setRoot("/ws");
         spec.snapshotRetention(5);
         assertEquals(5, ((E2bSandboxClientOptions) spec.clientOptions()).getSnapshotRetention());
         spec.snapshotRetention(0);
@@ -107,7 +109,7 @@ class E2bSandboxOptionsAndStateTest {
                 .apiBaseUrl("https://example.com")
                 .domain("example.com")
                 .templateId("tpl")
-                .workspaceRoot("/ws")
+                .workspaceSpec(workspaceSpec)
                 .sandboxTimeoutSeconds(60)
                 .runUser("u")
                 .persistenceMode(E2bPersistenceMode.NATIVE_SNAPSHOT)
@@ -119,7 +121,7 @@ class E2bSandboxOptionsAndStateTest {
         assertEquals("https://example.com", o.getApiBaseUrl());
         assertEquals("example.com", o.getDomain());
         assertEquals("tpl", o.getTemplateId());
-        assertEquals("/ws", o.getWorkspaceRoot());
+        assertEquals("/ws", spec.workspaceSpec().getRoot());
         assertEquals(60, o.getSandboxTimeoutSeconds());
         assertEquals("u", o.getRunUser());
         assertEquals(E2bPersistenceMode.NATIVE_SNAPSHOT, o.getPersistenceMode());

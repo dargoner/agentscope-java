@@ -90,6 +90,8 @@ public class LocalFilesystemSpec {
      */
     private boolean projectWritable = false;
 
+    private boolean sharedLocalWorkspace = false;
+
     /**
      * Sets the default command execution timeout in seconds.
      *
@@ -218,6 +220,12 @@ public class LocalFilesystemSpec {
         return this;
     }
 
+    /** Enables or disables resolving non-routed paths from the shared workspace root. */
+    public LocalFilesystemSpec sharedLocalWorkspace(boolean shared) {
+        this.sharedLocalWorkspace = shared;
+        return this;
+    }
+
     /** Returns whether project-writable mode is enabled. */
     public boolean isProjectWritable() {
         return projectWritable;
@@ -285,6 +293,8 @@ public class LocalFilesystemSpec {
 
     public AbstractFilesystem toFilesystem(Path workspace, NamespaceFactory localNamespaceFactory) {
         Path effectiveProject = project != null ? project : workspace;
+        NamespaceFactory effectiveNamespaceFactory =
+                sharedLocalWorkspace ? null : localNamespaceFactory;
         List<Path> policyRoots = new ArrayList<>();
         policyRoots.add(effectiveProject);
         policyRoots.add(workspace);
@@ -299,19 +309,19 @@ public class LocalFilesystemSpec {
                         maxOutputBytes,
                         env.isEmpty() ? null : Map.copyOf(env),
                         inheritEnv,
-                        localNamespaceFactory,
+                        effectiveNamespaceFactory,
                         effectiveProject);
         LocalFilesystem lower = new LocalFilesystem(effectiveProject, true, 10, null);
         if (projectWritable) {
             LocalFilesystem projectFs =
                     new LocalFilesystem(
-                            effectiveProject, mode, pathPolicy, 10, localNamespaceFactory);
+                            effectiveProject, mode, pathPolicy, 10, effectiveNamespaceFactory);
             return new ProjectAwareOverlay(
                     (AbstractSandboxFilesystem) upper,
                     lower,
                     projectFs,
                     workspace,
-                    localNamespaceFactory);
+                    effectiveNamespaceFactory);
         }
         return OverlayFilesystem.of(upper, lower);
     }
