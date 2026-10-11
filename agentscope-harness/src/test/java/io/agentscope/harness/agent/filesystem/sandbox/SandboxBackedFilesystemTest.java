@@ -60,17 +60,9 @@ class SandboxBackedFilesystemTest {
         return RuntimeContext.builder().userId(userId).sessionId(sessionId).build();
     }
 
-    // mirrors the binding key logic in SandboxBackedFilesystem / SandboxLifecycleMiddleware
-    private static String bindKey(RuntimeContext ctx) {
-        String uid = ctx.getUserId();
-        String sid = ctx.getSessionId();
-        return (uid == null || uid.isBlank() ? "__anon__" : uid) + "/" + sid;
-    }
-
-    private static RuntimeContext bind(
-            SandboxBackedFilesystem filesystem, Sandbox sandbox, String sessionId) {
+    private static RuntimeContext bind(Sandbox sandbox, String sessionId) {
         RuntimeContext ctx = rc(sessionId);
-        filesystem.bindSandbox(bindKey(ctx), sandbox);
+        ctx.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandbox));
         return ctx;
     }
 
@@ -98,7 +90,7 @@ class SandboxBackedFilesystemTest {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandbox = new FakeSandbox(new ExecResult(0, "AQID\nBAUG", "", false));
         RuntimeContext ctx = rc("session-a");
-        filesystem.bindSandbox(bindKey(ctx), sandbox);
+        ctx.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandbox));
 
         List<FileDownloadResponse> responses =
                 filesystem.downloadFiles(ctx, List.of("/tmp/data.bin"));
@@ -115,7 +107,7 @@ class SandboxBackedFilesystemTest {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandbox = new FakeSandbox(new ExecResult(0, null, "", false));
         RuntimeContext ctx = rc("session-a");
-        filesystem.bindSandbox(bindKey(ctx), sandbox);
+        ctx.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandbox));
 
         List<FileDownloadResponse> responses =
                 filesystem.downloadFiles(ctx, List.of("/tmp/empty.bin"));
@@ -136,8 +128,8 @@ class SandboxBackedFilesystemTest {
         FakeSandbox sandboxB = new FakeSandbox(new ExecResult(0, "", "", false));
         sandboxA.workspaceSpec.setRoot("/sandbox/a");
         sandboxB.workspaceSpec.setRoot("/sandbox/b");
-        filesystem.bindSandbox(bindKey(ctxA), sandboxA);
-        filesystem.bindSandbox(bindKey(ctxB), sandboxB);
+        ctxA.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandboxA));
+        ctxB.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandboxB));
 
         assertEquals("/sandbox/a", filesystem.getWorkspaceRoot(ctxA));
         assertEquals("/sandbox/b", filesystem.getWorkspaceRoot(ctxB));
@@ -155,7 +147,7 @@ class SandboxBackedFilesystemTest {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandbox = new FakeSandbox(new ExecResult(1, "", "boom", false));
         RuntimeContext ctx = rc("session-a");
-        filesystem.bindSandbox(bindKey(ctx), sandbox);
+        ctx.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandbox));
 
         List<FileDownloadResponse> responses =
                 filesystem.downloadFiles(ctx, List.of("/tmp/fail.bin"));
@@ -185,7 +177,7 @@ class SandboxBackedFilesystemTest {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeTransferSandbox sandbox = new FakeTransferSandbox("/workspace");
         RuntimeContext ctx = rc("native-upload");
-        filesystem.bindSandbox(bindKey(ctx), sandbox);
+        ctx.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandbox));
 
         List<FileUploadResponse> responses =
                 filesystem.uploadFiles(
@@ -200,7 +192,7 @@ class SandboxBackedFilesystemTest {
     void uploadFiles_resolvesRelativePathForNativeTransfer() {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeTransferSandbox sandbox = new FakeTransferSandbox("/workspace");
-        RuntimeContext ctx = bind(filesystem, sandbox, "relative-native-upload");
+        RuntimeContext ctx = bind(sandbox, "relative-native-upload");
 
         List<FileUploadResponse> responses =
                 filesystem.uploadFiles(
@@ -222,7 +214,7 @@ class SandboxBackedFilesystemTest {
     void uploadFiles_rejectsNullContentOnNativeTransferPath() {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeTransferSandbox sandbox = new FakeTransferSandbox("/workspace");
-        RuntimeContext ctx = bind(filesystem, sandbox, "null-native-upload");
+        RuntimeContext ctx = bind(sandbox, "null-native-upload");
 
         List<FileUploadResponse> responses =
                 filesystem.uploadFiles(
@@ -239,7 +231,7 @@ class SandboxBackedFilesystemTest {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeTransferSandbox sandbox = new FakeTransferSandbox("/workspace");
         sandbox.state.setWorkspaceSpec(null);
-        RuntimeContext ctx = bind(filesystem, sandbox, "missing-root-upload");
+        RuntimeContext ctx = bind(sandbox, "missing-root-upload");
         byte[] content = new byte[] {5};
 
         List<FileUploadResponse> responses =
@@ -256,7 +248,7 @@ class SandboxBackedFilesystemTest {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         // File API rooted outside the workspace: resolved paths stay unsupported natively.
         FakeTransferSandbox sandbox = new FakeTransferSandbox("/data");
-        RuntimeContext ctx = bind(filesystem, sandbox, "tar-fallback-upload");
+        RuntimeContext ctx = bind(sandbox, "tar-fallback-upload");
         byte[] content = "session-data".getBytes(StandardCharsets.UTF_8);
 
         List<FileUploadResponse> responses =
@@ -278,7 +270,7 @@ class SandboxBackedFilesystemTest {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandbox = new FakeSandbox(new ExecResult(0, "", "", false));
         sandbox.workspaceSpec.setRoot("\\workspace\\\\");
-        RuntimeContext ctx = bind(filesystem, sandbox, "large-tar-upload");
+        RuntimeContext ctx = bind(sandbox, "large-tar-upload");
 
         List<FileUploadResponse> responses =
                 filesystem.uploadFiles(
@@ -296,7 +288,7 @@ class SandboxBackedFilesystemTest {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandbox = new FakeSandbox(new ExecResult(0, "", "", false));
         sandbox.failHydration = true;
-        RuntimeContext ctx = bind(filesystem, sandbox, "failed-hydration");
+        RuntimeContext ctx = bind(sandbox, "failed-hydration");
 
         List<FileUploadResponse> responses =
                 filesystem.uploadFiles(ctx, List.of(Map.entry("agents/a.jsonl", new byte[] {1})));
@@ -309,7 +301,7 @@ class SandboxBackedFilesystemTest {
     void uploadFiles_rejectsNullContentAndUnsafePaths() {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandbox = new FakeSandbox(new ExecResult(0, "", "", false));
-        RuntimeContext ctx = bind(filesystem, sandbox, "unsafe-upload-paths");
+        RuntimeContext ctx = bind(sandbox, "unsafe-upload-paths");
 
         List<Map.Entry<String, byte[]>> files =
                 List.of(
@@ -330,7 +322,7 @@ class SandboxBackedFilesystemTest {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandbox = new FakeSandbox(new ExecResult(0, "", "", false));
         sandbox.state = null;
-        RuntimeContext ctx = bind(filesystem, sandbox, "missing-workspace-state");
+        RuntimeContext ctx = bind(sandbox, "missing-workspace-state");
 
         List<FileUploadResponse> responses =
                 filesystem.uploadFiles(ctx, List.of(Map.entry("/workspace/a.txt", new byte[] {1})));
@@ -343,7 +335,7 @@ class SandboxBackedFilesystemTest {
     void uploadFiles_rejectsMissingBlankAndRelativeWorkspaceRoots() {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandbox = new FakeSandbox(new ExecResult(0, "", "", false));
-        RuntimeContext ctx = bind(filesystem, sandbox, "invalid-workspace-roots");
+        RuntimeContext ctx = bind(sandbox, "invalid-workspace-roots");
 
         sandbox.state.setWorkspaceSpec(null);
         FileUploadResponse missingSpec =
@@ -373,7 +365,7 @@ class SandboxBackedFilesystemTest {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandbox = new FakeSandbox(new ExecResult(0, "", "", false));
         sandbox.workspaceSpec.setRoot("/");
-        RuntimeContext ctx = bind(filesystem, sandbox, "root-workspace-upload");
+        RuntimeContext ctx = bind(sandbox, "root-workspace-upload");
 
         List<FileUploadResponse> responses =
                 filesystem.uploadFiles(
@@ -389,7 +381,7 @@ class SandboxBackedFilesystemTest {
         FakeTransferSandbox sandbox = new FakeTransferSandbox("/workspace");
         sandbox.uploaded.put("/workspace/b.bin", new byte[] {9, 9});
         RuntimeContext ctx = rc("native-download");
-        filesystem.bindSandbox(bindKey(ctx), sandbox);
+        ctx.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandbox));
 
         List<FileDownloadResponse> responses =
                 filesystem.downloadFiles(ctx, List.of("/workspace/b.bin"));
@@ -405,7 +397,7 @@ class SandboxBackedFilesystemTest {
         FakeTransferSandbox sandbox = new FakeTransferSandbox("/workspace");
         sandbox.failTransfers = true;
         RuntimeContext ctx = rc("failed-upload");
-        filesystem.bindSandbox(bindKey(ctx), sandbox);
+        ctx.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandbox));
 
         List<FileUploadResponse> responses =
                 filesystem.uploadFiles(ctx, List.of(Map.entry("/workspace/c.txt", new byte[] {1})));
@@ -425,15 +417,15 @@ class SandboxBackedFilesystemTest {
     }
 
     @Test
-    void bindAndUnbind_isolatesSessionsFromEachOther() {
+    void runtimeContextBindings_isolateSessionsFromEachOther() {
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
         FakeSandbox sandboxA = new FakeSandbox(new ExecResult(0, "AAAA", "", false));
         FakeSandbox sandboxB = new FakeSandbox(new ExecResult(0, "BBBB", "", false));
 
         RuntimeContext ctxA = rc("session-a");
         RuntimeContext ctxB = rc("session-b");
-        filesystem.bindSandbox(bindKey(ctxA), sandboxA);
-        filesystem.bindSandbox(bindKey(ctxB), sandboxB);
+        ctxA.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandboxA));
+        ctxB.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandboxB));
 
         filesystem.downloadFiles(ctxA, List.of("/f"));
         assertNotNull(sandboxA.lastCommand);
@@ -442,7 +434,7 @@ class SandboxBackedFilesystemTest {
         filesystem.downloadFiles(ctxB, List.of("/g"));
         assertNotNull(sandboxB.lastCommand);
 
-        filesystem.unbindSandbox(bindKey(ctxA));
+        ctxA.put(SandboxAcquireResult.class, null);
         assertThrows(
                 SandboxException.SandboxConfigurationException.class,
                 () -> filesystem.execute(ctxA, "echo", null));
@@ -458,7 +450,8 @@ class SandboxBackedFilesystemTest {
         for (int i = 0; i < sessions; i++) {
             sandboxes[i] = new FakeSandbox(new ExecResult(0, "AA==", "", false));
             contexts[i] = rc("session-" + i);
-            filesystem.bindSandbox(bindKey(contexts[i]), sandboxes[i]);
+            contexts[i].put(
+                    SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandboxes[i]));
         }
 
         CountDownLatch start = new CountDownLatch(1);
@@ -506,8 +499,8 @@ class SandboxBackedFilesystemTest {
 
         RuntimeContext ctxAlice = rc("alice", "default");
         RuntimeContext ctxBob = rc("bob", "default");
-        filesystem.bindSandbox(bindKey(ctxAlice), sandboxAlice);
-        filesystem.bindSandbox(bindKey(ctxBob), sandboxBob);
+        ctxAlice.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandboxAlice));
+        ctxBob.put(SandboxAcquireResult.class, SandboxAcquireResult.userManaged(sandboxBob));
 
         filesystem.execute(ctxAlice, "alice-cmd", null);
         filesystem.execute(ctxBob, "bob-cmd", null);

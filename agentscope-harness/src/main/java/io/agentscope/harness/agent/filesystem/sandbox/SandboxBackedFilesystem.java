@@ -24,7 +24,6 @@ import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.Sandbox;
 import io.agentscope.harness.agent.sandbox.SandboxAcquireResult;
 import io.agentscope.harness.agent.sandbox.SandboxAware;
-import io.agentscope.harness.agent.sandbox.SandboxBindingKey;
 import io.agentscope.harness.agent.sandbox.SandboxException;
 import io.agentscope.harness.agent.sandbox.SandboxFileTransfer;
 import io.agentscope.harness.agent.sandbox.SandboxState;
@@ -38,7 +37,6 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.slf4j.Logger;
@@ -64,8 +62,6 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
     private static final Logger log = LoggerFactory.getLogger(SandboxBackedFilesystem.class);
 
     private final String fsId;
-    // per-call sandbox bindings; key is "userId/sessionId" (aligned with ReActAgent.slotKey)
-    private final ConcurrentHashMap<String, Sandbox> activeSandboxes = new ConcurrentHashMap<>();
     private volatile Sandbox sandbox;
 
     public SandboxBackedFilesystem() {
@@ -73,23 +69,8 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
     }
 
     @Override
-    public void bindSandbox(String sessionKey, Sandbox sandbox) {
-        activeSandboxes.put(sessionKey, sandbox);
-    }
-
-    @Override
     public synchronized void setSandbox(Sandbox sandbox) {
         this.sandbox = sandbox;
-    }
-
-    @Override
-    public void unbindSandbox(String sessionKey) {
-        activeSandboxes.remove(sessionKey);
-    }
-
-    @Override
-    public Sandbox getSandbox(String sessionKey) {
-        return activeSandboxes.get(sessionKey);
     }
 
     @Override
@@ -258,17 +239,14 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
     /**
      * Resolves the {@link Sandbox} bound to the current call, preferring the per-call binding
      * carried on {@code runtimeContext} (concurrency-safe under parallel distinct-session calls,
-     * issue #2490), then the session-key binding, and finally the legacy {@code sandbox} field for
+     * issue #2490), then the legacy {@code sandbox} field for
      * direct {@link #setSandbox} callers that do not thread a per-call context.
      */
     private Sandbox requireSandbox(RuntimeContext runtimeContext) {
         Sandbox s = resolveSandbox(runtimeContext);
         if (s == null) {
-            String key = runtimeContext != null ? SandboxBindingKey.resolve(runtimeContext) : null;
             throw new SandboxException.SandboxConfigurationException(
-                    "No active sandbox for session '"
-                            + key
-                            + "' — sandbox filesystem used outside of a call context");
+                    "No active sandbox — sandbox filesystem used outside of a call context");
         }
         return s;
     }
@@ -284,10 +262,6 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
                 }
                 resolved = bound.getSandbox();
             }
-        }
-        if (resolved == null && runtimeContext != null) {
-            String key = SandboxBindingKey.resolve(runtimeContext);
-            resolved = key != null ? getSandbox(key) : null;
         }
         if (resolved == null) {
             resolved = sandbox;
