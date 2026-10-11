@@ -118,7 +118,7 @@ class HarnessAgentDistributedSandboxTest {
     }
 
     @Test
-    void remoteFilesystemMode_withLocalSession_failsFast() {
+    void legacyRemoteFilesystemMode_withLocalSession_failsFast() {
         BaseStore store = mock(BaseStore.class);
         IllegalStateException ex =
                 assertThrows(
@@ -129,6 +129,7 @@ class HarnessAgentDistributedSandboxTest {
                                         .model(stubModel("ok"))
                                         .workspace(workspace)
                                         .filesystem(new RemoteFilesystemSpec(store))
+                                        .legacySessionHistory(true)
                                         .build());
         assertEquals(
                 true,

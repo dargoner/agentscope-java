@@ -27,6 +27,7 @@ import io.agentscope.harness.agent.filesystem.model.FileDownloadResponse;
 import io.agentscope.harness.agent.filesystem.model.FileUploadResponse;
 import io.agentscope.harness.agent.sandbox.ExecResult;
 import io.agentscope.harness.agent.sandbox.Sandbox;
+import io.agentscope.harness.agent.sandbox.SandboxAcquireResult;
 import io.agentscope.harness.agent.sandbox.SandboxException;
 import io.agentscope.harness.agent.sandbox.SandboxFileTransfer;
 import io.agentscope.harness.agent.sandbox.SandboxState;
@@ -71,6 +72,24 @@ class SandboxBackedFilesystemTest {
         RuntimeContext ctx = rc(sessionId);
         filesystem.bindSandbox(bindKey(ctx), sandbox);
         return ctx;
+    }
+
+    @Test
+    void releasedContextCannotFallBackToAnotherCallsSandbox() {
+        SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem();
+        FakeSandbox previous = new FakeSandbox(new ExecResult(0, "", "", false));
+        FakeSandbox current = new FakeSandbox(new ExecResult(0, "", "", false));
+        SandboxAcquireResult acquired = SandboxAcquireResult.userManaged(previous);
+        RuntimeContext stale =
+                RuntimeContext.builder().put(SandboxAcquireResult.class, acquired).build();
+        acquired.beginRelease();
+        filesystem.setSandbox(current);
+
+        assertThrows(
+                SandboxException.SandboxConfigurationException.class,
+                () -> filesystem.execute(stale, "echo stale", 1));
+        assertNull(previous.lastCommand);
+        assertNull(current.lastCommand);
     }
 
     @Test

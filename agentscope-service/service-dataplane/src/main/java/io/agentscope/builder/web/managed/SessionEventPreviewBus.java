@@ -15,18 +15,15 @@
  */
 package io.agentscope.builder.web.managed;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Sinks;
 
 /**
- * Process-local stream-only preview bus for {@code event_start}, {@code event_delta} and {@code
- * event_update}. Never persisted; best-effort and sticky to the turn-owner JVM (see
- * DATA_PLANE_CONTRACT §3).
+ * Process-local stream-only public text preview bus. Never
+ * persisted; best-effort and sticky to the turn-owner JVM (see DATA_PLANE_CONTRACT §3).
  */
 @Component
 public class SessionEventPreviewBus {
@@ -34,48 +31,8 @@ public class SessionEventPreviewBus {
     private final ConcurrentHashMap<String, Sinks.Many<SessionEventDto>> sinks =
             new ConcurrentHashMap<>();
 
-    /** Emits an {@code event_start} frame for a forthcoming persisted type. */
-    public void emitStart(String sessionId, String targetType, String eventId) {
-        emit(
-                sessionId,
-                SessionEventTypes.EVENT_START,
-                Map.of("event_id", eventId, "type", targetType));
-    }
-
-    /** Emits an {@code event_delta} frame. */
-    public void emitDelta(String sessionId, String targetType, String eventId, String delta) {
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("event_id", eventId);
-        payload.put("type", targetType);
-        payload.put("delta", delta != null ? delta : "");
-        emit(sessionId, SessionEventTypes.EVENT_DELTA, payload);
-    }
-
-    /** Emits an {@code event_update} frame with lifecycle or authoritative result attributes. */
-    public void emitUpdate(
-            String sessionId, String targetType, String eventId, Map<String, Object> attributes) {
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("event_id", eventId);
-        payload.put("type", targetType);
-        if (attributes != null) {
-            payload.putAll(attributes);
-        }
-        emit(sessionId, SessionEventTypes.EVENT_UPDATE, payload);
-    }
-
-    /** Publishes a mapper preview frame when the subscriber opted into {@code targetType}. */
-    public void emitFrame(
-            String sessionId, SessionEventMapper.PreviewFrame frame, Set<String> enabledTypes) {
-        if (frame == null || enabledTypes == null || !enabledTypes.contains(frame.targetType())) {
-            return;
-        }
-        if (SessionEventTypes.EVENT_START.equals(frame.streamType())) {
-            emitStart(sessionId, frame.targetType(), frame.eventId());
-        } else if (SessionEventTypes.EVENT_DELTA.equals(frame.streamType())) {
-            emitDelta(sessionId, frame.targetType(), frame.eventId(), frame.delta());
-        } else if (SessionEventTypes.EVENT_UPDATE.equals(frame.streamType())) {
-            emitUpdate(sessionId, frame.targetType(), frame.eventId(), frame.attributes());
-        }
+    public void emitPublic(String sessionId, Map<String, Object> payload) {
+        emit(sessionId, "item.delta", payload);
     }
 
     public Flux<SessionEventDto> subscribe(String sessionId) {

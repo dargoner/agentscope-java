@@ -48,6 +48,7 @@ public class AguiMessage {
     private final List<AguiToolCall> toolCalls;
     private final String toolCallId;
     private final String status;
+    private final String error;
 
     /**
      * Creates a new AguiMessage.
@@ -67,7 +68,18 @@ public class AguiMessage {
         this(id, role, content, toolCalls, toolCallId, null);
     }
 
-    /** Optional tool-result status extension; omitted values preserve legacy behavior. */
+    /** Creates a legacy tool message carrying an error string. */
+    public AguiMessage(
+            @JsonProperty("id") String id,
+            @JsonProperty("role") String role,
+            @JsonProperty("content") MessageContent content,
+            @JsonProperty("toolCalls") List<AguiToolCall> toolCalls,
+            @JsonProperty("toolCallId") String toolCallId,
+            @JsonProperty("error") String error) {
+        this(id, role, content, toolCalls, toolCallId, null, error);
+    }
+
+    /** Full constructor including the optional status and error extensions. */
     @JsonCreator
     public AguiMessage(
             @JsonProperty("id") String id,
@@ -75,7 +87,8 @@ public class AguiMessage {
             @JsonProperty("content") MessageContent content,
             @JsonProperty("toolCalls") List<AguiToolCall> toolCalls,
             @JsonProperty("toolCallId") String toolCallId,
-            @JsonProperty("status") String status) {
+            @JsonProperty("status") String status,
+            @JsonProperty("error") String error) {
         this.id = Objects.requireNonNull(id, "id cannot be null");
         this.role = Objects.requireNonNull(role, "role cannot be null");
         this.content = content;
@@ -85,6 +98,7 @@ public class AguiMessage {
                         : Collections.emptyList();
         this.toolCallId = toolCallId;
         this.status = status;
+        this.error = error;
     }
 
     /**
@@ -141,6 +155,11 @@ public class AguiMessage {
      */
     public static AguiMessage toolMessage(String id, String toolCallId, String content) {
         return new AguiMessage(id, "tool", wrapText(content), null, toolCallId);
+    }
+
+    /** Creates an assistant reasoning message. */
+    public static AguiMessage reasoningMessage(String id, String content) {
+        return new AguiMessage(id, "reasoning", wrapText(content), null, null);
     }
 
     /**
@@ -264,6 +283,12 @@ public class AguiMessage {
         return status;
     }
 
+    /** @return optional tool error, or null when omitted */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getError() {
+        return error;
+    }
+
     /**
      * Check if this is a user message.
      *
@@ -300,6 +325,11 @@ public class AguiMessage {
         return "tool".equalsIgnoreCase(role);
     }
 
+    /** @return true when this message contains assistant reasoning */
+    public boolean isReasoningMessage() {
+        return "reasoning".equalsIgnoreCase(role);
+    }
+
     /**
      * Check if this message has tool calls.
      *
@@ -323,6 +353,8 @@ public class AguiMessage {
                 + toolCallId
                 + "', status='"
                 + status
+                + "', error='"
+                + error
                 + "'}";
     }
 
@@ -336,11 +368,12 @@ public class AguiMessage {
                 && Objects.equals(content, that.content)
                 && Objects.equals(toolCalls, that.toolCalls)
                 && Objects.equals(toolCallId, that.toolCallId)
-                && Objects.equals(status, that.status);
+                && Objects.equals(status, that.status)
+                && Objects.equals(error, that.error);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(id, role, content, toolCalls, toolCallId, status);
+        return Objects.hash(id, role, content, toolCalls, toolCallId, status, error);
     }
 }

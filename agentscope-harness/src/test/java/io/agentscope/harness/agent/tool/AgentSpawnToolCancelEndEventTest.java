@@ -33,6 +33,8 @@ import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.event.TextOutputDisposition;
 import io.agentscope.core.event.TextOutputDispositionEvent;
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.middleware.SubagentEntry;
 import io.agentscope.harness.agent.subagent.DefaultAgentManager;
@@ -224,12 +226,16 @@ class AgentSpawnToolCancelEndEventTest {
                 RuntimeContext.builder().sessionId("parent-session").userId("parent-user").build();
         RecordingEmitter emitter = new RecordingEmitter();
 
-        String result =
+        ToolResultBlock result =
                 tool.agentSpawn(parentCtx, null, "harness_agent", "work", null, 30, null)
                         .contextWrite(ctx -> ctx.put(AgentEventEmitter.CONTEXT_KEY, emitter))
                         .block();
 
-        assertTrue(result.contains("status: error"));
+        assertTrue(
+                result.getOutput().stream()
+                        .filter(TextBlock.class::isInstance)
+                        .map(TextBlock.class::cast)
+                        .anyMatch(block -> block.getText().contains("status: error")));
         assertEquals(
                 AgentEndEvent.OUTCOME_ERROR,
                 emitter.first(AgentEndEvent.class)
