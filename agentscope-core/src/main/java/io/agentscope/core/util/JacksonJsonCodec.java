@@ -17,6 +17,7 @@
 package io.agentscope.core.util;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.StreamReadConstraints;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JavaType;
@@ -66,12 +67,22 @@ public class JacksonJsonCodec implements JsonCodec {
     /**
      * Creates the default ObjectMapper with standard configuration.
      *
+     * <p>Jackson's default {@link StreamReadConstraints} caps a single string at 20,000,000
+     * characters. That limit is asymmetric here: {@link #toJson(Object)} has no equivalent cap, so
+     * a large Base64 media payload (for example a multi-megabyte video block) can be written but
+     * then fails to read back, permanently breaking the session. The codec must be able to read
+     * everything it writes, so the string limit is lifted; nesting and number limits keep their
+     * defaults.
+     *
      * @return configured ObjectMapper
      */
     private static ObjectMapper createDefaultObjectMapper() {
         ObjectMapper mapper = new ObjectMapper();
         mapper.registerModule(new JavaTimeModule());
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        mapper.getFactory()
+                .setStreamReadConstraints(
+                        StreamReadConstraints.builder().maxStringLength(Integer.MAX_VALUE).build());
         return mapper;
     }
 
