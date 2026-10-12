@@ -55,6 +55,8 @@ import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.ToolExecutionContext;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.harness.agent.artifact.ArtifactDeliveryTarget;
+import io.agentscope.harness.agent.attachment.AttachmentRequestCompiler;
+import io.agentscope.harness.agent.attachment.AttachmentResolver;
 import io.agentscope.harness.agent.context.ContextPolicy;
 import io.agentscope.harness.agent.context.ContextSelectionPolicy;
 import io.agentscope.harness.agent.context.ContextSource;
@@ -1419,6 +1421,7 @@ public class HarnessAgent implements Agent, AutoCloseable {
         ContextPolicy contextPolicy = ContextPolicy.defaults();
         ContextSources contextSources = ContextSources.empty();
         ContextSelectionPolicy contextSelectionPolicy = ContextSelectionPolicy.defaults();
+        AttachmentResolver attachmentResolver;
 
         /** Loads read-only business data before each reasoning request, not during registration. */
         public Builder contextSource(String id, ContextSource source) {
@@ -1449,6 +1452,17 @@ public class HarnessAgent implements Agent, AutoCloseable {
 
         public Builder contextSelectionPolicy(ContextSelectionPolicy policy) {
             contextSelectionPolicy = Objects.requireNonNull(policy);
+            return this;
+        }
+
+        /**
+         * Resolves persisted attachment references into core media blocks at the model boundary.
+         *
+         * <p>Optional: when unset, messages keep only their placeholder text and no reference is
+         * expanded. The resolver is product-owned and must enforce session/user isolation.
+         */
+        public Builder attachmentResolver(AttachmentResolver resolver) {
+            this.attachmentResolver = Objects.requireNonNull(resolver);
             return this;
         }
 
@@ -2901,7 +2915,10 @@ public class HarnessAgent implements Agent, AutoCloseable {
                             compactionHook,
                             contextEviction,
                             contextSources,
-                            contextSelectionPolicy));
+                            contextSelectionPolicy,
+                            attachmentResolver == null
+                                    ? null
+                                    : new AttachmentRequestCompiler(attachmentResolver)));
             if (messageBus != null) {
                 inner.middleware(new InboxMiddleware(messageBus, 100, asyncToolRegistry, null));
             }
