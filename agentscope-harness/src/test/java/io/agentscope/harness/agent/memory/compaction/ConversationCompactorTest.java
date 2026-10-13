@@ -37,6 +37,7 @@ import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolExecutionDetails;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultState;
+import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
@@ -48,6 +49,7 @@ import io.agentscope.core.session.SessionLog;
 import io.agentscope.core.session.SessionLogException;
 import io.agentscope.core.session.SessionRecorder;
 import io.agentscope.core.state.AgentState;
+import io.agentscope.harness.agent.attachment.AttachmentReference;
 import io.agentscope.harness.agent.memory.MemoryFlushManager;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig.PruneConfig;
 import java.time.Duration;
@@ -998,28 +1000,283 @@ class ConversationCompactorTest {
         }
     }
 
-    /** Verifies media in the compaction prefix is rendered as a safe placeholder. */
+    /**
+     * Verifies that a message carrying top-level media is kept out of the summarization prefix and
+     * survives as the original block in the working history, while its data never reaches the
+     * summary prompt.
+     */
     @Test
-    void compactIfNeeded_summaryPromptContainsMediaPlaceholderWithoutRawData() {
+    void compactIfNeeded_keepsTopLevelMediaMessageOutOfSummaryPrefix() {
         Fixture fixture = new Fixture(false);
         String imageData =
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+        Msg media = messageWithImage("look at this", imageData);
+
+        List<Msg> compacted =
+                fixture.compact(
+                        List.of(message("M1"), media, message("TAIL_1"), message("TAIL_2")));
+
+        String prompt = fixture.model.prompt(0);
+        assertTrue(prompt.contains("M1"));
+        assertFalse(prompt.contains("look at this"));
+        assertFalse(prompt.contains(imageData));
+        assertEquals(4, compacted.size());
+        assertSame(media, compacted.get(1));
+        assertTrue(compacted.get(1).getContent().get(1) instanceof ImageBlock);
+        assertEquals(List.of("TAIL_1", "TAIL_2"), texts(compacted.subList(2, compacted.size())));
+    }
+
+    /**
+     * Verifies that media nested in a tool result pulls its whole ASSISTANT/TOOL group into the kept
+     * tail instead of being summarized away.
+     */
+    @Test
+    void compactIfNeeded_keepsNestedToolMediaGroupOutOfSummaryPrefix() {
+        Fixture fixture = new Fixture(false);
+        Msg assistant = assistantToolCall("call:img", "screenshot");
+        Msg tool =
+                toolMessage(
+                        toolResult(
+                                "call:img",
+                                "screenshot",
+                                List.of(
+                                        TextBlock.builder().text("captured").build(),
+                                        ImageBlock.builder()
+                                                .source(
+                                                        Base64Source.builder()
+                                                                .mediaType("image/png")
+                                                                .data("iVBORw0KGgo=")
+                                                                .build())
+                                                .build()),
+                                Map.of(),
+                                ToolResultState.SUCCESS,
+                                null));
 
         List<Msg> compacted =
                 fixture.compact(
                         List.of(
                                 message("M1"),
-                                messageWithImage("look at this", imageData),
+                                assistant,
+                                tool,
                                 message("TAIL_1"),
                                 message("TAIL_2")));
 
         String prompt = fixture.model.prompt(0);
-        assertTrue(prompt.contains("[attachment"));
-        assertTrue(prompt.contains("kind=image"));
-        assertTrue(prompt.contains("type=image/png"));
-        assertFalse(prompt.contains(imageData));
-        assertEquals(3, compacted.size());
-        assertEquals(List.of("TAIL_1", "TAIL_2"), texts(compacted.subList(1, compacted.size())));
+        assertTrue(prompt.contains("M1"));
+        assertFalse(prompt.contains("captured"));
+        assertEquals(5, compacted.size());
+        assertSame(assistant, compacted.get(1));
+        assertSame(tool, compacted.get(2));
+        ToolResultBlock kept = compacted.get(2).getContentBlocks(ToolResultBlock.class).get(0);
+        assertTrue(kept.getOutput().stream().anyMatch(block -> block instanceof ImageBlock));
+    }
+
+    /**
+     * Verifies that a message carrying multiple attachment references is not summarized away: the
+     * canonical message keeps its machine-readable reference metadata.
+     */
+    @Test
+    void compactIfNeeded_keepsMultipleAttachmentReferenceMessageOutOfSummaryPrefix() {
+        Fixture fixture = new Fixture(false);
+        Msg attach =
+                message("see attached")
+                        .withMetadata(
+                                Map.of(
+                                        AttachmentReference.METADATA_KEY,
+                                        List.of(
+                                                new AttachmentReference(
+                                                                "ref-1",
+                                                                "image/png",
+                                                                "a.png",
+                                                                "sha-1",
+                                                                10,
+                                                                1)
+                                                        .toMetadata(),
+                                                new AttachmentReference(
+                                                                "ref-2",
+                                                                "application/pdf",
+                                                                "b.pdf",
+                                                                "sha-2",
+                                                                20,
+                                                                2)
+                                                        .toMetadata())));
+
+        List<Msg> compacted =
+                fixture.compact(
+                        List.of(message("M1"), attach, message("TAIL_1"), message("TAIL_2")));
+
+        String prompt = fixture.model.prompt(0);
+        assertTrue(prompt.contains("M1"));
+        assertFalse(prompt.contains("see attached"));
+        assertSame(attach, compacted.get(1));
+        List<AttachmentReference> references =
+                AttachmentReference.listFromMetadata(compacted.get(1).getMetadata());
+        assertEquals(2, references.size());
+        assertEquals("ref-1", references.get(0).referenceId());
+        assertEquals("ref-2", references.get(1).referenceId());
+    }
+
+    /**
+     * Verifies that an empty keep window cannot summarize the current input away when it carries
+     * multiple attachment references.
+     */
+    @Test
+    void compactIfNeeded_protectsCurrentInputAttachmentsWhenKeepWindowIsEmpty() {
+        Fixture fixture = new Fixture(false);
+        Msg attach =
+                message("current input")
+                        .withMetadata(
+                                Map.of(
+                                        AttachmentReference.METADATA_KEY,
+                                        List.of(
+                                                new AttachmentReference(
+                                                                "ref-1",
+                                                                "image/png",
+                                                                "a.png",
+                                                                "sha-1",
+                                                                10,
+                                                                1)
+                                                        .toMetadata(),
+                                                new AttachmentReference(
+                                                                "ref-2",
+                                                                "application/pdf",
+                                                                "b.pdf",
+                                                                "sha-2",
+                                                                20,
+                                                                2)
+                                                        .toMetadata())));
+        CompactionConfig zeroKeep =
+                CompactionConfig.builder()
+                        .triggerMessages(3)
+                        .triggerTokens(0)
+                        .keepMessages(0)
+                        .keepTokens(0)
+                        .summaryPrompt("SUMMARY_INPUT:\n{messages}")
+                        .flushBeforeCompact(false)
+                        .truncateArgs(null)
+                        .prune(null)
+                        .build();
+
+        Optional<List<Msg>> result =
+                fixture.compactor
+                        .compactIfNeeded(
+                                fixture.runtimeContext,
+                                List.of(message("M1"), message("M2"), attach),
+                                zeroKeep,
+                                "agent-id",
+                                "session-id")
+                        .block();
+
+        List<Msg> compacted = result.orElseThrow();
+        assertEquals(2, compacted.size());
+        assertSame(attach, compacted.get(1));
+        assertEquals(
+                2, AttachmentReference.listFromMetadata(compacted.get(1).getMetadata()).size());
+        assertFalse(fixture.model.prompt(0).contains("current input"));
+    }
+
+    /** Verifies media survives two consecutive compaction rounds. */
+    @Test
+    void compactIfNeeded_retainsMediaAcrossConsecutiveCompactions() {
+        Fixture fixture = new Fixture();
+        Msg media = messageWithImage("older image", "AAAA");
+
+        List<Msg> first =
+                fixture.compact(
+                        List.of(message("M1"), media, message("TAIL_1"), message("TAIL_2")));
+        assertEquals(4, first.size());
+
+        List<Msg> secondInput = new ArrayList<>(first);
+        secondInput.add(message("M3"));
+        secondInput.add(message("TAIL_3"));
+        secondInput.add(message("TAIL_4"));
+
+        List<Msg> second = fixture.compact(secondInput);
+
+        String prompt = fixture.model.prompt(1);
+        assertTrue(prompt.contains("ROUND_1"));
+        assertFalse(prompt.contains("older image"));
+        assertEquals(7, second.size());
+        assertSame(media, second.get(1));
+        assertTrue(second.get(1).getContent().get(1) instanceof ImageBlock);
+        assertEquals(
+                1,
+                second.stream()
+                        .filter(msg -> ConversationCompactor.SUMMARY_MSG_NAME.equals(msg.getName()))
+                        .count());
+        assertTrue(fixture.flushInputs.get(1).isEmpty());
+    }
+
+    /**
+     * Verifies that when a protected message sits at the history head, summarization is refused
+     * entirely — no LLM call happens and the history stays untouched.
+     */
+    @Test
+    void compactIfNeeded_refusesSummarizationWhenProtectedMessageCannotBeExcluded() {
+        Fixture fixture = new Fixture(false);
+        Msg media = messageWithImage("head image", "AAAA");
+
+        Optional<List<Msg>> result =
+                fixture.compactor
+                        .compactIfNeeded(
+                                fixture.runtimeContext,
+                                List.of(media, message("M2"), message("TAIL_1"), message("TAIL_2")),
+                                fixture.config,
+                                "agent-id",
+                                "session-id")
+                        .block();
+
+        assertTrue(result.isEmpty());
+        assertTrue(fixture.model.inputs.isEmpty());
+        assertTrue(fixture.flushInputs.isEmpty());
+    }
+
+    /**
+     * Verifies that a guard-induced cutoff of 0 still returns the lightweight prune result so the
+     * trigger does not fail the turn, while no summarization (and no media deletion) happens.
+     */
+    @Test
+    void compactIfNeeded_fallsBackToLightweightPruneWhenProtectedMessageBlocksSummarization() {
+        RecordingModel model = new RecordingModel();
+        ConversationCompactor compactor =
+                new ConversationCompactor(model, new MemoryFlushManager(null, null));
+        Msg media = messageWithImage("head image", "AAAA");
+        List<Msg> input =
+                List.of(
+                        media,
+                        message("M2"),
+                        toolResult("bash", "x".repeat(100_000)),
+                        message("M4"));
+        CompactionConfig config =
+                CompactionConfig.builder()
+                        .triggerMessages(3)
+                        .triggerTokens(0)
+                        .keepMessages(2)
+                        .keepTokens(0)
+                        .summaryPrompt("SUMMARY_INPUT:\n{messages}")
+                        .flushBeforeCompact(false)
+                        .truncateArgs(null)
+                        .prune(
+                                CompactionConfig.PruneConfig.builder()
+                                        .protectTokens(0)
+                                        .minimumTokens(1)
+                                        .maxOutputChars(10)
+                                        .excludedTools(Set.of())
+                                        .build())
+                        .build();
+
+        Optional<List<Msg>> result =
+                compactor
+                        .compactIfNeeded(mock(RuntimeContext.class), input, config, "agent", "s")
+                        .block();
+
+        assertTrue(result.isPresent());
+        List<Msg> lightweight = result.orElseThrow();
+        assertSame(media, lightweight.get(0));
+        assertTrue(
+                TokenCounterUtil.calculateToken(lightweight)
+                        < TokenCounterUtil.calculateToken(input));
+        assertTrue(model.inputs.isEmpty());
     }
 
     /**
@@ -1254,6 +1511,13 @@ class ConversationCompactorTest {
     /** Creates a TOOL message wrapping the given result. */
     private static Msg toolMessage(ToolResultBlock result) {
         return Msg.builderForRole(MsgRole.TOOL).id("msg-" + result.getId()).content(result).build();
+    }
+
+    /** Creates an ASSISTANT message issuing a single tool call. */
+    private static Msg assistantToolCall(String callId, String name) {
+        return Msg.builderForRole(MsgRole.ASSISTANT)
+                .content(ToolUseBlock.builder().id(callId).name(name).input(Map.of()).build())
+                .build();
     }
 
     /** Builds a {@link ToolResultBlock} with full metadata for preservation checks. */
