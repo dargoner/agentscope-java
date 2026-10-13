@@ -47,7 +47,10 @@ import io.agentscope.core.state.AgentState;
 import io.agentscope.harness.agent.context.ContextBudgetExceededException;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.memory.compaction.ConversationCompactor;
+import io.agentscope.harness.agent.workspace.WorkspaceConstants;
 import io.agentscope.harness.agent.workspace.WorkspaceManager;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -120,6 +123,84 @@ class CompactionMiddlewareTest {
         }
 
         assertTrue(model.calledFlush(), "memory flush must run when hooks are enabled");
+    }
+
+    /**
+     * The emergency overflow-recovery path must honour disabled memory hooks: the forced
+     * compaction neither spends a flush model call nor writes any memory file.
+     */
+    @Test
+    void emergencyRecoveryWithDisabledHooksWritesNoMemoryFiles() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        PromptRecordingModel memoryModel = new PromptRecordingModel();
+
+        try (WorkspaceManager workspaceManager = new WorkspaceManager(workspace)) {
+            var recovery =
+                    new CompactionMiddleware(workspaceManager, memoryModel, flushConfig(), false);
+            var agent =
+                    ReActAgent.builder()
+                            .name("emergency-no-memory-test")
+                            .model(new OverflowOnceModel(calls, "answer"))
+                            .middleware(recovery.overflowRecovery())
+                            .build();
+
+            var reply =
+                    agent.call(
+                                    List.of(
+                                            userMessage("old context"),
+                                            userMessage("latest request")),
+                                    context("user", "emergency-no-memory-session"))
+                            .block(Duration.ofSeconds(10));
+
+            assertNotNull(reply);
+            assertEquals("answer", reply.getTextContent());
+            assertEquals(2, calls.get(), "exactly one emergency retry is attempted");
+            assertTrue(memoryModel.summarized(), "emergency compaction must still summarize");
+            assertFalse(
+                    memoryModel.calledFlush(),
+                    "disabled memory hooks must skip the emergency flush model call");
+        }
+
+        assertFalse(
+                containsMemoryFile(workspace),
+                "disabled memory hooks must not write any memory file");
+    }
+
+    /**
+     * Positive control for the emergency zero-write assertion: with memory hooks enabled the same
+     * recovery flow spends the flush model call and lands a daily memory file.
+     */
+    @Test
+    void emergencyRecoveryWithEnabledHooksWritesDailyMemoryFile() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        PromptRecordingModel memoryModel = new PromptRecordingModel();
+
+        try (WorkspaceManager workspaceManager = new WorkspaceManager(workspace)) {
+            var recovery =
+                    new CompactionMiddleware(workspaceManager, memoryModel, flushConfig(), true);
+            var agent =
+                    ReActAgent.builder()
+                            .name("emergency-memory-test")
+                            .model(new OverflowOnceModel(calls, "answer"))
+                            .middleware(recovery.overflowRecovery())
+                            .build();
+
+            var reply =
+                    agent.call(
+                                    List.of(
+                                            userMessage("old context"),
+                                            userMessage("latest request")),
+                                    context("user", "emergency-memory-session"))
+                            .block(Duration.ofSeconds(10));
+
+            assertNotNull(reply);
+            assertEquals("answer", reply.getTextContent());
+            assertEquals(2, calls.get(), "exactly one emergency retry is attempted");
+            assertTrue(memoryModel.calledFlush(), "enabled memory hooks must flush the prefix");
+            assertTrue(
+                    containsMemoryFile(workspace),
+                    "enabled memory hooks must land a daily memory file");
+        }
     }
 
     @Test
@@ -839,6 +920,31 @@ class CompactionMiddlewareTest {
                 .keepTokens(0)
                 .flushBeforeCompact(false)
                 .build();
+    }
+
+    /** Configuration whose emergency flow would flush memory when hooks are enabled. */
+    private CompactionConfig flushConfig() {
+        return CompactionConfig.builder()
+                .triggerTokens(1)
+                .keepTokens(1)
+                .flushBeforeCompact(true)
+                .prune(null)
+                .build();
+    }
+
+    /** Returns whether any daily memory ledger was written under the workspace. */
+    private static boolean containsMemoryFile(Path root) throws IOException {
+        if (!Files.exists(root)) {
+            return false;
+        }
+        try (var walk = Files.walk(root)) {
+            return walk.anyMatch(
+                    path ->
+                            Files.isRegularFile(path)
+                                    && path.getParent() != null
+                                    && WorkspaceConstants.MEMORY_DIR.equals(
+                                            path.getParent().getFileName().toString()));
+        }
     }
 
     /** Creates the ReActAgent test double required by the middleware. */
