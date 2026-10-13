@@ -265,6 +265,26 @@ class AttachmentRequestCompilerTest {
     }
 
     @Test
+    void disposingRequestCancelsTheInFlightResolverSubscription() {
+        AttachmentReference reference = reference("att_7", "image/png", 0);
+        ModelCallInput input = input(placeholder(reference, "att_7"));
+        java.util.concurrent.atomic.AtomicBoolean resolverCancelled =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        AttachmentResolver resolver =
+                (r, c) ->
+                        Mono.<ResolvedAttachment>never()
+                                .doOnCancel(() -> resolverCancelled.set(true));
+
+        reactor.core.Disposable subscription =
+                new AttachmentRequestCompiler(resolver).compile(input, context("s1")).subscribe();
+        subscription.dispose();
+
+        assertTrue(
+                resolverCancelled.get(),
+                "cancelling the request must propagate to the in-flight resolver subscription");
+    }
+
+    @Test
     void multipleReferencesReplaceTheirOwnOrdinals() {
         AttachmentReference first = reference("att_a", "image/png", 1);
         AttachmentReference second = reference("att_b", "image/png", 2);

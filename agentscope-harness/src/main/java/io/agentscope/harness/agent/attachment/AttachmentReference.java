@@ -88,4 +88,30 @@ public record AttachmentReference(
     private static String asString(Object value) {
         return value == null ? null : value.toString();
     }
+
+    /**
+     * Returns the well-formed references stored under {@link #METADATA_KEY}, skipping any malformed
+     * entry. Used by context budgeting to price unresolved attachments before they are expanded.
+     */
+    public static java.util.List<AttachmentReference> listFromMetadata(
+            Map<String, Object> metadata) {
+        if (metadata == null) return java.util.List.of();
+        Object raw = metadata.get(METADATA_KEY);
+        if (!(raw instanceof java.util.List<?> entries)) return java.util.List.of();
+        java.util.List<AttachmentReference> references = new java.util.ArrayList<>();
+        for (Object entry : entries) {
+            if (!(entry instanceof Map<?, ?> map)) continue;
+            Map<String, Object> stringKeyed = new LinkedHashMap<>();
+            map.forEach(
+                    (key, value) -> {
+                        if (key != null) stringKeyed.put(key.toString(), value);
+                    });
+            try {
+                references.add(fromMetadata(stringKeyed));
+            } catch (RuntimeException malformed) {
+                // Skip malformed entries; accounting must not fail on a corrupt reference.
+            }
+        }
+        return references;
+    }
 }

@@ -77,7 +77,7 @@ public final class AttachmentRequestCompiler {
     /** Returns a request-scoped input with every resolvable reference compiled into a media block. */
     public Mono<ModelCallInput> compile(ModelCallInput input, AttachmentResolveContext context) {
         if (input == null) return Mono.empty();
-        Map<String, Mono<ResolvedAttachment>> cache = new ConcurrentHashMap<>();
+        Map<String, ResolvedAttachment> cache = new ConcurrentHashMap<>();
         return Flux.fromIterable(input.messages())
                 .concatMap(message -> compileMessage(message, context, cache))
                 .collectList()
@@ -88,9 +88,7 @@ public final class AttachmentRequestCompiler {
     }
 
     private Mono<Msg> compileMessage(
-            Msg message,
-            AttachmentResolveContext context,
-            Map<String, Mono<ResolvedAttachment>> cache) {
+            Msg message, AttachmentResolveContext context, Map<String, ResolvedAttachment> cache) {
         if (message.getRole() == MsgRole.SYSTEM) return Mono.just(message);
         ParsedReferences parsed = referencesOf(message);
         if (parsed == null) return Mono.just(message);
@@ -103,34 +101,44 @@ public final class AttachmentRequestCompiler {
     private Mono<CompiledBlock> resolveOne(
             AttachmentReference reference,
             AttachmentResolveContext context,
-            Map<String, Mono<ResolvedAttachment>> cache) {
-        Mono<ResolvedAttachment> resolved =
-                cache.computeIfAbsent(
-                        reference.referenceId(),
-                        id ->
-                                Mono.defer(() -> resolver.resolve(reference, context))
-                                        .switchIfEmpty(
-                                                Mono.just(
-                                                        new ResolvedAttachment.Unavailable(
-                                                                ResolvedAttachment.Unavailable
-                                                                        .Category.FAILED,
-                                                                "empty")))
-                                        .onErrorResume(
-                                                error -> {
-                                                    if (error instanceof CancellationException)
-                                                        return Mono.error(error);
-                                                    log.debug(
-                                                            "Attachment resolution failed: {}",
-                                                            error.getClass().getSimpleName());
-                                                    return Mono.just(
-                                                            new ResolvedAttachment.Unavailable(
-                                                                    ResolvedAttachment.Unavailable
-                                                                            .Category.FAILED,
-                                                                    "resolver_error"));
-                                                })
-                                        .cache());
-        return resolved.map(
-                value -> new CompiledBlock(reference.blockOrdinal(), blockFor(reference, value)));
+            Map<String, ResolvedAttachment> cache) {
+        return Mono.defer(
+                () -> {
+                    ResolvedAttachment cached = cache.get(reference.referenceId());
+                    if (cached != null)
+                        return Mono.just(
+                                new CompiledBlock(
+                                        reference.blockOrdinal(), blockFor(reference, cached)));
+                    return resolve(reference, context)
+                            .doOnNext(value -> cache.put(reference.referenceId(), value))
+                            .map(
+                                    value ->
+                                            new CompiledBlock(
+                                                    reference.blockOrdinal(),
+                                                    blockFor(reference, value)));
+                });
+    }
+
+    // Only completed results are cached: the raw resolver subscription stays uncached so cancelling
+    // the request propagates to the resolver instead of being absorbed by a sharing operator.
+    private Mono<ResolvedAttachment> resolve(
+            AttachmentReference reference, AttachmentResolveContext context) {
+        return resolver.resolve(reference, context)
+                .switchIfEmpty(
+                        Mono.just(
+                                new ResolvedAttachment.Unavailable(
+                                        ResolvedAttachment.Unavailable.Category.FAILED, "empty")))
+                .onErrorResume(
+                        error -> {
+                            if (error instanceof CancellationException) return Mono.error(error);
+                            log.debug(
+                                    "Attachment resolution failed: {}",
+                                    error.getClass().getSimpleName());
+                            return Mono.just(
+                                    new ResolvedAttachment.Unavailable(
+                                            ResolvedAttachment.Unavailable.Category.FAILED,
+                                            "resolver_error"));
+                        });
     }
 
     private static Msg rebuild(Msg message, List<CompiledBlock> compiled, int malformed) {

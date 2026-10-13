@@ -33,6 +33,18 @@ public interface MediaTokenEstimator {
 
     long estimate(ContentBlock block);
 
+    /**
+     * Estimated token cost of an unresolved attachment reference, priced before its media is
+     * expanded into the request. The default prices it as one media block so the compaction
+     * trigger and final budget checks stay consistent with {@link #estimate(ContentBlock)}.
+     *
+     * @param mediaType the declared media type, or {@code null} when unknown
+     * @param byteSize the declared payload size in bytes, or {@code 0} when unknown
+     */
+    default long estimateReference(String mediaType, long byteSize) {
+        return DEFAULT_MEDIA_TOKENS;
+    }
+
     /** Stable identifier of the estimation method, recorded alongside the surfaced estimate. */
     default String method() {
         return "constant-media-" + DEFAULT_MEDIA_TOKENS + "-v1";

@@ -670,6 +670,14 @@ public class ConversationCompactor {
                 continue;
             }
             int tokens = TokenCounterUtil.calculateToken(List.of(msg));
+            // Protection and accounting are per message so a message that carries several tool
+            // results is not counted once per block. The newest tool messages fill the protect
+            // window first; older messages become prunable in full.
+            if (protectedTokens < protectBudget) {
+                protectedTokens += tokens;
+                continue;
+            }
+            boolean messagePruned = false;
             for (int j = blocks.size() - 1; j >= 0; j--) {
                 if (!(blocks.get(j) instanceof ToolResultBlock tr)) {
                     continue;
@@ -686,14 +694,13 @@ public class ConversationCompactor {
                 if (containsNonTextBlock(tr)) {
                     continue;
                 }
-                if (protectedTokens < protectBudget) {
-                    protectedTokens += tokens;
-                    continue;
-                }
                 if (text.length() > maxChars) {
-                    prunableTokens += tokens;
                     toPrune.add(new int[] {i, j});
+                    messagePruned = true;
                 }
+            }
+            if (messagePruned) {
+                prunableTokens += tokens;
             }
         }
 

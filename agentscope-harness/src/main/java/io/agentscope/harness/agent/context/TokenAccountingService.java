@@ -23,6 +23,7 @@ import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.model.ToolSchema;
 import io.agentscope.core.util.JsonUtils;
+import io.agentscope.harness.agent.attachment.AttachmentReference;
 import java.util.List;
 import java.util.Objects;
 
@@ -98,6 +99,17 @@ public final class TokenAccountingService {
                         media = saturatedAdd(media, counts.media());
                         overhead = saturatedAdd(overhead, counts.overhead());
                     }
+                }
+                // Attachments are expanded at the model boundary, so the placeholder message alone
+                // would understate the request. Price each reference here so the compaction trigger
+                // and selection see the media cost before it is compiled in.
+                for (AttachmentReference reference :
+                        AttachmentReference.listFromMetadata(msg.getMetadata())) {
+                    media =
+                            saturatedAdd(
+                                    media,
+                                    mediaEstimator.estimateReference(
+                                            reference.mediaType(), reference.size()));
                 }
             }
         }

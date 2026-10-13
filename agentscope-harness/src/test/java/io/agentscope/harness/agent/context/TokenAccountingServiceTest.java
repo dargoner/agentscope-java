@@ -27,6 +27,7 @@ import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.message.URLSource;
 import io.agentscope.core.model.ToolSchema;
+import io.agentscope.harness.agent.attachment.AttachmentReference;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -110,6 +111,28 @@ class TokenAccountingServiceTest {
         var estimate =
                 service.estimate(new TokenAccountingService.TokenSurface(List.of(message), null));
         assertEquals(MediaTokenEstimator.DEFAULT_MEDIA_TOKENS, estimate.mediaTokens());
+    }
+
+    @Test
+    void attachmentReferencesChargeOneMediaBlockEachBeforeExpansion() {
+        AttachmentReference first =
+                new AttachmentReference("att_1", "image/png", "a.png", "sha1", 1234L, 0);
+        AttachmentReference second =
+                new AttachmentReference("att_2", "application/pdf", "b.pdf", "sha2", 9999L, 1);
+        Msg message =
+                Msg.builder()
+                        .role(MsgRole.USER)
+                        .content(TextBlock.builder().text("[attachments]").build())
+                        .metadata(
+                                Map.of(
+                                        AttachmentReference.METADATA_KEY,
+                                        List.of(first.toMetadata(), second.toMetadata())))
+                        .build();
+
+        var estimate =
+                service.estimate(new TokenAccountingService.TokenSurface(List.of(message), null));
+
+        assertEquals(2 * MediaTokenEstimator.DEFAULT_MEDIA_TOKENS, estimate.mediaTokens());
     }
 
     @Test

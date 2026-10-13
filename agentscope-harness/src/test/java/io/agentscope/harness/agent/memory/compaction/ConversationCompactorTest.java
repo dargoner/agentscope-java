@@ -468,6 +468,48 @@ class ConversationCompactorTest {
                 unchangedBlock.getOutput().stream().anyMatch(block -> block instanceof ImageBlock));
     }
 
+    /**
+     * Verifies that a single tool message carrying several large tool results contributes its
+     * tokens to the prunable budget once, not once per block.
+     */
+    @Test
+    void pruneCountsEachMessageOnceWhenItCarriesMultipleToolResults() {
+        ConversationCompactor compactor =
+                new ConversationCompactor(new RecordingModel(), mock(MemoryFlushManager.class));
+        ToolResultBlock first =
+                toolResult(
+                        "call:a",
+                        "tool_a",
+                        List.of(TextBlock.builder().text("x".repeat(400)).build()),
+                        Map.of(),
+                        ToolResultState.SUCCESS,
+                        null);
+        ToolResultBlock second =
+                toolResult(
+                        "call:b",
+                        "tool_b",
+                        List.of(TextBlock.builder().text("y".repeat(400)).build()),
+                        Map.of(),
+                        ToolResultState.SUCCESS,
+                        null);
+        Msg message = Msg.builderForRole(MsgRole.TOOL).id("msg-two").content(first, second).build();
+        int messageTokens = TokenCounterUtil.calculateToken(List.of(message));
+        assertTrue(messageTokens > 1);
+        PruneConfig pruneConfig =
+                PruneConfig.builder()
+                        .protectTokens(0)
+                        .minimumTokens(messageTokens + 1)
+                        .maxOutputChars(10)
+                        .excludedTools(Set.of())
+                        .build();
+
+        List<Msg> result = compactor.pruneToolResults(List.of(message), pruneConfig);
+
+        // Counting the message once keeps the budget below the threshold, so nothing is pruned.
+        assertSame(message, result.get(0));
+        assertFalse(toolOutput(result.get(0)).contains("chars pruned"));
+    }
+
     /** Creates a regular user message. */
     private static Msg message(String text) {
         return Msg.builder()
