@@ -60,7 +60,8 @@ public interface AttachmentStore {
      *
      * @return the reference id to embed in an {@link AttachmentReference}
      * @throws AttachmentStoreException with {@link AttachmentStoreCategory#CONFLICT} when the
-     *     idempotency key is already bound to different metadata, or {@code FAILED} on other errors
+     *     idempotency key is already bound to different metadata, {@code TOO_LARGE} when the blob
+     *     exceeds the store's registration capacity, or {@code FAILED} on other errors
      */
     String register(AttachmentStoreScope scope, AttachmentRegistration registration);
 

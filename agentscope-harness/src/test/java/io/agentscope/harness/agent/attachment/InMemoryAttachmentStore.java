@@ -16,6 +16,7 @@
 package io.agentscope.harness.agent.attachment;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
@@ -33,6 +34,9 @@ import java.util.Objects;
  * configurable read limit on {@link #open}.
  */
 final class InMemoryAttachmentStore implements AttachmentStore {
+
+    /** Upper bound on what a reference implementation is willing to buffer for one register. */
+    private static final long REGISTER_CAP_BYTES = 64L * 1024 * 1024;
 
     private record Entry(AttachmentStoreScope scope, AttachmentMetadata metadata, byte[] content) {}
 
@@ -118,29 +122,40 @@ final class InMemoryAttachmentStore implements AttachmentStore {
     }
 
     private static byte[] readDeclaredSize(InputStream in, long declaredSize) {
-        // Read at most declaredSize + 1 bytes so an oversized or unbounded stream is rejected
-        // without buffering it in full, and never surface raw exception details.
-        if (declaredSize < 0 || declaredSize > Integer.MAX_VALUE) {
+        // Reject an over-capacity declaration before allocating anything, then read at most
+        // declaredSize + 1 bytes growing the buffer only by what is actually read. This bounds
+        // memory to real content and rejects oversized/unbounded streams without buffering them
+        // in full; raw exception details are never surfaced.
+        if (declaredSize < 0) {
             throw new AttachmentStoreException(
-                    AttachmentStoreCategory.TOO_LARGE, "declared size out of range");
+                    AttachmentStoreCategory.FAILED, "declared size is negative");
+        }
+        if (declaredSize > REGISTER_CAP_BYTES) {
+            throw new AttachmentStoreException(
+                    AttachmentStoreCategory.TOO_LARGE,
+                    "declared size exceeds registration capacity");
         }
         int limit = (int) declaredSize;
-        byte[] buffer = new byte[limit];
-        int read = 0;
         try {
-            while (read < limit) {
-                int n = in.read(buffer, read, limit - read);
+            ByteArrayOutputStream sink = new ByteArrayOutputStream(Math.min(limit, 8192));
+            byte[] chunk = new byte[8192];
+            int total = 0;
+            while (total <= limit) {
+                int want = Math.min(chunk.length, limit + 1 - total);
+                int n = in.read(chunk, 0, want);
                 if (n < 0) break;
-                read += n;
+                if (n == 0) continue;
+                sink.write(chunk, 0, n);
+                total += n;
             }
-            if (read < limit || in.read() >= 0) {
+            if (total != limit) {
                 throw new AttachmentStoreException(
                         AttachmentStoreCategory.FAILED, "declared size does not match content");
             }
+            return sink.toByteArray();
         } catch (IOException e) {
             throw new AttachmentStoreException(
                     AttachmentStoreCategory.FAILED, "content read failed");
         }
-        return buffer;
     }
 }

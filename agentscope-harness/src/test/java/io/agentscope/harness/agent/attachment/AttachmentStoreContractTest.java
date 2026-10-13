@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -29,7 +30,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -93,6 +94,11 @@ class AttachmentStoreContractTest {
         assertEquals("a.png", after.name(), "a rejected conflict must not modify the original");
         assertEquals("image/png", after.mediaType());
         assertEquals(3, after.size());
+        assertEquals("sha-key-1", after.sha256());
+        assertArrayEquals(
+                "abc".getBytes(StandardCharsets.UTF_8),
+                readAll(original, scope),
+                "a rejected conflict must not overwrite the original content");
     }
 
     @Test
@@ -150,18 +156,17 @@ class AttachmentStoreContractTest {
         int threads = 16;
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         try {
-            CountDownLatch start = new CountDownLatch(1);
+            CyclicBarrier ready = new CyclicBarrier(threads);
             List<Future<String>> results = new ArrayList<>();
             for (int i = 0; i < threads; i++) {
                 results.add(
                         pool.submit(
                                 () -> {
-                                    start.await();
+                                    ready.await();
                                     return store.register(
                                             scope, registration("key-1", "image/png", "a.png", 3));
                                 }));
             }
-            start.countDown();
             Set<String> ids = new java.util.HashSet<>();
             for (Future<String> result : results) {
                 ids.add(result.get(10, TimeUnit.SECONDS));
@@ -177,47 +182,66 @@ class AttachmentStoreContractTest {
         AttachmentStoreScope scope = scope("user-1", "session-1");
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
-            CountDownLatch start = new CountDownLatch(1);
+            CyclicBarrier ready = new CyclicBarrier(2);
             Future<String> a =
                     pool.submit(
                             () -> {
-                                start.await();
+                                ready.await();
                                 return store.register(
                                         scope, registration("key-1", "image/png", "a.png", 3));
                             });
             Future<String> b =
                     pool.submit(
                             () -> {
-                                start.await();
+                                ready.await();
                                 return store.register(
                                         scope, registration("key-1", "image/png", "b.png", 3));
                             });
-            start.countDown();
 
-            List<Object> outcomes = new ArrayList<>();
-            for (Future<String> f : List.of(a, b)) {
-                try {
-                    outcomes.add(f.get(10, TimeUnit.SECONDS));
-                } catch (java.util.concurrent.ExecutionException e) {
-                    outcomes.add(e.getCause());
-                }
-            }
-            long conflictCount =
-                    outcomes.stream()
-                            .filter(
-                                    o ->
-                                            o instanceof AttachmentStoreException ex
-                                                    && ex.category()
-                                                            == AttachmentStoreCategory.CONFLICT)
-                            .count();
-            long idCount = outcomes.stream().filter(o -> o instanceof String).count();
+            String aId = awaitId(a);
+            String bId = awaitId(b);
+            boolean aWon = aId != null;
+            boolean bWon = bId != null;
+            assertTrue(aWon ^ bWon, "exactly one racer must win; the other must fail");
+            AttachmentStoreException loser = aWon ? failureOf(b) : failureOf(a);
             assertEquals(
-                    2,
-                    conflictCount + idCount,
-                    "each racer must either win the id or see CONFLICT, never another error");
-            assertTrue(idCount >= 1, "at least one racer must succeed");
+                    AttachmentStoreCategory.CONFLICT,
+                    loser.category(),
+                    "the losing racer must fail with CONFLICT");
+
+            String winnerId = aWon ? aId : bId;
+            String winnerName = aWon ? "a.png" : "b.png";
+            assertEquals(winnerName, store.resolve(scope, winnerId).name());
+            assertEquals(
+                    winnerId,
+                    store.register(scope, registration("key-1", "image/png", winnerName, 3)),
+                    "re-registering the winner metadata must return the same id");
         } finally {
             pool.shutdownNow();
+        }
+    }
+
+    private static String awaitId(Future<String> future) {
+        try {
+            return future.get(10, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.ExecutionException e) {
+            assertTrue(
+                    e.getCause() instanceof AttachmentStoreException,
+                    "a racer must fail with a classified AttachmentStoreException");
+            return null;
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+    }
+
+    private static AttachmentStoreException failureOf(Future<String> future) {
+        try {
+            future.get(10, TimeUnit.SECONDS);
+            throw new AssertionError("expected a failure but the racer succeeded");
+        } catch (java.util.concurrent.ExecutionException e) {
+            return (AttachmentStoreException) e.getCause();
+        } catch (Exception e) {
+            throw new AssertionError(e);
         }
     }
 
@@ -292,6 +316,44 @@ class AttachmentStoreContractTest {
         assertFalse(
                 String.valueOf(failure.getMessage()).contains("s3cr3t"),
                 "raw content-read failure details must not leak");
+        assertNull(failure.getCause(), "the raw cause must not be retained");
+        for (Throwable suppressed : failure.getSuppressed()) {
+            assertFalse(
+                    String.valueOf(suppressed.getMessage()).contains("s3cr3t"),
+                    "suppressed exceptions must not carry sensitive details");
+        }
+    }
+
+    @Test
+    void registerReadsAtMostDeclaredSizePlusOneByte() {
+        AttachmentStoreScope scope = scope("user-1", "session-1");
+        CountingInputStream counting = new CountingInputStream(1000);
+        AttachmentRegistration registration =
+                new AttachmentRegistration("key-1", "image/png", "a.png", "sha", 3, counting);
+
+        AttachmentStoreException failure =
+                assertThrows(
+                        AttachmentStoreException.class, () -> store.register(scope, registration));
+
+        assertEquals(AttachmentStoreCategory.FAILED, failure.category());
+        assertTrue(
+                counting.consumed() <= 4,
+                "a bounded reader must not consume more than declared size + 1 bytes, was "
+                        + counting.consumed());
+    }
+
+    @Test
+    void registerRejectsDeclarationBeyondCapacityBeforeAllocating() {
+        AttachmentStoreScope scope = scope("user-1", "session-1");
+        // 100 MB declared far exceeds what any implementation should buffer for a reference blob.
+        AttachmentRegistration huge =
+                new AttachmentRegistration(
+                        "key-1", "image/png", "a.png", "sha", 100_000_000, content("abc"));
+
+        AttachmentStoreException failure =
+                assertThrows(AttachmentStoreException.class, () -> store.register(scope, huge));
+
+        assertEquals(AttachmentStoreCategory.TOO_LARGE, failure.category());
     }
 
     private void assertConflict(
@@ -356,5 +418,35 @@ class AttachmentStoreContractTest {
 
     private static AttachmentStoreScope scope(String userId, String sessionId) {
         return new AttachmentStoreScope(userId, sessionId);
+    }
+
+    /** A stream of {@code length} zero bytes that records how many bytes were actually consumed. */
+    private static final class CountingInputStream extends InputStream {
+        private final int length;
+        private int position;
+
+        CountingInputStream(int length) {
+            this.length = length;
+        }
+
+        int consumed() {
+            return position;
+        }
+
+        @Override
+        public int read() {
+            if (position >= length) return -1;
+            position++;
+            return 0;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) {
+            if (position >= length) return -1;
+            int n = Math.min(len, length - position);
+            for (int i = 0; i < n; i++) b[off + i] = 0;
+            position += n;
+            return n;
+        }
     }
 }
