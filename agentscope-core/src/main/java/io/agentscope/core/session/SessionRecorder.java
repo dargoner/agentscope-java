@@ -643,7 +643,7 @@ public final class SessionRecorder {
 
     private static Msg redactMessage(Msg message) {
         List<ContentBlock> content = message.getContent();
-        if (content == null || content.stream().noneMatch(SessionRecorder::isMediaBlock))
+        if (content == null || content.stream().noneMatch(SessionRecorder::containsMedia))
             return message;
         List<ContentBlock> redacted = new ArrayList<>(content.size());
         for (ContentBlock block : content) redacted.add(redactMediaBlock(block));
@@ -658,11 +658,18 @@ public final class SessionRecorder {
                 .build();
     }
 
-    private static boolean isMediaBlock(ContentBlock block) {
-        return block instanceof ImageBlock
+    private static boolean containsMedia(ContentBlock block) {
+        if (block instanceof ImageBlock
                 || block instanceof AudioBlock
                 || block instanceof VideoBlock
-                || block instanceof DataBlock;
+                || block instanceof DataBlock) {
+            return true;
+        }
+        if (block instanceof ToolResultBlock result) {
+            List<ContentBlock> output = result.getOutput();
+            return output != null && output.stream().anyMatch(SessionRecorder::containsMedia);
+        }
+        return false;
     }
 
     private static ContentBlock redactMediaBlock(ContentBlock block) {
@@ -678,6 +685,21 @@ public final class SessionRecorder {
                     .id(data.getId())
                     .name(data.getName())
                     .build();
+        if (block instanceof ToolResultBlock result) {
+            List<ContentBlock> output = result.getOutput();
+            if (output == null || output.stream().noneMatch(SessionRecorder::containsMedia))
+                return result;
+            List<ContentBlock> redactedOutput = new ArrayList<>(output.size());
+            for (ContentBlock child : output) redactedOutput.add(redactMediaBlock(child));
+            return ToolResultBlock.builder()
+                    .id(result.getId())
+                    .name(result.getName())
+                    .output(redactedOutput)
+                    .metadata(result.getMetadata())
+                    .state(result.getState())
+                    .executionDetails(result.getExecutionDetails())
+                    .build();
+        }
         return block;
     }
 
