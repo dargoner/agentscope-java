@@ -32,6 +32,7 @@ import io.agentscope.harness.agent.filesystem.remote.store.StoreItem;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -39,9 +40,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.server.ResponseStatusException;
@@ -579,6 +582,84 @@ class SessionAttachmentWiringTest {
     }
 
     @Test
+    void mediaTypeDriftResolvesToMimeMismatch() {
+        var store = new InMemoryStore();
+        var attachmentStore = new SessionAttachmentStore(store, 4096);
+        var scope = new AttachmentStoreScope("u", "s");
+        byte[] body = "abc".getBytes(StandardCharsets.UTF_8);
+        String id = attachmentStore.register(scope, registration("k", "text/plain", "n", body));
+        var resolver = new SessionAttachmentResolver(attachmentStore, "u", "s");
+
+        ResolvedAttachment resolved =
+                resolver.resolve(
+                                new AttachmentReference(
+                                        id,
+                                        "image/png",
+                                        "n",
+                                        JournalSessionLog.hash(body),
+                                        body.length,
+                                        0),
+                                new AttachmentResolveContext("u", "s", null, null))
+                        .block();
+
+        assertThat(unavailable(resolved))
+                .isEqualTo(ResolvedAttachment.Unavailable.Category.MIME_MISMATCH);
+    }
+
+    @Test
+    void stalledStoreResolvesToTimeoutCategory() {
+        var blocking = new BlockingStore();
+        var resolver =
+                new SessionAttachmentResolver(
+                        new SessionAttachmentStore(blocking, 4096),
+                        "u",
+                        "s",
+                        Duration.ofMillis(50));
+        try {
+            ResolvedAttachment resolved =
+                    resolver.resolve(
+                                    new AttachmentReference("att_x", "text/plain", "n", null, 0, 0),
+                                    new AttachmentResolveContext("u", "s", null, null))
+                            .block(Duration.ofSeconds(5));
+
+            assertThat(unavailable(resolved))
+                    .isEqualTo(ResolvedAttachment.Unavailable.Category.TIMEOUT);
+        } finally {
+            blocking.release.countDown();
+        }
+    }
+
+    @Test
+    void disposedResolutionDeliversNoTimeoutFallback() throws Exception {
+        var blocking = new BlockingStore();
+        var resolver =
+                new SessionAttachmentResolver(
+                        new SessionAttachmentStore(blocking, 4096),
+                        "u",
+                        "s",
+                        Duration.ofMillis(50));
+        var seen = new AtomicReference<ResolvedAttachment>();
+        var error = new AtomicReference<Throwable>();
+        try {
+            var subscription =
+                    resolver.resolve(
+                                    new AttachmentReference("att_x", "text/plain", "n", null, 0, 0),
+                                    new AttachmentResolveContext("u", "s", null, null))
+                            .subscribe(seen::set, error::set);
+            subscription.dispose();
+
+            // Give any un-cancelled timeout timer room to fire: a disposed subscription must
+            // observe neither a fallback value nor an error.
+            Thread.sleep(200);
+
+            assertThat(seen.get()).isNull();
+            assertThat(error.get()).isNull();
+        } finally {
+            blocking.release.countDown();
+        }
+    }
+
+    @Test
     void fileContentAppliesBoundsAndReadsOneSnapshot() {
         var oversized = new StubStore();
         oversized.item =
@@ -657,6 +738,38 @@ class SessionAttachmentWiringTest {
         public boolean putIfVersion(
                 List<String> namespace, String key, Map<String, Object> value, long version) {
             if (failOnPut != null) throw failOnPut;
+            return false;
+        }
+
+        @Override
+        public List<StoreItem> search(List<String> namespace, int limit, int offset) {
+            return List.of();
+        }
+
+        @Override
+        public void delete(List<String> namespace, String key) {}
+    }
+
+    /** Blocks every read until released, to exercise the resolver timeout and cancel paths. */
+    private static final class BlockingStore implements BaseStore {
+        private final CountDownLatch release = new CountDownLatch(1);
+
+        @Override
+        public StoreItem get(List<String> namespace, String key) {
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            }
+            throw new AttachmentStoreException(AttachmentStoreCategory.NOT_FOUND, "released");
+        }
+
+        @Override
+        public void put(List<String> namespace, String key, Map<String, Object> value) {}
+
+        @Override
+        public boolean putIfVersion(
+                List<String> namespace, String key, Map<String, Object> value, long version) {
             return false;
         }
 
