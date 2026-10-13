@@ -27,7 +27,9 @@ import java.io.InputStream;
  * unset; the harness never assumes a store exists.
  *
  * <p>This SPI is blocking by design: a product runs it on a bounded-elastic scheduler rather than on
- * a Reactor event-loop thread. Implementations must be safe to call from such a worker.
+ * a Reactor event-loop thread. Implementations must be thread-safe: the same store is shared across
+ * concurrent requests, so the idempotency check and the publish of a new reference must be atomic
+ * (a naive read-then-write on unsynchronized maps is not a valid implementation).
  *
  * <p>Contract:
  *
@@ -40,14 +42,21 @@ import java.io.InputStream;
  *   <li>failures surface as an {@link AttachmentStoreException} with a coarse {@link
  *       AttachmentStoreCategory}; raw exception messages, storage paths, signed URLs and access
  *       tokens must not appear in the detail or any log;
- *   <li>{@link #open} returns a stream bounded by the store's size limit and never buffers a blob
- *       that exceeds it.
+ *   <li>{@link #open} returns a stream bounded by the store's size limit; a blob that exceeds the
+ *       limit fails with {@code TOO_LARGE} rather than being truncated, and the caller owns closing
+ *       the returned stream;
+ *   <li>the contract also covers the returned stream: {@code read}/{@code skip}/{@code close} errors
+ *       must be sanitized and classified the same way, and a stream must never silently truncate
+ *       over-limit content into a successful short read.
  * </ul>
  */
 public interface AttachmentStore {
 
     /**
      * Registers a blob under the caller's scope and returns its stable opaque reference id.
+     *
+     * <p>The declared size is verified against the content without buffering more than the declared
+     * bytes; a mismatch is a {@code FAILED} error that must not consume the idempotency key.
      *
      * @return the reference id to embed in an {@link AttachmentReference}
      * @throws AttachmentStoreException with {@link AttachmentStoreCategory#CONFLICT} when the

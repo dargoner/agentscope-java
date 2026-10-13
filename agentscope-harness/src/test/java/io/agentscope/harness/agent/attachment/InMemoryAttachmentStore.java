@@ -18,7 +18,6 @@ package io.agentscope.harness.agent.attachment;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UncheckedIOException;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -28,20 +27,24 @@ import java.util.Objects;
  * In-memory {@link AttachmentStore} reference implementation used by the contract test.
  *
  * <p>It is intentionally small and fully scope-enforced: a reference is keyed globally by id but
- * visible only within the {@link AttachmentStoreScope} that registered it. It verifies the declared
- * size against the blob and enforces a configurable read limit on {@link #open}.
+ * visible only within the {@link AttachmentStoreScope} that registered it. All operations are
+ * synchronized so concurrent callers share one atomic idempotency guarantee, and it verifies the
+ * declared size while reading (never buffering more than the declared bytes) and enforces a
+ * configurable read limit on {@link #open}.
  */
 final class InMemoryAttachmentStore implements AttachmentStore {
 
-    private record Entry(
-            AttachmentStoreScope scope,
-            String idempotencyKey,
-            AttachmentMetadata metadata,
-            byte[] content) {}
+    private record Entry(AttachmentStoreScope scope, AttachmentMetadata metadata, byte[] content) {}
+
+    private record RegistrationKey(String userId, String sessionId, String idempotencyKey) {
+        static RegistrationKey of(AttachmentStoreScope scope, String idempotencyKey) {
+            return new RegistrationKey(scope.userId(), scope.sessionId(), idempotencyKey);
+        }
+    }
 
     private final long maxBytes;
     private final Map<String, Entry> byReferenceId = new HashMap<>();
-    private final Map<String, String> referenceByKey = new HashMap<>();
+    private final Map<RegistrationKey, String> referenceByKey = new HashMap<>();
     private int sequence;
 
     InMemoryAttachmentStore() {
@@ -53,14 +56,11 @@ final class InMemoryAttachmentStore implements AttachmentStore {
     }
 
     @Override
-    public String register(AttachmentStoreScope scope, AttachmentRegistration registration) {
+    public synchronized String register(
+            AttachmentStoreScope scope, AttachmentRegistration registration) {
         Objects.requireNonNull(scope, "scope");
-        byte[] content = readAll(registration.content());
-        if (content.length != registration.size()) {
-            throw new AttachmentStoreException(
-                    AttachmentStoreCategory.FAILED, "declared size does not match content");
-        }
-        String key = key(scope, registration.idempotencyKey());
+        byte[] content = readDeclaredSize(registration.content(), registration.size());
+        RegistrationKey key = RegistrationKey.of(scope, registration.idempotencyKey());
         String existingId = referenceByKey.get(key);
         if (existingId != null) {
             AttachmentMetadata existing = byReferenceId.get(existingId).metadata();
@@ -77,19 +77,18 @@ final class InMemoryAttachmentStore implements AttachmentStore {
                         registration.sha256(),
                         registration.size(),
                         Instant.now());
-        byReferenceId.put(
-                referenceId, new Entry(scope, registration.idempotencyKey(), metadata, content));
+        byReferenceId.put(referenceId, new Entry(scope, metadata, content));
         referenceByKey.put(key, referenceId);
         return referenceId;
     }
 
     @Override
-    public AttachmentMetadata resolve(AttachmentStoreScope scope, String referenceId) {
+    public synchronized AttachmentMetadata resolve(AttachmentStoreScope scope, String referenceId) {
         return visibleEntry(scope, referenceId).metadata();
     }
 
     @Override
-    public InputStream open(AttachmentStoreScope scope, String referenceId) {
+    public synchronized InputStream open(AttachmentStoreScope scope, String referenceId) {
         Entry entry = visibleEntry(scope, referenceId);
         if (entry.content().length > maxBytes) {
             throw new AttachmentStoreException(
@@ -118,15 +117,30 @@ final class InMemoryAttachmentStore implements AttachmentStore {
                 && existing.size() == registration.size();
     }
 
-    private static String key(AttachmentStoreScope scope, String idempotencyKey) {
-        return scope.userId() + "\u0000" + scope.sessionId() + "\u0000" + idempotencyKey;
-    }
-
-    private static byte[] readAll(InputStream in) {
-        try {
-            return in.readAllBytes();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+    private static byte[] readDeclaredSize(InputStream in, long declaredSize) {
+        // Read at most declaredSize + 1 bytes so an oversized or unbounded stream is rejected
+        // without buffering it in full, and never surface raw exception details.
+        if (declaredSize < 0 || declaredSize > Integer.MAX_VALUE) {
+            throw new AttachmentStoreException(
+                    AttachmentStoreCategory.TOO_LARGE, "declared size out of range");
         }
+        int limit = (int) declaredSize;
+        byte[] buffer = new byte[limit];
+        int read = 0;
+        try {
+            while (read < limit) {
+                int n = in.read(buffer, read, limit - read);
+                if (n < 0) break;
+                read += n;
+            }
+            if (read < limit || in.read() >= 0) {
+                throw new AttachmentStoreException(
+                        AttachmentStoreCategory.FAILED, "declared size does not match content");
+            }
+        } catch (IOException e) {
+            throw new AttachmentStoreException(
+                    AttachmentStoreCategory.FAILED, "content read failed");
+        }
+        return buffer;
     }
 }

@@ -17,19 +17,31 @@ package io.agentscope.harness.agent.attachment;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 /**
  * Pins the contract any {@link AttachmentStore} must satisfy, exercised against the in-memory
  * reference implementation: scope isolation, idempotent registration, conflict on key reuse,
- * structured not-found/forbidden/too-large errors and a byte round-trip.
+ * structured not-found/forbidden/too-large errors and a byte round-trip. Scenarios are chosen so an
+ * implementation that only checks one scope axis, only compares one metadata field, or ignores
+ * concurrency cannot pass coincidentally.
  */
 class AttachmentStoreContractTest {
 
@@ -70,16 +82,17 @@ class AttachmentStoreContractTest {
     @Test
     void registerConflictsWhenKeyReusedWithDifferentMetadata() {
         AttachmentStoreScope scope = scope("user-1", "session-1");
-        store.register(scope, registration("key-1", "image/png", "a.png", 3));
+        String original = store.register(scope, registration("key-1", "image/png", "a.png", 3));
 
-        AttachmentStoreException failure =
-                assertThrows(
-                        AttachmentStoreException.class,
-                        () ->
-                                store.register(
-                                        scope, registration("key-1", "image/png", "other.png", 3)));
+        assertConflict(scope, "key-1", "image/png", "other.png", 3);
+        assertConflict(scope, "key-1", "image/jpeg", "a.png", 3);
+        assertConflict(scope, "key-1", "image/png", "a.png", 4);
+        assertConflictDifferentSha(scope, "key-1");
 
-        assertEquals(AttachmentStoreCategory.CONFLICT, failure.category());
+        AttachmentMetadata after = store.resolve(scope, original);
+        assertEquals("a.png", after.name(), "a rejected conflict must not modify the original");
+        assertEquals("image/png", after.mediaType());
+        assertEquals(3, after.size());
     }
 
     @Test
@@ -98,21 +111,7 @@ class AttachmentStoreContractTest {
         String referenceId = store.register(owner, registration("key-1", "image/png", "a.png", 3));
         AttachmentStoreScope intruder = scope("agent", "intruder-session");
 
-        AttachmentStoreException onResolve =
-                assertThrows(
-                        AttachmentStoreException.class, () -> store.resolve(intruder, referenceId));
-        assertTrue(
-                Set.of(AttachmentStoreCategory.FORBIDDEN, AttachmentStoreCategory.NOT_FOUND)
-                        .contains(onResolve.category()),
-                "cross-scope resolve must not yield metadata");
-
-        AttachmentStoreException onOpen =
-                assertThrows(
-                        AttachmentStoreException.class, () -> store.open(intruder, referenceId));
-        assertTrue(
-                Set.of(AttachmentStoreCategory.FORBIDDEN, AttachmentStoreCategory.NOT_FOUND)
-                        .contains(onOpen.category()),
-                "cross-scope open must not yield content");
+        assertOutOfScope(store, intruder, referenceId);
     }
 
     @Test
@@ -120,9 +119,106 @@ class AttachmentStoreContractTest {
         AttachmentStoreScope owner = scope("user-1", "session-a");
         String referenceId = store.register(owner, registration("key-1", "image/png", "a.png", 3));
 
-        assertThrows(
-                AttachmentStoreException.class,
-                () -> store.open(scope("user-1", "session-b"), referenceId));
+        assertOutOfScope(store, scope("user-1", "session-b"), referenceId);
+    }
+
+    @Test
+    void differentUserSameSessionCannotReadTheAttachment() {
+        AttachmentStoreScope owner = scope("user-1", "session-1");
+        String referenceId = store.register(owner, registration("key-1", "image/png", "a.png", 3));
+
+        assertOutOfScope(store, scope("user-2", "session-1"), referenceId);
+    }
+
+    @Test
+    void delimiterCharactersInScopeDoNotCollide() {
+        // userId "a\0b" + session "c" and userId "a" + session "b\0c" must stay distinct scopes.
+        AttachmentStoreScope left = scope("a\u0000b", "c");
+        AttachmentStoreScope right = scope("a", "b\u0000c");
+
+        String leftId = store.register(left, registration("key-1", "image/png", "a.png", 3));
+        String rightId = store.register(right, registration("key-1", "image/png", "a.png", 3));
+
+        assertNotEquals(leftId, rightId, "scopes with different field boundaries must not collide");
+        assertEquals(leftId, store.resolve(left, leftId).referenceId());
+        assertEquals(rightId, store.resolve(right, rightId).referenceId());
+    }
+
+    @Test
+    void concurrentSameKeyRegistrationIsIdempotent() throws Exception {
+        AttachmentStoreScope scope = scope("user-1", "session-1");
+        int threads = 16;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+            List<Future<String>> results = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                results.add(
+                        pool.submit(
+                                () -> {
+                                    start.await();
+                                    return store.register(
+                                            scope, registration("key-1", "image/png", "a.png", 3));
+                                }));
+            }
+            start.countDown();
+            Set<String> ids = new java.util.HashSet<>();
+            for (Future<String> result : results) {
+                ids.add(result.get(10, TimeUnit.SECONDS));
+            }
+            assertEquals(1, ids.size(), "concurrent same-key registration must yield one id");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentConflictingRegistrationLeavesOneConsistentWinner() throws Exception {
+        AttachmentStoreScope scope = scope("user-1", "session-1");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            CountDownLatch start = new CountDownLatch(1);
+            Future<String> a =
+                    pool.submit(
+                            () -> {
+                                start.await();
+                                return store.register(
+                                        scope, registration("key-1", "image/png", "a.png", 3));
+                            });
+            Future<String> b =
+                    pool.submit(
+                            () -> {
+                                start.await();
+                                return store.register(
+                                        scope, registration("key-1", "image/png", "b.png", 3));
+                            });
+            start.countDown();
+
+            List<Object> outcomes = new ArrayList<>();
+            for (Future<String> f : List.of(a, b)) {
+                try {
+                    outcomes.add(f.get(10, TimeUnit.SECONDS));
+                } catch (java.util.concurrent.ExecutionException e) {
+                    outcomes.add(e.getCause());
+                }
+            }
+            long conflictCount =
+                    outcomes.stream()
+                            .filter(
+                                    o ->
+                                            o instanceof AttachmentStoreException ex
+                                                    && ex.category()
+                                                            == AttachmentStoreCategory.CONFLICT)
+                            .count();
+            long idCount = outcomes.stream().filter(o -> o instanceof String).count();
+            assertEquals(
+                    2,
+                    conflictCount + idCount,
+                    "each racer must either win the id or see CONFLICT, never another error");
+            assertTrue(idCount >= 1, "at least one racer must succeed");
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
@@ -140,16 +236,99 @@ class AttachmentStoreContractTest {
     }
 
     @Test
-    void registerRejectsDeclaredSizeMismatch() {
+    void registerRejectsContentLargerThanDeclared() {
         AttachmentStoreScope scope = scope("user-1", "session-1");
-        AttachmentRegistration mismatch =
+        AttachmentRegistration oversized =
+                new AttachmentRegistration(
+                        "key-1", "image/png", "a.png", "sha", 3, content("abcdef"));
+
+        AttachmentStoreException failure =
+                assertThrows(
+                        AttachmentStoreException.class, () -> store.register(scope, oversized));
+
+        assertEquals(AttachmentStoreCategory.FAILED, failure.category());
+    }
+
+    @Test
+    void registerRejectsContentShorterThanDeclaredWithoutConsumingTheKey() {
+        AttachmentStoreScope scope = scope("user-1", "session-1");
+        AttachmentRegistration shortContent =
                 new AttachmentRegistration(
                         "key-1", "image/png", "a.png", "sha", 99, content("abc"));
 
         AttachmentStoreException failure =
-                assertThrows(AttachmentStoreException.class, () -> store.register(scope, mismatch));
+                assertThrows(
+                        AttachmentStoreException.class, () -> store.register(scope, shortContent));
+        assertEquals(AttachmentStoreCategory.FAILED, failure.category());
 
-        assertNotEquals(AttachmentStoreCategory.CONFLICT, failure.category());
+        String referenceId = store.register(scope, registration("key-1", "image/png", "a.png", 3));
+        assertEquals("a.png", store.resolve(scope, referenceId).name());
+    }
+
+    @Test
+    void registerSanitizesContentReadFailure() {
+        AttachmentStoreScope scope = scope("user-1", "session-1");
+        String sensitive = "https://store.example.com/blob?token=s3cr3t";
+        InputStream failing =
+                new InputStream() {
+                    @Override
+                    public int read() throws IOException {
+                        throw new IOException(sensitive);
+                    }
+
+                    @Override
+                    public int read(byte[] b, int off, int len) throws IOException {
+                        throw new IOException(sensitive);
+                    }
+                };
+        AttachmentRegistration registration =
+                new AttachmentRegistration("key-1", "image/png", "a.png", "sha", 3, failing);
+
+        AttachmentStoreException failure =
+                assertThrows(
+                        AttachmentStoreException.class, () -> store.register(scope, registration));
+
+        assertEquals(AttachmentStoreCategory.FAILED, failure.category());
+        assertFalse(
+                String.valueOf(failure.getMessage()).contains("s3cr3t"),
+                "raw content-read failure details must not leak");
+    }
+
+    private void assertConflict(
+            AttachmentStoreScope scope, String key, String mediaType, String name, int size) {
+        AttachmentStoreException failure =
+                assertThrows(
+                        AttachmentStoreException.class,
+                        () -> store.register(scope, registration(key, mediaType, name, size)));
+        assertEquals(AttachmentStoreCategory.CONFLICT, failure.category());
+    }
+
+    private void assertConflictDifferentSha(AttachmentStoreScope scope, String key) {
+        AttachmentRegistration other =
+                new AttachmentRegistration(
+                        key, "image/png", "a.png", "different-sha", 3, content("abc"));
+        AttachmentStoreException failure =
+                assertThrows(AttachmentStoreException.class, () -> store.register(scope, other));
+        assertEquals(AttachmentStoreCategory.CONFLICT, failure.category());
+    }
+
+    private static void assertOutOfScope(
+            InMemoryAttachmentStore store, AttachmentStoreScope intruder, String referenceId) {
+        AttachmentStoreException onResolve =
+                assertThrows(
+                        AttachmentStoreException.class, () -> store.resolve(intruder, referenceId));
+        assertTrue(
+                Set.of(AttachmentStoreCategory.FORBIDDEN, AttachmentStoreCategory.NOT_FOUND)
+                        .contains(onResolve.category()),
+                "cross-scope resolve must not yield metadata");
+
+        AttachmentStoreException onOpen =
+                assertThrows(
+                        AttachmentStoreException.class, () -> store.open(intruder, referenceId));
+        assertTrue(
+                Set.of(AttachmentStoreCategory.FORBIDDEN, AttachmentStoreCategory.NOT_FOUND)
+                        .contains(onOpen.category()),
+                "cross-scope open must not yield content");
     }
 
     private byte[] readAll(String referenceId, AttachmentStoreScope scope) {
@@ -163,7 +342,12 @@ class AttachmentStoreContractTest {
     private static AttachmentRegistration registration(
             String idempotencyKey, String mediaType, String name, int size) {
         return new AttachmentRegistration(
-                idempotencyKey, mediaType, name, "sha-" + idempotencyKey, size, content("abc"));
+                idempotencyKey,
+                mediaType,
+                name,
+                "sha-" + idempotencyKey,
+                size,
+                content("abcdefghijklmnopqrstuvwxyz".substring(0, size)));
     }
 
     private static ByteArrayInputStream content(String text) {
