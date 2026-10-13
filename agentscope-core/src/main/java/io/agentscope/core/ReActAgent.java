@@ -5141,6 +5141,11 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
             public int getContextWindowSize() {
                 return activeModel.get().getContextWindowSize();
             }
+
+            @Override
+            public GenerateOptions getDefaultOptions() {
+                return activeModel.get().getDefaultOptions();
+            }
         };
     }
 
