@@ -285,6 +285,29 @@ class AttachmentRequestCompilerTest {
     }
 
     @Test
+    void synchronousResolverThrowFallsBackToUnavailableMarker() {
+        AttachmentReference reference = reference("att_8", "image/png", 0);
+        ModelCallInput input = input(placeholder(reference, "att_8"));
+        AttachmentResolver resolver =
+                (r, c) -> {
+                    throw new IllegalStateException("store unavailable");
+                };
+
+        ModelCallInput compiled =
+                new AttachmentRequestCompiler(resolver).compile(input, context("s1")).block();
+
+        List<ContentBlock> content = compiled.messages().get(0).getContent();
+        assertTrue(
+                content.stream()
+                        .anyMatch(
+                                block ->
+                                        block instanceof TextBlock text
+                                                && text.getText().contains("unavailable: FAILED")),
+                "a resolver that throws before returning its Mono must degrade to an unavailable"
+                        + " marker instead of failing the whole request");
+    }
+
+    @Test
     void multipleReferencesReplaceTheirOwnOrdinals() {
         AttachmentReference first = reference("att_a", "image/png", 1);
         AttachmentReference second = reference("att_b", "image/png", 2);

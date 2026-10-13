@@ -510,6 +510,50 @@ class ConversationCompactorTest {
         assertFalse(toolOutput(result.get(0)).contains("chars pruned"));
     }
 
+    /**
+     * A message carrying one prunable result and one far larger excluded result must not borrow the
+     * excluded result's tokens to cross the minimum-prune threshold.
+     */
+    @Test
+    void pruneBudgetIgnoresUnselectedBlocksInTheSameMessage() {
+        ConversationCompactor compactor =
+                new ConversationCompactor(new RecordingModel(), mock(MemoryFlushManager.class));
+        ToolResultBlock candidate =
+                toolResult(
+                        "call:a",
+                        "tool_candidate",
+                        List.of(TextBlock.builder().text("x".repeat(400)).build()),
+                        Map.of(),
+                        ToolResultState.SUCCESS,
+                        null);
+        ToolResultBlock excluded =
+                toolResult(
+                        "call:big",
+                        "tool_big",
+                        List.of(TextBlock.builder().text("y".repeat(50_000)).build()),
+                        Map.of(),
+                        ToolResultState.SUCCESS,
+                        null);
+        Msg message =
+                Msg.builderForRole(MsgRole.TOOL)
+                        .id("msg-mixed")
+                        .content(candidate, excluded)
+                        .build();
+        PruneConfig pruneConfig =
+                PruneConfig.builder()
+                        .protectTokens(0)
+                        .minimumTokens(1_000)
+                        .maxOutputChars(10)
+                        .excludedTools(Set.of("tool_big"))
+                        .build();
+
+        List<Msg> result = compactor.pruneToolResults(List.of(message), pruneConfig);
+
+        // Only the ~candidate tokens count, well under the 1_000 threshold, so nothing is pruned.
+        assertSame(message, result.get(0));
+        assertFalse(toolOutput(result.get(0)).contains("chars pruned"));
+    }
+
     /** Creates a regular user message. */
     private static Msg message(String text) {
         return Msg.builder()

@@ -120,10 +120,12 @@ public final class AttachmentRequestCompiler {
     }
 
     // Only completed results are cached: the raw resolver subscription stays uncached so cancelling
-    // the request propagates to the resolver instead of being absorbed by a sharing operator.
+    // the request propagates to the resolver instead of being absorbed by a sharing operator. The
+    // resolver call sits inside Mono.defer so a resolver that throws synchronously before returning
+    // its Mono is still routed to the FAILED fallback below instead of failing the whole request.
     private Mono<ResolvedAttachment> resolve(
             AttachmentReference reference, AttachmentResolveContext context) {
-        return resolver.resolve(reference, context)
+        return Mono.defer(() -> resolver.resolve(reference, context))
                 .switchIfEmpty(
                         Mono.just(
                                 new ResolvedAttachment.Unavailable(
