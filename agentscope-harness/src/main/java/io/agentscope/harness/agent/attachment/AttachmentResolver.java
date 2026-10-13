@@ -28,7 +28,7 @@ import reactor.core.publisher.Mono;
  * <p>Contract:
  *
  * <ul>
- *   <li>the same {@link AttachmentResolveContext#fingerprint} must resolve idempotently;
+ *   <li>the same {@link AttachmentResolveContext} must resolve idempotently;
  *   <li>reactor cancellation must propagate (do not swallow {@code CancellationException});
  *   <li>access tokens, internal URLs and raw exception messages must not appear in returned
  *       values or logs;
