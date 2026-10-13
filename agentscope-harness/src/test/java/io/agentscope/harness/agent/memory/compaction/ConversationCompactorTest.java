@@ -17,6 +17,7 @@ package io.agentscope.harness.agent.memory.compaction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -24,10 +25,15 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.core.message.Base64Source;
+import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ToolExecutionDetails;
 import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
@@ -36,8 +42,10 @@ import io.agentscope.core.session.InMemorySessionLogStore;
 import io.agentscope.core.session.SessionKey;
 import io.agentscope.core.session.SessionRecorder;
 import io.agentscope.harness.agent.memory.MemoryFlushManager;
+import io.agentscope.harness.agent.memory.compaction.CompactionConfig.PruneConfig;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
@@ -321,6 +329,96 @@ class ConversationCompactorTest {
         }
     }
 
+    /** Verifies media in the compaction prefix is rendered as a safe placeholder. */
+    @Test
+    void compactIfNeeded_summaryPromptContainsMediaPlaceholderWithoutRawData() {
+        Fixture fixture = new Fixture(false);
+        String imageData =
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+        List<Msg> compacted =
+                fixture.compact(
+                        List.of(
+                                message("M1"),
+                                messageWithImage("look at this", imageData),
+                                message("TAIL_1"),
+                                message("TAIL_2")));
+
+        String prompt = fixture.model.prompt(0);
+        assertTrue(prompt.contains("[attachment"));
+        assertTrue(prompt.contains("kind=image"));
+        assertTrue(prompt.contains("type=image/png"));
+        assertFalse(prompt.contains(imageData));
+        assertEquals(3, compacted.size());
+        assertEquals(List.of("TAIL_1", "TAIL_2"), texts(compacted.subList(1, compacted.size())));
+    }
+
+    /**
+     * Verifies that tool-result pruning preserves metadata, state and execution details, and skips
+     * blocks that contain unregistered media instead of replacing them with a text-only preview.
+     */
+    @Test
+    void pruneToolResults_preservesMetadataStateAndExecutionDetailsAndSkipsMediaBlocks() {
+        ConversationCompactor compactor =
+                new ConversationCompactor(new RecordingModel(), mock(MemoryFlushManager.class));
+        PruneConfig pruneConfig =
+                PruneConfig.builder()
+                        .protectTokens(0)
+                        .minimumTokens(0)
+                        .maxOutputChars(10)
+                        .excludedTools(Set.of())
+                        .build();
+        ToolExecutionDetails details =
+                new ToolExecutionDetails("bash", ToolExecutionDetails.Outcome.FAILED, 1, false);
+        Msg textOnly =
+                toolMessage(
+                        toolResult(
+                                "call:1",
+                                "tool_a",
+                                List.of(TextBlock.builder().text("0123456789abcdefghij").build()),
+                                Map.of("source", "test", "key", "value"),
+                                ToolResultState.ERROR,
+                                details));
+        Msg withMedia =
+                toolMessage(
+                        toolResult(
+                                "call:2",
+                                "tool_b",
+                                List.of(
+                                        TextBlock.builder().text("0123456789abcdefghij").build(),
+                                        ImageBlock.builder()
+                                                .source(
+                                                        Base64Source.builder()
+                                                                .mediaType("image/png")
+                                                                .data("iVBORw0KGgo=")
+                                                                .build())
+                                                .build()),
+                                Map.of("source", "media-test"),
+                                ToolResultState.SUCCESS,
+                                null));
+        List<Msg> input = List.of(textOnly, withMedia);
+
+        List<Msg> pruned = compactor.pruneToolResults(input, pruneConfig);
+
+        assertEquals(2, pruned.size());
+        assertEquals("msg-call:1", pruned.get(0).getId());
+
+        ToolResultBlock prunedBlock = pruned.get(0).getContentBlocks(ToolResultBlock.class).get(0);
+        assertTrue(toolOutput(pruned.get(0)).contains("chars pruned"));
+        assertEquals("test", prunedBlock.getMetadata().get("source"));
+        assertEquals("value", prunedBlock.getMetadata().get("key"));
+        assertEquals(ToolResultState.ERROR, prunedBlock.getState());
+        assertSame(details, prunedBlock.getExecutionDetails());
+
+        ToolResultBlock unchangedBlock =
+                pruned.get(1).getContentBlocks(ToolResultBlock.class).get(0);
+        assertEquals(2, unchangedBlock.getOutput().size());
+        assertEquals("0123456789abcdefghij", toolOutput(pruned.get(1)));
+        assertEquals(ToolResultState.SUCCESS, unchangedBlock.getState());
+        assertTrue(
+                unchangedBlock.getOutput().stream().anyMatch(block -> block instanceof ImageBlock));
+    }
+
     /** Creates a regular user message. */
     private static Msg message(String text) {
         return Msg.builder()
@@ -378,6 +476,59 @@ class ConversationCompactorTest {
     /** Returns message texts for concise routing assertions. */
     private static List<String> texts(List<Msg> messages) {
         return messages.stream().map(ConversationCompactorTest::text).toList();
+    }
+
+    /** Creates a user message containing text and a base64 image. */
+    private static Msg messageWithImage(String text, String imageData) {
+        return Msg.builder()
+                .id("msg-with-image")
+                .role(MsgRole.USER)
+                .content(
+                        List.of(
+                                TextBlock.builder().text(text).build(),
+                                ImageBlock.builder()
+                                        .source(
+                                                Base64Source.builder()
+                                                        .mediaType("image/png")
+                                                        .data(imageData)
+                                                        .build())
+                                        .build()))
+                .build();
+    }
+
+    /** Creates a TOOL message wrapping the given result. */
+    private static Msg toolMessage(ToolResultBlock result) {
+        return Msg.builderForRole(MsgRole.TOOL).id("msg-" + result.getId()).content(result).build();
+    }
+
+    /** Builds a {@link ToolResultBlock} with full metadata for preservation checks. */
+    private static ToolResultBlock toolResult(
+            String id,
+            String name,
+            List<ContentBlock> output,
+            Map<String, Object> metadata,
+            ToolResultState state,
+            ToolExecutionDetails details) {
+        return ToolResultBlock.builder()
+                .id(id)
+                .name(name)
+                .output(output)
+                .metadata(metadata)
+                .state(state)
+                .executionDetails(details)
+                .build();
+    }
+
+    /** Concatenates text output from a tool result message. */
+    private static String toolOutput(Msg message) {
+        ToolResultBlock result = message.getContentBlocks(ToolResultBlock.class).get(0);
+        StringBuilder output = new StringBuilder();
+        for (ContentBlock block : result.getOutput()) {
+            if (block instanceof TextBlock text && text.getText() != null) {
+                output.append(text.getText());
+            }
+        }
+        return output.toString();
     }
 
     /** Holds isolated compactor dependencies and invocation records for each test. */
