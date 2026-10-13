@@ -150,6 +150,36 @@ builder.contextSource("related-notes", request -> Mono.just(List.of(
 
 </Accordion>
 
+<span id="附件与多模态内容" />
+
+### 附件如何进入本轮请求
+
+用户上传图片或文件时，消息可以先只保存占位文本，附件以引用形式记录在消息元数据 `agentscope.attachments` 中。准备模型请求时，Harness 通过 `AttachmentResolver` 编译这些引用，把能取到的内容展开为模型可见的媒体块：
+
+```java
+import io.agentscope.harness.agent.attachment.AttachmentResolver;
+
+builder.attachmentResolver(resolver);   // 应用提供的解析实现
+```
+
+**默认不配置解析器：引用不会被展开，模型只看到占位文本。** 解析器属于产品侧职责：需要按用户和会话校验访问权限，并自行决定从哪里读取内容。SDK 只规定编译结果的形态：
+
+| 解析结果 | 请求中的表现 |
+| --- | --- |
+| 成功 | 展开为媒体块（图片、音频等），供模型直接读取 |
+| 失败 | 占位文本被替换为 `[attachment unavailable: <类别>]` 标记 |
+
+失败类别包括 `NOT_FOUND`、`FORBIDDEN`、`TIMEOUT`、`TOO_LARGE`、`UNSUPPORTED`、`MIME_MISMATCH`、`CANCELLED`、`FAILED`，模型可以据此告诉你文件不存在、无权访问还是超出限制。
+
+编译结果只存在于**本轮请求视图**：工作历史始终保留原始引用，解析出的内容不会写回历史。因此下一轮会重新解析——一次失败不会固化为消息内容，临时故障恢复后同一引用即可正常展开。
+
+当前边界：
+
+- **媒体不参与摘要**：带媒体或附件引用的消息不会被摘要删除，摘要输入中只出现占位符（见下文压缩一节）。
+- **附件对象不会自动回收**：引用按记录保存，SDK 不提供 TTL 或自动清理，保留策略由产品侧决定。
+- **不提供 URL 能力**：编译结果只包含内联内容，不支持让模型通过 URL 自行抓取媒体，避免把网络访问引入模型路径。native file ID、PDF／Office 页面转换等属于解析器或 provider 的独立策略，不在当前通用接口范围内。
+- **托管服务（AgentScope Service）** 内置一个受限解析器：按会话隔离读取、带超时限制、以内联 Base64 返回；同样不提供 URL 或传输恢复能力。
+
 <span id="可选任务信息" />
 
 ## 工具执行之后：持续跟进长程任务
@@ -245,7 +275,11 @@ builder.compaction(CompactionConfig.builder()
         .build());
 ```
 
-`keepMessages` 仅在 `keepTokens(0)` 时生效。压缩还会维护工具调用与结果的配对，保留范围不能把一次工具交互随意切开。摘要默认使用 Agent 主模型，也可以通过 `CompactionConfig.builder().model(summaryModel)` 指定辅助模型；自定义 `summaryPrompt` 时需保留 `{messages}` 占位符。
+`keepMessages` 仅在 `keepTokens(0)` 时生效。压缩还会维护工具调用与结果的配对，保留范围不能把一次工具交互随意切开。
+
+摘要也不会删除携带原始媒体（图片、音频、视频、数据块）或附件引用的消息：安全切点必须落在这些消息之前，必要时本次压缩退化为不走模型的轻量裁剪，媒体和引用不会为了满足预算而被牺牲。交给摘要模型的内容里，媒体以占位符形式出现，不会重复传输原始数据。
+
+摘要默认使用 Agent 主模型，也可以通过 `CompactionConfig.builder().model(summaryModel)` 指定辅助模型；自定义 `summaryPrompt` 时需保留 `{messages}` 占位符。
 
 <span id="4-预压缩参数截断-可选" />
 
@@ -276,7 +310,9 @@ builder.compaction(CompactionConfig.builder()
 
 发送前，Harness 会检查最终预算以及工具调用与结果的配对。检查通过、准备期间状态也没有发生冲突，才会采用压缩后的工作历史并发出请求。如果 System、必需材料或其他内容仍然放不下，会抛出 `ContextBudgetExceededException`，此时需要缩小材料、工具定义或调整预算。
 
-估算通过后，供应商仍可能报告上下文溢出。压缩未禁用时，默认原生 Session Log 模式会尝试强制压缩，并在**同一次执行中重新发起这一轮推理一次**；它不会因此重新提交用户任务，也不会把之前已经完成的工具从头再执行。如果无法进一步压缩或重试仍失败，错误会返回给调用方。
+估算通过后，供应商仍可能报告上下文溢出。压缩未禁用时，默认原生 Session Log 模式会从最新已提交历史出发做一次**紧急压缩**，并在**同一次执行中重新发起这一轮推理一次**；它不会因此重新提交用户任务，也不会把之前已经完成的工具从头再执行。
+
+紧急压缩产出的只是一次重试用的请求视图：候选结果还要再次经过常规请求准备（预算与工具配对校验，且期间状态没有变化）才会提交到工作历史，恢复步骤本身不直接改写持久历史。因此重试被取消或最终失败时，工作历史保持原样，不会留下半压缩状态。如果无法进一步压缩或重试仍失败，错误会返回给调用方；**首次溢出会作为主因保留**（附加在重试错误的原因链上），便于区分“窗口本来就不够”和“重试过程中的新问题”，取消信号不会被改写成这种错误链。紧急压缩同样遵守配对与媒体保护：如果因此腾不出空间，重试不会进行，原始溢出错误直接返回。
 
 <span id="什么时候刷新" />
 
@@ -386,6 +422,8 @@ try (HarnessAgent agent = builder.build()) {
 ```
 
 `context_build` 在上下文准备成功或失败时都会发出，先于实际模型请求。上面的类型判断适用于 SDK 进程内的实时事件；事件经过 JSON 存储或传输后，应按 JSON 对象读取 `context_manifest`。
+
+压缩发生时，同一流还会发出 `context_compaction_started` 与 `context_compaction_finished` 两个自定义事件，用于观测一次压缩的生命周期。载荷与持久化的 `compaction/start`、`compaction/end` 记录共用同一套统计字段（`compactionId`、状态与终态计数），并额外携带 `mode`：常规压缩为 `NORMAL`，溢出兜底触发的紧急压缩为 `EMERGENCY`；载荷不含消息、媒体、URL 或原始异常文本。事件只在压缩真正触发时发出，且仅在 `streamEvents()` 路径上送达——`call()` 没有事件通道，压缩仍会执行。取消或失败同样会有终态事件；取消发生在流已关闭之后属于尽力而为，不保证送达。
 
 默认原生 Session Log 会把它保存为 `context/build`。通过 `SessionEvent.data()` 解码记录载荷后，清单位于其中的 `event.value.context_manifest`。需要事后排查某个会话时，通过 `session.log()` 或 `agent.sessionLog(ctx)` 读取记录，并结合日志中的会话、turn 和 run 信息定位，具体见[会话操作、事件与恢复](/v2/zh/docs/harness/session-log)。Manifest 只保存元数据，不能用来重放完整提示词或恢复会话；来源 ID 也可能包含文件名，导出诊断记录时应按业务需要控制访问范围。
 

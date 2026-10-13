@@ -94,6 +94,36 @@ Sources must be read-only. Run tests and change business records through tools o
 
 `ContextRequest` supplies `agentId`, `userId`, `sessionId`, `callId`, and `purpose`; it does not expose mutable `AgentState`. These identities may be absent and do not establish authorization. Source instances may be shared across sessions and copied Agents, so keep them thread-safe and avoid storing a current user or session in instance fields. Free-form `RuntimeContext` attributes are not automatically exposed to the model; explicitly select the data it needs.
 
+<span id="attachments-and-multimodal-content" />
+
+### How attachments enter a request
+
+When a user uploads an image or file, the message can carry only placeholder text while the attachment is recorded as a reference in message metadata under `agentscope.attachments`. During request preparation, Harness compiles these references through an `AttachmentResolver` and expands what it can fetch into media blocks the model can read:
+
+```java
+import io.agentscope.harness.agent.attachment.AttachmentResolver;
+
+agentBuilder.attachmentResolver(resolver); // Application-provided implementation
+```
+
+**No resolver is configured by default: references stay unexpanded and the model sees only the placeholder text.** The resolver is product-owned: it must authorize access per user and session and decide where content comes from. The SDK only defines the shape of the compiled result:
+
+| Resolution outcome | In the request |
+| --- | --- |
+| Resolved | Expanded into media block(s) (image, audio, and so on) the model reads directly |
+| Unavailable | Placeholder text replaced by an `[attachment unavailable: <category>]` marker |
+
+Categories include `NOT_FOUND`, `FORBIDDEN`, `TIMEOUT`, `TOO_LARGE`, `UNSUPPORTED`, `MIME_MISMATCH`, `CANCELLED`, and `FAILED`, so the model can tell the user whether the file is missing, unauthorized, or over a limit.
+
+The compiled result exists only in the **request view for that call**: working history always keeps the original reference, and resolved content is never written back into history. The next request re-resolves, so a transient failure is not frozen into the conversation and the same reference expands again once the cause clears.
+
+Current boundaries:
+
+- **Media is not summarized**: messages carrying media or attachment references are never removed by summarization; summary input contains placeholders only (see the compaction section below).
+- **No automatic reclamation**: references are recorded; the SDK provides no TTL or garbage collection, so retention is an application decision.
+- **No URL capability**: compilation returns inline content only; the model cannot fetch media through URLs, keeping network access out of the model path. Native file IDs, PDF/Office page conversion, and provider transport recovery are independent resolver or provider strategies outside this generic interface.
+- **The managed AgentScope Service** ships a restricted resolver: session-scoped reads, a timeout, and inline Base64 results; it likewise provides no URL or transport-recovery path.
+
 <span id="what-the-model-receives" />
 <span id="example-request-fragments" />
 
@@ -220,6 +250,8 @@ agentBuilder.compaction(CompactionConfig.builder()
 
 The standard summary records session intent, decisions, artifacts, and next steps. The working conversation becomes the summary plus recent messages; exact tail boundaries can expand to keep tool exchanges intact. Summarization and truncation are lossy. Keep critical requirements in explicit state, store important artifacts, and retrieve original evidence when needed.
 
+Summarization never deletes a message that carries raw media (image, audio, video, or data blocks) or an attachment reference: the safe cutoff must fall before such messages, and when it cannot, that compaction run degrades to the model-free lightweight passes instead of sacrificing media or references to satisfy the budget. In the summarization input itself, media appears as stable placeholders rather than raw data.
+
 <span id="coordination-with-memory" />
 
 With `flushBeforeCompact(true)`, the compactor also attempts to extract useful facts into long-term memory before summarizing. This is best-effort extraction, not a guarantee that every detail survives. It is separate from native conversation history and from the current task projection. See [Memory](/v2/en/docs/harness/memory) for memory extraction and maintenance.
@@ -232,7 +264,9 @@ Compaction changes the conversation list, not the independently stored task, pla
 
 ### Recover from provider overflow
 
-The estimator cannot exactly predict every provider's token accounting. When native session logging is active and the provider reports a recognized context overflow, enabled compaction can force a smaller conversation and retry that reasoning request once within the same execution. Recovery requires reducible history; it is not a guarantee that an oversized request will succeed. If compaction is disabled or recovery cannot reduce the input, the error propagates.
+The estimator cannot exactly predict every provider's token accounting. When native session logging is active and the provider reports a recognized context overflow, enabled compaction runs an **emergency compaction** from the latest committed history and retries that reasoning request once within the same execution.
+
+The emergency result is only a retry view: the candidate must pass the regular request preparation again (budget and tool-pairing validation, with no concurrent state change) before it is committed to working history — recovery itself never rewrites durable history. A cancelled or failed retry therefore leaves working history untouched, with no half-compacted state. If the retry still fails, the error propagates with the **first overflow retained as the primary cause** (attached to the retry error) so you can distinguish “the window was simply too small” from “a new problem during retry”; cancellation is never rewritten into such a chain. Emergency compaction obeys the same pairing and media protections, and recovery is not a guarantee that an oversized request will succeed: if compaction is disabled or cannot free space, the retry does not run and the original overflow error propagates.
 
 <span id="letting-the-agent-inspect-its-own-history" />
 
@@ -369,6 +403,8 @@ try (HarnessAgent agent = agentBuilder.build()) {
 ```
 
 `context_build` reports both successful and failed preparation, before a provider request. The type check above applies to live, in-process SDK events. After JSON storage or transport, read `context_manifest` as a JSON object.
+
+When compaction runs, the same stream also publishes `context_compaction_started` and `context_compaction_finished` custom events describing that one lifecycle. Their payloads share the statistics of the stored `compaction/start` / `compaction/end` records (execution id, status, and terminal counts) and add `mode`: `NORMAL` for regular compaction and `EMERGENCY` for overflow recovery. Payloads contain no messages, media, URLs, or raw exception text. Events are emitted only when compaction actually triggers, and only on the `streamEvents()` path — a `call()` has no event channel and still runs compaction. Cancellation and failure also produce a terminal event; when cancellation arrives after the stream has closed, delivery is best-effort.
 
 The default native Session Log stores this as `context/build`. Decode the record's payload with `SessionEvent.data()` and read its `event.value.context_manifest` object. Use `session.log()` or `agent.sessionLog(ctx)` to inspect a past session and correlate the record with its session, turn, and run. See [Session operations, events, and recovery](/v2/en/docs/harness/session-log) for log access. A Manifest cannot replay full prompts or restore a session. Source IDs can contain filenames, so apply your application's access controls when exporting diagnostic records.
 
