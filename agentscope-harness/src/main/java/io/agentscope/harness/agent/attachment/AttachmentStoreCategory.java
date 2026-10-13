@@ -26,7 +26,7 @@ public enum AttachmentStoreCategory {
     NOT_FOUND,
     /** The attachment exists but is not visible to the caller's scope. */
     FORBIDDEN,
-    /** The attachment exceeds the store's read size limit. */
+    /** The attachment exceeds the store's read size limit, or a registration exceeded its capacity. */
     TOO_LARGE,
     /** A registration used an idempotency key already bound to different metadata. */
     CONFLICT,

@@ -55,8 +55,9 @@ public interface AttachmentStore {
     /**
      * Registers a blob under the caller's scope and returns its stable opaque reference id.
      *
-     * <p>The declared size is verified against the content without buffering more than the declared
-     * bytes; a mismatch is a {@code FAILED} error that must not consume the idempotency key.
+     * <p>The declared size is verified against the content by reading at most {@code declaredSize + 1}
+     * bytes (never buffering an unbounded stream in full); a mismatch is a {@code FAILED} error that
+     * must not consume the idempotency key.
      *
      * @return the reference id to embed in an {@link AttachmentReference}
      * @throws AttachmentStoreException with {@link AttachmentStoreCategory#CONFLICT} when the

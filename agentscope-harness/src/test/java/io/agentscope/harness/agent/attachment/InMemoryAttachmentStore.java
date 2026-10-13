@@ -30,8 +30,9 @@ import java.util.Objects;
  * <p>It is intentionally small and fully scope-enforced: a reference is keyed globally by id but
  * visible only within the {@link AttachmentStoreScope} that registered it. All operations are
  * synchronized so concurrent callers share one atomic idempotency guarantee, and it verifies the
- * declared size while reading (never buffering more than the declared bytes) and enforces a
- * configurable read limit on {@link #open}.
+ * declared size by reading and buffering at most {@code declaredSize + 1} bytes (rejecting an
+ * over-capacity declaration before allocating) and enforces a configurable read limit on {@link
+ * #open}.
  */
 final class InMemoryAttachmentStore implements AttachmentStore {
 
