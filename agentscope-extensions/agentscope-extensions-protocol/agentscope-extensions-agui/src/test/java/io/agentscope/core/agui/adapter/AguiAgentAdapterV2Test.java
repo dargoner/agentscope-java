@@ -76,6 +76,7 @@ import io.agentscope.core.message.GenerateReason;
 import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ThinkingBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
@@ -171,6 +172,55 @@ class AguiAgentAdapterV2Test {
                             .orElseThrow();
             assertEquals("agentscope.text_output.disposition", disposition.name());
             assertTrue(enabled.stream().anyMatch(AguiEvent.MessagesSnapshot.class::isInstance));
+        }
+
+        @Test
+        void finalSnapshotSplitsThinkingAndTextFinalMessage() {
+            ReActAgent agent = mock(ReActAgent.class);
+            Msg result =
+                    AssistantMessage.builder()
+                            .id("reply-split")
+                            .content(
+                                    ThinkingBlock.builder().thinking("plan").build(),
+                                    TextBlock.builder().text("answer").build())
+                            .generateReason(GenerateReason.MODEL_STOP)
+                            .build();
+            Flux<AgentEvent> source =
+                    Flux.just(
+                            new AgentStartEvent("thread-v2", "run-v2", "react"),
+                            new ModelCallStartEvent("reply-split"),
+                            new TextBlockDeltaEvent("reply-split", "block-1", "answer"),
+                            new AgentResultEvent(result),
+                            new AgentEndEvent("reply-split"));
+            when(agent.streamEvents(anyList(), any(RuntimeContext.class))).thenReturn(source);
+
+            AguiAdapterConfig enabledConfig =
+                    AguiAdapterConfig.builder().textOutputDispositionEnabled(true).build();
+            List<AguiEvent> events =
+                    new AguiAgentAdapter(agent, enabledConfig).run(input()).collectList().block();
+
+            assertNotNull(events);
+            assertFalse(events.stream().anyMatch(AguiEvent.RunError.class::isInstance));
+            AguiEvent.MessagesSnapshot snapshot =
+                    events.stream()
+                            .filter(AguiEvent.MessagesSnapshot.class::isInstance)
+                            .map(AguiEvent.MessagesSnapshot.class::cast)
+                            .findFirst()
+                            .orElseThrow();
+            // A final message mixing thinking and text must be split into reasoning + content
+            // messages instead of failing the singular conversion.
+            assertTrue(
+                    snapshot.messages().stream()
+                            .anyMatch(
+                                    m ->
+                                            m.isReasoningMessage()
+                                                    && "plan".equals(m.getTextContent())));
+            assertTrue(
+                    snapshot.messages().stream()
+                            .anyMatch(
+                                    m ->
+                                            !m.isReasoningMessage()
+                                                    && "answer".equals(m.getTextContent())));
         }
 
         @Test
