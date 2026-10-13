@@ -5146,6 +5146,11 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
             public GenerateOptions getDefaultOptions() {
                 return activeModel.get().getDefaultOptions();
             }
+
+            @Override
+            public GenerateOptions resolveOptions(GenerateOptions requestOptions) {
+                return activeModel.get().resolveOptions(requestOptions);
+            }
         };
     }
 
