@@ -657,7 +657,7 @@ public class ConversationCompactor {
         Set<String> excluded = pruneConfig.getExcludedTools();
 
         int protectedTokens = 0;
-        int prunableTokens = 0;
+        long prunableTokens = 0;
         List<int[]> toPrune = new ArrayList<>();
 
         for (int i = messages.size() - 1; i >= 0; i--) {
@@ -677,7 +677,7 @@ public class ConversationCompactor {
                 continue;
             }
             boolean messagePruned = false;
-            int prunedCost = 0;
+            long prunedCost = 0;
             for (int j = blocks.size() - 1; j >= 0; j--) {
                 if (!(blocks.get(j) instanceof ToolResultBlock tr)) {
                     continue;
