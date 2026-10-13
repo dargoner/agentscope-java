@@ -16,8 +16,8 @@
 package io.agentscope.builder.web.api;
 
 import io.agentscope.builder.web.managed.AgentSessionInput;
+import io.agentscope.builder.web.managed.AttachmentInputNormalizer;
 import io.agentscope.builder.web.managed.DataSessionService;
-import io.agentscope.builder.web.managed.SessionFileService;
 import io.agentscope.builder.web.managed.SessionInputService;
 import io.agentscope.builder.web.managed.SessionTurnInbox;
 import java.util.List;
@@ -41,17 +41,17 @@ public final class AgentSessionTurnsController {
     private final SessionTurnInbox inbox;
 
     private final SessionInputService inputs;
-    private final SessionFileService files;
+    private final AttachmentInputNormalizer attachments;
     private final DataSessionService sessions;
 
     public AgentSessionTurnsController(
             SessionTurnInbox inbox,
             SessionInputService inputs,
-            SessionFileService files,
+            AttachmentInputNormalizer attachments,
             DataSessionService sessions) {
         this.inbox = inbox;
         this.inputs = inputs;
-        this.files = files;
+        this.attachments = attachments;
         this.sessions = sessions;
     }
 
@@ -64,12 +64,13 @@ public final class AgentSessionTurnsController {
             Authentication auth) {
         return Mono.fromCallable(
                         () -> {
-                            sessions.get((String) auth.getPrincipal(), session);
+                            String user = (String) auth.getPrincipal();
+                            sessions.get(user, session);
                             return inbox.accept(
-                                    (String) auth.getPrincipal(),
+                                    user,
                                     session,
                                     key,
-                                    files.resolveInput(session, input.normalized()));
+                                    attachments.normalize(user, session, input.normalized()));
                         })
                 .subscribeOn(Schedulers.boundedElastic());
     }

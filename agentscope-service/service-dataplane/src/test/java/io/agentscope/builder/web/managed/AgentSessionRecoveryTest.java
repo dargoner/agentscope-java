@@ -68,9 +68,14 @@ class AgentSessionRecoveryTest {
         var log = log("s");
         when(sessions.get("u", "s")).thenReturn(session);
         when(logs.open(session)).thenReturn(log);
+        var store = new InMemoryStore();
         var service =
                 new SessionInputService(
-                        sessions, logs, new SessionFileService(new InMemoryStore(), 1000));
+                        sessions,
+                        logs,
+                        new AttachmentInputNormalizer(
+                                new SessionFileService(store, 1000),
+                                new SessionAttachmentStore(store, 1000)));
         var state = AgentState.builder().sessionId("s").userId("u").build();
         var recorder = new SessionRecorder(log, "t", "r", null);
         try {

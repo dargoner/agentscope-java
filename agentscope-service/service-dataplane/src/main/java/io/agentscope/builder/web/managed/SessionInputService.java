@@ -29,13 +29,15 @@ import org.springframework.web.server.ResponseStatusException;
 public final class SessionInputService {
     private final DataSessionService sessions;
     private final SessionNativeLogService logs;
-    private final SessionFileService files;
+    private final AttachmentInputNormalizer attachments;
 
     public SessionInputService(
-            DataSessionService sessions, SessionNativeLogService logs, SessionFileService files) {
+            DataSessionService sessions,
+            SessionNativeLogService logs,
+            AttachmentInputNormalizer attachments) {
         this.sessions = sessions;
         this.logs = logs;
-        this.files = files;
+        this.attachments = attachments;
     }
 
     public record Receipt(String input_id, String turn_id, String kind, String status) {}
@@ -57,7 +59,7 @@ public final class SessionInputService {
                 JournalSessionLog.hash(
                         (user + "\n" + session + "\ninput\n" + key)
                                 .getBytes(StandardCharsets.UTF_8));
-        var request = files.resolveInput(session, input.normalized());
+        var request = attachments.normalize(user, session, input.normalized());
         var command =
                 new SessionInbox.Command(
                         id, kind, turn, AgentSessionInput.messages(request, id), List.of());

@@ -49,7 +49,7 @@ public sealed interface ResolvedAttachment {
         }
 
         /** Coarse, non-sensitive failure classification safe to surface to callers and logs. */
-        enum Category {
+        public enum Category {
             UNSUPPORTED,
             TOO_LARGE,
             MIME_MISMATCH,

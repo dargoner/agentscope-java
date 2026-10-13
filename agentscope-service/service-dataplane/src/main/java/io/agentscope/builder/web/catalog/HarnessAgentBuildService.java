@@ -160,6 +160,14 @@ public class HarnessAgentBuildService {
         this.jevServiceSupport = support;
     }
 
+    private io.agentscope.harness.agent.attachment.AttachmentStore attachmentStore;
+
+    /** Optional: when present, a session/user-bound attachment resolver is wired into each agent. */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setAttachmentStore(io.agentscope.harness.agent.attachment.AttachmentStore store) {
+        this.attachmentStore = store;
+    }
+
     /** Resolves (and caches) the {@link HarnessAgent} for a managed-session turn. */
     public HarnessAgent getOrBuildAgent(ManagedSessionDto session, SessionAgentBuildSpec spec) {
         SessionResolveResult resolved = resolveSession(session);
@@ -509,6 +517,10 @@ public class HarnessAgentBuildService {
                 sysPrompt,
                 session.id(),
                 resolved);
+        if (attachmentStore != null)
+            b.attachmentResolver(
+                    new io.agentscope.builder.web.managed.SessionAttachmentResolver(
+                            attachmentStore, session.ownerId(), session.id()));
         HarnessAgent agent = b.build();
         log.info(
                 "Built data-plane agent from control-plane snapshot: sessionOwner={}, agentId={},"

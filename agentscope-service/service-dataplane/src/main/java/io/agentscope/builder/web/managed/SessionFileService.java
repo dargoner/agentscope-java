@@ -16,10 +16,8 @@
 package io.agentscope.builder.web.managed;
 
 import io.agentscope.core.session.JournalSessionLog;
-import io.agentscope.core.util.JsonUtils;
 import io.agentscope.harness.agent.filesystem.remote.store.BaseStore;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -99,7 +97,28 @@ public final class SessionFileService {
     }
 
     public byte[] content(String session, String id) {
-        return Base64.getDecoder().decode((String) raw(session, id).get("data"));
+        Map<String, Object> record = raw(session, id);
+        Object sizeValue = record.get("size");
+        Object dataValue = record.get("data");
+        long size = sizeValue instanceof Number number ? number.longValue() : -1L;
+        String data = dataValue instanceof String text ? text : null;
+        if (data == null
+                || size < 0
+                || size > maxBytes
+                || data.length() > 4L * ((maxBytes + 2L) / 3L))
+            throw new ResponseStatusException(
+                    HttpStatus.PAYLOAD_TOO_LARGE, "File exceeds read limit");
+        byte[] bytes;
+        try {
+            bytes = Base64.getDecoder().decode(data);
+        } catch (RuntimeException error) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR, "Corrupt file record");
+        }
+        if (bytes.length != size)
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR, "Corrupt file record");
+        return bytes;
     }
 
     private Map<String, Object> raw(String session, String id) {
@@ -130,47 +149,5 @@ public final class SessionFileService {
                 offset + Math.min(limit, page.size()),
                 "has_more",
                 page.size() > limit);
-    }
-
-    @SuppressWarnings("unchecked")
-    public Map<String, Object> resolveInput(String session, Map<String, Object> request) {
-        if (!request.containsKey("input")) return request;
-        var copy =
-                new LinkedHashMap<String, Object>(
-                        JsonUtils.getJsonCodec().convertValue(request, Map.class));
-        var messages = new ArrayList<Map<String, Object>>();
-        for (var rawMessage : (List<?>) request.get("input")) {
-            var message = new LinkedHashMap<>((Map<String, Object>) rawMessage);
-            var content = new ArrayList<Map<String, Object>>();
-            for (var rawBlock : (List<?>) message.get("content")) {
-                var block = (Map<String, Object>) rawBlock;
-                if (!"file".equals(block.get("type"))) {
-                    content.add(block);
-                    continue;
-                }
-                var file = raw(session, String.valueOf(block.get("file_id")));
-                String mime = (String) file.get("media_type");
-                String type =
-                        mime.startsWith("image/")
-                                ? "image"
-                                : mime.startsWith("audio/")
-                                        ? "audio"
-                                        : mime.startsWith("video/") ? "video" : "data";
-                var resolved = new LinkedHashMap<String, Object>();
-                resolved.put("type", type);
-                resolved.put(
-                        "source",
-                        Map.of("type", "base64", "media_type", mime, "data", file.get("data")));
-                if (type.equals("data")) {
-                    resolved.put("id", file.get("file_id"));
-                    resolved.put("name", file.get("name"));
-                }
-                content.add(resolved);
-            }
-            message.put("content", content);
-            messages.add(message);
-        }
-        copy.put("input", messages);
-        return copy;
     }
 }

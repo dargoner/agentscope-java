@@ -81,10 +81,15 @@ public record AgentSessionInput(String message, List<Message> input) {
             var blocks = new ArrayList<ContentBlock>();
             for (var block : (List<?>) message.get("content"))
                 blocks.add(JsonUtils.getJsonCodec().convertValue(block, ContentBlock.class));
+            Map<String, Object> metadata =
+                    message.get("metadata") instanceof Map<?, ?> rawMetadata
+                            ? JsonUtils.getJsonCodec().convertValue(rawMetadata, Map.class)
+                            : null;
             messages.add(
                     UserMessage.builder()
                             .id("command_" + commandId + "_" + messages.size())
                             .content(blocks)
+                            .metadata(metadata)
                             .build());
         }
         return List.copyOf(messages);

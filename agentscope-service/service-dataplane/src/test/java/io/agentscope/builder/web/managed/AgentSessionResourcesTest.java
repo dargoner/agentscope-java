@@ -22,8 +22,12 @@ import static org.mockito.Mockito.when;
 
 import io.agentscope.builder.web.managed.service.SessionEventLog;
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.session.InMemorySessionLogStore;
 import io.agentscope.core.session.SessionKey;
+import io.agentscope.harness.agent.attachment.AttachmentReference;
+import io.agentscope.harness.agent.attachment.AttachmentStoreException;
 import io.agentscope.harness.agent.filesystem.remote.store.InMemoryStore;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -38,7 +42,10 @@ import org.springframework.web.server.ResponseStatusException;
 class AgentSessionResourcesTest {
     @Test
     void immutableFilesResolveIntoStructuredInputAndRemainSessionScoped() {
-        var files = new SessionFileService(new InMemoryStore(), 1000);
+        var store = new InMemoryStore();
+        var files = new SessionFileService(store, 1000);
+        var attachments =
+                new AttachmentInputNormalizer(files, new SessionAttachmentStore(store, 1000));
         var body = "document".getBytes(StandardCharsets.UTF_8);
         var uploaded = files.upload("s", "key", "report.pdf", "application/pdf", body);
         assertThat(files.upload("s", "key", "report.pdf", "application/pdf", body))
@@ -50,8 +57,29 @@ class AgentSessionResourcesTest {
                         List.of(
                                 new AgentSessionInput.Message(
                                         "user", List.of(Map.of("type", "file", "file_id", id)))));
-        assertThat(AgentSessionInput.messages(files.resolveInput("s", input.normalized()), "c"))
-                .hasSize(1);
+
+        List<Msg> messages =
+                AgentSessionInput.messages(
+                        attachments.normalize("u", "s", input.normalized()), "c");
+
+        assertThat(messages).hasSize(1);
+        Msg message = messages.get(0);
+        assertThat(message.getContent()).hasSize(1);
+        assertThat(message.getContent().get(0)).isInstanceOf(TextBlock.class);
+        assertThat(((TextBlock) message.getContent().get(0)).getText())
+                .startsWith("[attachment id=att_");
+        assertThat(message.getMetadata()).containsKey(AttachmentReference.METADATA_KEY);
+        @SuppressWarnings("unchecked")
+        var reference =
+                (Map<String, Object>)
+                        ((List<?>) message.getMetadata().get(AttachmentReference.METADATA_KEY))
+                                .get(0);
+        assertThat(reference.get("mediaType")).isEqualTo("application/pdf");
+        assertThat(reference.get("name")).isEqualTo("report.pdf");
+        assertThat(reference.get("sha256")).isEqualTo(uploaded.get("sha256"));
+        assertThat(((Number) reference.get("size")).longValue()).isEqualTo(body.length);
+        assertThat(reference.get("blockOrdinal")).isEqualTo(0);
+
         assertThat(files.content("s", id)).isEqualTo(body);
         assertThatThrownBy(() -> files.get("other", id))
                 .isInstanceOf(ResponseStatusException.class);
@@ -80,6 +108,46 @@ class AgentSessionResourcesTest {
                                                                                 "inject")))))
                                         .normalized())
                 .isInstanceOf(ResponseStatusException.class);
+    }
+
+    @Test
+    void storedReferenceIsIdempotentAndNotVisibleToAnotherScope() {
+        var store = new InMemoryStore();
+        var files = new SessionFileService(store, 1000);
+        var attachments =
+                new AttachmentInputNormalizer(files, new SessionAttachmentStore(store, 1000));
+        var bytes = "image".getBytes(StandardCharsets.UTF_8);
+        String id = (String) files.upload("s", "key", "a.png", "image/png", bytes).get("file_id");
+        var input =
+                new AgentSessionInput(
+                        null,
+                        List.of(
+                                new AgentSessionInput.Message(
+                                        "user", List.of(Map.of("type", "file", "file_id", id)))));
+
+        List<Msg> first =
+                AgentSessionInput.messages(
+                        attachments.normalize("u", "s", input.normalized()), "c1");
+        List<Msg> second =
+                AgentSessionInput.messages(
+                        attachments.normalize("u", "s", input.normalized()), "c2");
+        String referenceId = ((TextBlock) first.get(0).getContent().get(0)).getText();
+        assertThat(((TextBlock) second.get(0).getContent().get(0)).getText())
+                .isEqualTo(referenceId)
+                .as("re-normalizing the same file must return the same reference");
+
+        var scope = new io.agentscope.harness.agent.attachment.AttachmentStoreScope("u", "s");
+        var otherSession =
+                new io.agentscope.harness.agent.attachment.AttachmentStoreScope("u", "other");
+        SessionAttachmentStore attachmentStore = new SessionAttachmentStore(store, 1000);
+        assertThat(attachmentStore.resolve(scope, referenceIdToId(referenceId))).isNotNull();
+        assertThatThrownBy(
+                        () -> attachmentStore.resolve(otherSession, referenceIdToId(referenceId)))
+                .isInstanceOf(AttachmentStoreException.class);
+    }
+
+    private static String referenceIdToId(String placeholder) {
+        return placeholder.substring("[attachment id=".length(), placeholder.length() - 1);
     }
 
     @Test
