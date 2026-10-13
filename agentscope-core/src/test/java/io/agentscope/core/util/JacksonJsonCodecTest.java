@@ -273,4 +273,17 @@ class JacksonJsonCodecTest {
         assertEquals(original.author.age, deserialized.author.age);
         assertEquals(original.tags, deserialized.tags);
     }
+
+    @Test
+    void roundTripsStringLargerThanJacksonDefaultLimit() {
+        // Jackson caps a single string at 20,000,000 chars by default; the codec must still read
+        // back a large media payload it wrote itself.
+        String large = "x".repeat(20_000_001);
+        SimpleModel original = new SimpleModel(large, 1);
+
+        String json = codec.toJson(original);
+        SimpleModel deserialized = codec.fromJson(json, SimpleModel.class);
+
+        assertEquals(large, deserialized.name);
+    }
 }
