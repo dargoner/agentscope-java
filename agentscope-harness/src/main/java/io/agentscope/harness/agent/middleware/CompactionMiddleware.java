@@ -255,9 +255,10 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
     }
 
     /**
-     * Keeps the first provider overflow as the primary cause of a failed single retry without
-     * replacing the retry's own error. Cancellations, fatal errors and interruptions are never
-     * rewritten so Reactor cancellation semantics survive.
+     * Keeps the first provider overflow associated with a failed single retry without replacing the
+     * retry's own error: as the primary cause when the cause slot is free, otherwise as a
+     * suppressed exception. Cancellations, fatal errors and interruptions are never rewritten so
+     * Reactor cancellation semantics survive.
      */
     private static Throwable associateFirstOverflow(Throwable first, Throwable retryError) {
         if (retryError == first
@@ -270,8 +271,13 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
             if (suppressed == first) return retryError;
         }
         if (retryError.getCause() == null) {
-            retryError.initCause(first);
-            return retryError;
+            try {
+                retryError.initCause(first);
+                return retryError;
+            } catch (IllegalStateException alreadyInitialized) {
+                // Providers build errors with an explicit null cause; that slot rejects
+                // initCause(), so fall through and attach the overflow as suppressed.
+            }
         }
         retryError.addSuppressed(first);
         return retryError;

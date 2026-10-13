@@ -66,8 +66,8 @@ public class AttachmentReferenceExample {
 
     /** Minimal 20x20 red square PNG. A production resolver reads bytes from its own storage. */
     private static final String RED_SQUARE_PNG =
-            "iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAFklEQVR42mP8z8DAwMj4n4FhFIw"
-                    + "CMgBmBQEAAhUCYwAAAABJRU5ErkJggg==";
+            "iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAAGklEQVR42mP4z8BANmIY1TyqeVTz"
+                    + "qOaB1QwAMc2OgIQLi4wAAAAASUVORK5CYII=";
 
     public static void main(String[] args) throws Exception {
         System.out.println("\n" + "=".repeat(60));
