@@ -27,6 +27,7 @@ import io.agentscope.harness.agent.sandbox.Sandbox;
 import io.agentscope.harness.agent.sandbox.SandboxClient;
 import io.agentscope.harness.agent.sandbox.SandboxClientOptions;
 import io.agentscope.harness.agent.sandbox.SandboxException;
+import io.agentscope.harness.agent.sandbox.SandboxState;
 import io.agentscope.harness.agent.sandbox.WorkspaceSpec;
 import io.agentscope.harness.agent.sandbox.snapshot.SandboxSnapshotSpec;
 import java.nio.charset.StandardCharsets;
@@ -179,7 +180,10 @@ public final class SandboxSkillCandidateValidator implements SkillCandidateValid
             if (!invocation.sandbox().isRunning()) {
                 invocation.sandbox().start();
             }
-            invocation.initializeCandidateRoot(invocation.sandbox().getWorkspaceRoot());
+            SandboxState state = invocation.sandbox().getState();
+            WorkspaceSpec workspaceSpec = state != null ? state.getWorkspaceSpec() : null;
+            invocation.initializeCandidateRoot(
+                    workspaceSpec != null ? workspaceSpec.getRoot() : null);
         }
     }
 

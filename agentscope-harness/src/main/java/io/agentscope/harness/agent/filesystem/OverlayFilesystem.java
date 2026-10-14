@@ -134,11 +134,6 @@ public class OverlayFilesystem implements AbstractFilesystem {
         }
 
         @Override
-        public String getWorkspaceRoot() {
-            return shellBackend.getWorkspaceRoot();
-        }
-
-        @Override
         public ExecuteResponse execute(
                 RuntimeContext runtimeContext, String command, Integer timeoutSeconds) {
             return shellBackend.execute(runtimeContext, command, timeoutSeconds);

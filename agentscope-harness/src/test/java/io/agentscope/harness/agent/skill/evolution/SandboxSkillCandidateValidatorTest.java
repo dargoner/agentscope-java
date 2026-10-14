@@ -367,11 +367,6 @@ class SandboxSkillCandidateValidatorTest {
         }
 
         @Override
-        public String getWorkspaceRoot() {
-            return "/workspace/test";
-        }
-
-        @Override
         public SandboxState getState() {
             return null;
         }
