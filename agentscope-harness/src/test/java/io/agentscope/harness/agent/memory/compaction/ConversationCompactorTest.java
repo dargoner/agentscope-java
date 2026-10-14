@@ -28,8 +28,10 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentEventEmitter;
 import io.agentscope.core.event.CustomEvent;
+import io.agentscope.core.message.AudioBlock;
 import io.agentscope.core.message.Base64Source;
 import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.DataBlock;
 import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
@@ -38,6 +40,8 @@ import io.agentscope.core.message.ToolExecutionDetails;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.message.URLSource;
+import io.agentscope.core.message.VideoBlock;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
@@ -1207,6 +1211,263 @@ class ConversationCompactorTest {
         assertTrue(fixture.flushInputs.get(1).isEmpty());
     }
 
+    /** Verifies top-level audio, video and data messages are never summarized away. */
+    @Test
+    void compactIfNeeded_keepsTopLevelAudioVideoDataMessagesOutOfSummaryPrefix() {
+        Fixture fixture = new Fixture(false);
+        String audioData = "YXVkaW8tdG9wLXBheWxvYWQ=";
+        String videoData = "dmlkZW8tdG9wLXBheWxvYWQ=";
+        String dataPayload = "cGRmLXRvcC1wYXlsb2Fk";
+        Msg audio = messageWithAudio("listen to this", audioData);
+        Msg video = messageWithVideo("watch this", videoData);
+        Msg data = messageWithData("read this", dataPayload);
+
+        List<Msg> compacted =
+                fixture.compact(
+                        List.of(
+                                message("M1"),
+                                audio,
+                                video,
+                                data,
+                                message("TAIL_1"),
+                                message("TAIL_2")));
+
+        String prompt = fixture.model.prompt(0);
+        assertTrue(prompt.contains("M1"));
+        assertFalse(prompt.contains("listen to this"));
+        assertFalse(prompt.contains("watch this"));
+        assertFalse(prompt.contains("read this"));
+        assertFalse(prompt.contains(audioData));
+        assertFalse(prompt.contains(videoData));
+        assertFalse(prompt.contains(dataPayload));
+        assertEquals(6, compacted.size());
+        assertSame(audio, compacted.get(1));
+        assertSame(video, compacted.get(2));
+        assertSame(data, compacted.get(3));
+        assertTrue(compacted.get(1).getContent().get(1) instanceof AudioBlock);
+        assertTrue(compacted.get(2).getContent().get(1) instanceof VideoBlock);
+        assertTrue(compacted.get(3).getContent().get(1) instanceof DataBlock);
+        assertEquals(List.of("TAIL_1", "TAIL_2"), texts(compacted.subList(4, compacted.size())));
+    }
+
+    /**
+     * Verifies that audio, video and data nested in a tool result pull the whole ASSISTANT/TOOL
+     * group into the kept tail instead of being summarized away.
+     */
+    @Test
+    void compactIfNeeded_keepsNestedToolAudioVideoDataGroupOutOfSummaryPrefix() {
+        Fixture fixture = new Fixture(false);
+        String audioData = "YXVkaW8tbmVzdGVkLXRvb2w=";
+        String videoData = "dmlkZW8tbmVzdGVkLXRvb2w=";
+        String dataPayload = "cGRmLW5lc3RlZC10b29s";
+        Msg assistant = assistantToolCall("call:media", "read_media");
+        Msg tool =
+                toolMessage(
+                        toolResult(
+                                "call:media",
+                                "read_media",
+                                List.of(
+                                        TextBlock.builder().text("captured").build(),
+                                        audioBlock(audioData),
+                                        videoBlock(videoData),
+                                        dataBlock("doc-1", "report.pdf", dataPayload)),
+                                Map.of(),
+                                ToolResultState.SUCCESS,
+                                null));
+
+        List<Msg> compacted =
+                fixture.compact(
+                        List.of(
+                                message("M1"),
+                                assistant,
+                                tool,
+                                message("TAIL_1"),
+                                message("TAIL_2")));
+
+        String prompt = fixture.model.prompt(0);
+        assertTrue(prompt.contains("M1"));
+        assertFalse(prompt.contains("captured"));
+        assertFalse(prompt.contains(audioData));
+        assertFalse(prompt.contains(videoData));
+        assertFalse(prompt.contains(dataPayload));
+        assertEquals(5, compacted.size());
+        assertSame(assistant, compacted.get(1));
+        assertSame(tool, compacted.get(2));
+        ToolResultBlock kept = compacted.get(2).getContentBlocks(ToolResultBlock.class).get(0);
+        assertTrue(kept.getOutput().stream().anyMatch(block -> block instanceof AudioBlock));
+        assertTrue(kept.getOutput().stream().anyMatch(block -> block instanceof VideoBlock));
+        assertTrue(kept.getOutput().stream().anyMatch(block -> block instanceof DataBlock));
+    }
+
+    /**
+     * Verifies that an empty keep window cannot summarize the current input away when it carries
+     * raw audio, video and data blocks.
+     */
+    @Test
+    void compactIfNeeded_protectsCurrentTurnRawMediaWhenKeepWindowIsEmpty() {
+        Fixture fixture = new Fixture(false);
+        String audioData = "YXVkaW8tY3VycmVudA=";
+        Msg current =
+                messageWithMedia(
+                        "current media",
+                        audioBlock(audioData),
+                        videoBlock("dmlkZW8tY3VycmVudA=="),
+                        dataBlock("doc-2", "current.pdf", "cGRmLWN1cnJlbnQ="));
+        CompactionConfig zeroKeep =
+                CompactionConfig.builder()
+                        .triggerMessages(3)
+                        .triggerTokens(0)
+                        .keepMessages(0)
+                        .keepTokens(0)
+                        .summaryPrompt("SUMMARY_INPUT:\n{messages}")
+                        .flushBeforeCompact(false)
+                        .truncateArgs(null)
+                        .prune(null)
+                        .build();
+
+        Optional<List<Msg>> result =
+                fixture.compactor
+                        .compactIfNeeded(
+                                fixture.runtimeContext,
+                                List.of(message("M1"), message("M2"), current),
+                                zeroKeep,
+                                "agent-id",
+                                "session-id")
+                        .block();
+
+        List<Msg> compacted = result.orElseThrow();
+        assertEquals(2, compacted.size());
+        assertSame(current, compacted.get(1));
+        assertTrue(compacted.get(1).getContent().get(1) instanceof AudioBlock);
+        assertTrue(compacted.get(1).getContent().get(2) instanceof VideoBlock);
+        assertTrue(compacted.get(1).getContent().get(3) instanceof DataBlock);
+        String prompt = fixture.model.prompt(0);
+        assertFalse(prompt.contains("current media"));
+        assertFalse(prompt.contains(audioData));
+    }
+
+    /** Verifies audio, video and data survive two consecutive compaction rounds. */
+    @Test
+    void compactIfNeeded_retainsAudioVideoDataAcrossConsecutiveCompactions() {
+        Fixture fixture = new Fixture();
+        String audioData = "YXVkaW8tY2hhaW4=";
+        Msg audio = messageWithAudio("older audio", audioData);
+        Msg video = messageWithVideo("older video", "dmlkZW8tY2hhaW4=");
+        Msg data = messageWithData("older data", "cGRmLWNoYWlu");
+
+        List<Msg> first =
+                fixture.compact(
+                        List.of(
+                                message("M1"),
+                                audio,
+                                video,
+                                data,
+                                message("TAIL_1"),
+                                message("TAIL_2")));
+        assertEquals(6, first.size());
+
+        List<Msg> secondInput = new ArrayList<>(first);
+        secondInput.add(message("M3"));
+        secondInput.add(message("TAIL_3"));
+        secondInput.add(message("TAIL_4"));
+
+        List<Msg> second = fixture.compact(secondInput);
+
+        String prompt = fixture.model.prompt(1);
+        assertTrue(prompt.contains("ROUND_1"));
+        assertFalse(prompt.contains("older audio"));
+        assertFalse(prompt.contains("older video"));
+        assertFalse(prompt.contains("older data"));
+        assertFalse(prompt.contains(audioData));
+        assertEquals(9, second.size());
+        assertSame(audio, second.get(1));
+        assertSame(video, second.get(2));
+        assertSame(data, second.get(3));
+        assertTrue(second.get(1).getContent().get(1) instanceof AudioBlock);
+        assertTrue(second.get(2).getContent().get(1) instanceof VideoBlock);
+        assertTrue(second.get(3).getContent().get(1) instanceof DataBlock);
+        assertEquals(
+                1,
+                second.stream()
+                        .filter(msg -> ConversationCompactor.SUMMARY_MSG_NAME.equals(msg.getName()))
+                        .count());
+        assertTrue(fixture.flushInputs.get(1).isEmpty());
+    }
+
+    /** Verifies attachment references survive two consecutive compaction rounds. */
+    @Test
+    void compactIfNeeded_retainsAttachmentReferencesAcrossConsecutiveCompactions() {
+        Fixture fixture = new Fixture();
+        Msg attach =
+                message("see attached")
+                        .withMetadata(
+                                Map.of(
+                                        AttachmentReference.METADATA_KEY,
+                                        List.of(
+                                                new AttachmentReference(
+                                                                "ref-1",
+                                                                "image/png",
+                                                                "a.png",
+                                                                "sha-1",
+                                                                10,
+                                                                1)
+                                                        .toMetadata())));
+        List<Msg> first =
+                fixture.compact(
+                        List.of(message("M1"), attach, message("TAIL_1"), message("TAIL_2")));
+        assertEquals(4, first.size());
+
+        List<Msg> secondInput = new ArrayList<>(first);
+        secondInput.add(message("M3"));
+        secondInput.add(message("TAIL_3"));
+        secondInput.add(message("TAIL_4"));
+
+        List<Msg> second = fixture.compact(secondInput);
+
+        String prompt = fixture.model.prompt(1);
+        assertTrue(prompt.contains("ROUND_1"));
+        assertFalse(prompt.contains("see attached"));
+        assertEquals(7, second.size());
+        assertSame(attach, second.get(1));
+        assertEquals(1, AttachmentReference.listFromMetadata(second.get(1).getMetadata()).size());
+        assertTrue(fixture.flushInputs.get(1).isEmpty());
+    }
+
+    /**
+     * Verifies the summarization prompt formatter renders every non-text media kind as a
+     * placeholder, so raw base64 payloads and signed URLs can never reach the summary model.
+     */
+    @Test
+    void formatMessagesForSummaryRendersAllMediaKindsAsPlaceholders() {
+        String audioData = "YXVkaW8tcHJvbXB0";
+        String videoUrl = "https://example.com/prompt-video.mp4?sig=prompt-secret";
+        String dataPayload = "cGRmLXByb21wdA==";
+        Msg audio = messageWithAudio("audio note", audioData);
+        Msg video =
+                messageWithMedia(
+                        "video note",
+                        VideoBlock.builder()
+                                .source(
+                                        URLSource.builder()
+                                                .url(videoUrl)
+                                                .mimeType("video/mp4")
+                                                .build())
+                                .build());
+        Msg data = messageWithData("data note", dataPayload);
+
+        String formatted =
+                ConversationCompactor.formatMessagesForSummary(List.of(audio, video, data));
+
+        assertTrue(formatted.contains("kind=audio"));
+        assertTrue(formatted.contains("kind=video"));
+        assertTrue(formatted.contains("kind=data"));
+        assertTrue(formatted.contains("protocol=https"));
+        assertFalse(formatted.contains(audioData));
+        assertFalse(formatted.contains(videoUrl));
+        assertFalse(formatted.contains("prompt-secret"));
+        assertFalse(formatted.contains(dataPayload));
+    }
+
     /**
      * Verifies that when a protected message sits at the history head, summarization is refused
      * entirely — no LLM call happens and the history stays untouched.
@@ -1343,6 +1604,43 @@ class ConversationCompactorTest {
         assertEquals(ToolResultState.SUCCESS, unchangedBlock.getState());
         assertTrue(
                 unchangedBlock.getOutput().stream().anyMatch(block -> block instanceof ImageBlock));
+    }
+
+    /** Verifies tool-result pruning never drops audio, video or data blocks. */
+    @Test
+    void pruneToolResults_skipsBlocksWithAudioVideoDataMedia() {
+        ConversationCompactor compactor =
+                new ConversationCompactor(new RecordingModel(), mock(MemoryFlushManager.class));
+        PruneConfig pruneConfig =
+                PruneConfig.builder()
+                        .protectTokens(0)
+                        .minimumTokens(0)
+                        .maxOutputChars(10)
+                        .excludedTools(Set.of())
+                        .build();
+        Msg withMedia =
+                toolMessage(
+                        toolResult(
+                                "call:avd",
+                                "tool_avd",
+                                List.of(
+                                        TextBlock.builder().text("0123456789abcdefghij").build(),
+                                        audioBlock("YXVkaW8="),
+                                        videoBlock("dmlkZW8="),
+                                        dataBlock("doc-3", "r.bin", "cGRm")),
+                                Map.of(),
+                                ToolResultState.SUCCESS,
+                                null));
+
+        List<Msg> pruned = compactor.pruneToolResults(List.of(withMedia), pruneConfig);
+
+        assertSame(withMedia, pruned.get(0));
+        assertEquals("0123456789abcdefghij", toolOutput(pruned.get(0)));
+        ToolResultBlock unchanged = pruned.get(0).getContentBlocks(ToolResultBlock.class).get(0);
+        assertEquals(4, unchanged.getOutput().size());
+        assertTrue(unchanged.getOutput().stream().anyMatch(block -> block instanceof AudioBlock));
+        assertTrue(unchanged.getOutput().stream().anyMatch(block -> block instanceof VideoBlock));
+        assertTrue(unchanged.getOutput().stream().anyMatch(block -> block instanceof DataBlock));
     }
 
     /**
@@ -1505,6 +1803,49 @@ class ConversationCompactorTest {
                                                         .data(imageData)
                                                         .build())
                                         .build()))
+                .build();
+    }
+
+    /** Creates a user message containing text and a base64 audio block. */
+    private static Msg messageWithAudio(String text, String audioData) {
+        return messageWithMedia(text, audioBlock(audioData));
+    }
+
+    /** Creates a user message containing text and a base64 video block. */
+    private static Msg messageWithVideo(String text, String videoData) {
+        return messageWithMedia(text, videoBlock(videoData));
+    }
+
+    /** Creates a user message containing text and a base64 data block. */
+    private static Msg messageWithData(String text, String dataPayload) {
+        return messageWithMedia(text, dataBlock("doc-data", "payload.bin", dataPayload));
+    }
+
+    /** Creates a user message containing text and the given media blocks. */
+    private static Msg messageWithMedia(String text, ContentBlock... media) {
+        List<ContentBlock> content = new ArrayList<>();
+        content.add(TextBlock.builder().text(text).build());
+        content.addAll(List.of(media));
+        return Msg.builder().id("msg-with-media").role(MsgRole.USER).content(content).build();
+    }
+
+    private static AudioBlock audioBlock(String data) {
+        return AudioBlock.builder()
+                .source(Base64Source.builder().mediaType("audio/mp3").data(data).build())
+                .build();
+    }
+
+    private static VideoBlock videoBlock(String data) {
+        return VideoBlock.builder()
+                .source(Base64Source.builder().mediaType("video/mp4").data(data).build())
+                .build();
+    }
+
+    private static DataBlock dataBlock(String id, String name, String data) {
+        return DataBlock.builder()
+                .source(Base64Source.builder().mediaType("application/pdf").data(data).build())
+                .id(id)
+                .name(name)
                 .build();
     }
 

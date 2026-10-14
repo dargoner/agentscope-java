@@ -82,12 +82,13 @@ class CompactionMediaRendererTest {
 
     @Test
     void dataBlockRendersStableIdAndName() {
+        String data = "cGRmLWRhdGE=";
         DataBlock block =
                 DataBlock.builder()
                         .source(
                                 Base64Source.builder()
                                         .mediaType("application/pdf")
-                                        .data("cGRmLWRhdGE=")
+                                        .data(data)
                                         .build())
                         .id("doc-123")
                         .name("report.pdf")
@@ -98,16 +99,21 @@ class CompactionMediaRendererTest {
         assertTrue(rendered.contains("name=report.pdf"));
         assertTrue(rendered.contains("type=application/pdf"));
         assertTrue(rendered.contains("kind=data"));
+        assertTrue(rendered.contains("sha256="));
+        assertTrue(rendered.contains("bytes="));
+        assertFalse(rendered.contains(data));
     }
 
     @Test
     void audioAndVideoBlocksRenderPlaceholders() {
+        String audioData = "YXVkaW8tc2VjcmV0LXBheWxvYWQ=";
+        String videoData = "dmlkZW8tc2VjcmV0LXBheWxvYWQ=";
         AudioBlock audio =
                 AudioBlock.builder()
                         .source(
                                 Base64Source.builder()
                                         .mediaType("audio/mp3")
-                                        .data("YXVkaW8=")
+                                        .data(audioData)
                                         .build())
                         .build();
         VideoBlock video =
@@ -115,15 +121,112 @@ class CompactionMediaRendererTest {
                         .source(
                                 Base64Source.builder()
                                         .mediaType("video/mp4")
-                                        .data("dmlkZW8=")
+                                        .data(videoData)
                                         .build())
                         .build();
-        assertTrue(
-                renderer.renderBlock(audio, new CompactionMediaRenderer.RenderContext("m1", 0))
-                        .contains("kind=audio"));
-        assertTrue(
-                renderer.renderBlock(video, new CompactionMediaRenderer.RenderContext("m1", 0))
-                        .contains("kind=video"));
+        String renderedAudio =
+                renderer.renderBlock(audio, new CompactionMediaRenderer.RenderContext("m1", 0));
+        String renderedVideo =
+                renderer.renderBlock(video, new CompactionMediaRenderer.RenderContext("m1", 0));
+        assertTrue(renderedAudio.contains("kind=audio"));
+        assertTrue(renderedAudio.contains("type=audio/mp3"));
+        assertTrue(renderedAudio.contains("id=m1#0"));
+        assertFalse(renderedAudio.contains(audioData));
+        assertTrue(renderedVideo.contains("kind=video"));
+        assertTrue(renderedVideo.contains("type=video/mp4"));
+        assertFalse(renderedVideo.contains(videoData));
+    }
+
+    @Test
+    void audioVideoAndDataBlocksRenderUrlPlaceholdersWithoutOriginalUrl() {
+        String audioUrl = "https://example.com/audio.mp3?sig=audio-secret";
+        String videoUrl = "http://example.com/video.mp4?sig=video-secret";
+        String dataUrl = "file:///var/data/report.bin?h=data-secret";
+        AudioBlock audio =
+                AudioBlock.builder()
+                        .source(URLSource.builder().url(audioUrl).mimeType("audio/mp3").build())
+                        .build();
+        VideoBlock video =
+                VideoBlock.builder()
+                        .source(URLSource.builder().url(videoUrl).mimeType("video/mp4").build())
+                        .build();
+        DataBlock data =
+                DataBlock.builder()
+                        .source(
+                                URLSource.builder()
+                                        .url(dataUrl)
+                                        .mimeType("application/pdf")
+                                        .build())
+                        .id("doc-9")
+                        .name("report.pdf")
+                        .build();
+        String renderedAudio =
+                renderer.renderBlock(audio, new CompactionMediaRenderer.RenderContext("m2", 1));
+        String renderedVideo =
+                renderer.renderBlock(video, new CompactionMediaRenderer.RenderContext("m2", 2));
+        String renderedData =
+                renderer.renderBlock(data, new CompactionMediaRenderer.RenderContext("m2", 3));
+        assertTrue(renderedAudio.contains("kind=audio"));
+        assertTrue(renderedAudio.contains("protocol=https"));
+        assertFalse(renderedAudio.contains(audioUrl));
+        assertFalse(renderedAudio.contains("audio-secret"));
+        assertTrue(renderedVideo.contains("kind=video"));
+        assertTrue(renderedVideo.contains("protocol=http"));
+        assertFalse(renderedVideo.contains(videoUrl));
+        assertFalse(renderedVideo.contains("video-secret"));
+        assertTrue(renderedData.contains("kind=data"));
+        assertTrue(renderedData.contains("protocol=file"));
+        assertFalse(renderedData.contains(dataUrl));
+        assertFalse(renderedData.contains("data-secret"));
+    }
+
+    @Test
+    void nestedAudioVideoAndDataRenderRecursivelyInToolResults() {
+        String audioData = "YXVkaW8tbmVzdGVkLXBheWxvYWQ=";
+        String videoData = "dmlkZW8tbmVzdGVkLXBheWxvYWQ=";
+        String dataUrl = "https://example.com/nested.bin?tok=nested-secret";
+        ToolResultBlock block =
+                ToolResultBlock.builder()
+                        .id("call_1")
+                        .name("read_media")
+                        .output(
+                                List.of(
+                                        TextBlock.builder().text("payloads:").build(),
+                                        AudioBlock.builder()
+                                                .source(
+                                                        Base64Source.builder()
+                                                                .mediaType("audio/wav")
+                                                                .data(audioData)
+                                                                .build())
+                                                .build(),
+                                        VideoBlock.builder()
+                                                .source(
+                                                        Base64Source.builder()
+                                                                .mediaType("video/mp4")
+                                                                .data(videoData)
+                                                                .build())
+                                                .build(),
+                                        DataBlock.builder()
+                                                .source(
+                                                        URLSource.builder()
+                                                                .url(dataUrl)
+                                                                .mimeType("application/pdf")
+                                                                .build())
+                                                .id("doc-77")
+                                                .name("nested.pdf")
+                                                .build()))
+                        .build();
+        String rendered =
+                renderer.renderBlock(block, new CompactionMediaRenderer.RenderContext("m1", 0));
+        assertTrue(rendered.contains("[tool_result: read_media]"));
+        assertTrue(rendered.contains("kind=audio"));
+        assertTrue(rendered.contains("kind=video"));
+        assertTrue(rendered.contains("kind=data"));
+        assertTrue(rendered.contains("id=doc-77"));
+        assertFalse(rendered.contains(audioData));
+        assertFalse(rendered.contains(videoData));
+        assertFalse(rendered.contains(dataUrl));
+        assertFalse(rendered.contains("nested-secret"));
     }
 
     @Test

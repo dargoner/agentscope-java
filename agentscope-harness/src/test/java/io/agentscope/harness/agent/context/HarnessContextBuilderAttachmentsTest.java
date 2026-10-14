@@ -23,6 +23,9 @@ import static org.mockito.Mockito.when;
 
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.DataBlock;
+import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
@@ -127,6 +130,71 @@ class HarnessContextBuilderAttachmentsTest {
         }
     }
 
+    @Test
+    void attachmentExpansionChargesEachMediaOnceAndDropsOnlyPlaceholderText() {
+        AttachmentResolver resolver =
+                (reference, context) ->
+                        "att_1".equals(reference.referenceId())
+                                ? Mono.just(new ResolvedAttachment.Inline("image/png", "aW1n"))
+                                : Mono.just(
+                                        new ResolvedAttachment.Inline("application/pdf", "cGRm"));
+        var state = AgentState.builder().build();
+        Msg canonical = twoAttachmentMessage();
+        state.contextMutable().add(canonical);
+        var rc = RuntimeContext.builder().agentState(state).userId("u").sessionId("s").build();
+
+        ModelCallInput prepared =
+                builder(resolver)
+                        .prepare(
+                                mock(Agent.class),
+                                rc,
+                                request(canonical, 200_000),
+                                "c",
+                                ModelRequestPreparer.Purpose.REASONING)
+                        .block();
+
+        Msg preparedMessage = userMessage(prepared);
+        List<ContentBlock> blocks = preparedMessage.getContent();
+        assertTrue(blocks.get(0) instanceof ImageBlock);
+        assertTrue(blocks.get(1) instanceof DataBlock);
+        DataBlock data = (DataBlock) blocks.get(1);
+        assertEquals("att_2", data.getId());
+        assertEquals("b.pdf", data.getName());
+        Map<String, Object> preparedMetadata = preparedMessage.getMetadata();
+        assertTrue(
+                preparedMetadata == null
+                        || !preparedMetadata.containsKey(AttachmentReference.METADATA_KEY),
+                "expanded media must not keep the reference metadata");
+
+        TokenAccountingService service = TokenAccountingService.defaults();
+        var canonicalEstimate =
+                service.estimate(
+                        new TokenAccountingService.TokenSurface(List.of(canonical), List.of()));
+        var preparedEstimate =
+                service.estimate(
+                        new TokenAccountingService.TokenSurface(
+                                List.of(preparedMessage), List.of()));
+
+        assertEquals(
+                2 * MediaTokenEstimator.DEFAULT_MEDIA_TOKENS,
+                canonicalEstimate.mediaTokens(),
+                "each unresolved reference is charged once before expansion");
+        assertEquals(
+                2 * MediaTokenEstimator.DEFAULT_MEDIA_TOKENS,
+                preparedEstimate.mediaTokens(),
+                "each expanded media block is charged once, not twice");
+        assertEquals(
+                canonicalEstimate.totalTokens()
+                        - service.countText("[att at_1]")
+                        - service.countText("[att at_2]"),
+                preparedEstimate.totalTokens(),
+                "expansion only replaces placeholder text with media blocks");
+
+        assertEquals(List.of("[att at_1]", "[att at_2]"), texts(canonical));
+        assertNotNull(canonical.getMetadata());
+        assertTrue(canonical.getMetadata().containsKey(AttachmentReference.METADATA_KEY));
+    }
+
     private static HarnessContextBuilder builder(AttachmentResolver resolver) {
         return new HarnessContextBuilder(
                 ContextPolicy.defaults(),
@@ -138,14 +206,35 @@ class HarnessContextBuilderAttachmentsTest {
     }
 
     private static ModelCallInput request(Msg message) {
+        return request(message, 1000);
+    }
+
+    private static ModelCallInput request(Msg message, int windowSize) {
         Model model = mock(Model.class);
-        when(model.getContextWindowSize()).thenReturn(1000);
+        when(model.getContextWindowSize()).thenReturn(windowSize);
         when(model.getModelName()).thenReturn("test");
         return new ModelCallInput(
                 List.of(message),
                 List.of(),
                 GenerateOptions.builder().maxTokens(20).build(),
                 model);
+    }
+
+    private static Msg twoAttachmentMessage() {
+        AttachmentReference first =
+                new AttachmentReference("att_1", "image/png", "a.png", "sha1", 4, 0);
+        AttachmentReference second =
+                new AttachmentReference("att_2", "application/pdf", "b.pdf", "sha2", 3, 1);
+        return Msg.builder()
+                .role(MsgRole.USER)
+                .content(
+                        TextBlock.builder().text("[att at_1]").build(),
+                        TextBlock.builder().text("[att at_2]").build())
+                .metadata(
+                        Map.of(
+                                AttachmentReference.METADATA_KEY,
+                                List.of(first.toMetadata(), second.toMetadata())))
+                .build();
     }
 
     private static Msg attachmentMessage() {
