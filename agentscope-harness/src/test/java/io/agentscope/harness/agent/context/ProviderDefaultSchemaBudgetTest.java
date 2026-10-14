@@ -17,6 +17,7 @@ package io.agentscope.harness.agent.context;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -42,8 +43,12 @@ import io.agentscope.core.model.transport.HttpResponse;
 import io.agentscope.core.model.transport.HttpTransport;
 import io.agentscope.core.state.AgentState;
 import io.agentscope.core.util.JsonUtils;
+import io.agentscope.extensions.model.anthropic.AnthropicChatModel;
+import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
+import io.agentscope.extensions.model.gemini.GeminiChatModel;
 import io.agentscope.extensions.model.ollama.OllamaChatModel;
 import io.agentscope.extensions.model.ollama.options.OllamaOptions;
+import io.agentscope.extensions.model.openai.OpenAIChatModel;
 import io.agentscope.extensions.model.openaiofficial.OpenAIResponsesChatModel;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -229,6 +234,180 @@ class ProviderDefaultSchemaBudgetTest {
                 estimate(GenerateOptions.builder().responseFormat(format(schema)).build(), null);
 
         assertEquals(explicit, viaDefault);
+    }
+
+    @Test
+    void openAIDefaultSchemaIsPricedLikeAnExplicitOne() {
+        Map<String, Object> schema = schema("x".repeat(4000));
+        OpenAIChatModel model =
+                OpenAIChatModel.builder()
+                        .apiKey("test-key")
+                        .modelName("gpt-4.1-mini")
+                        .generateOptions(
+                                GenerateOptions.builder().responseFormat(format(schema)).build())
+                        .build();
+
+        long viaDefault = estimate(null, model);
+        long explicit =
+                estimate(GenerateOptions.builder().responseFormat(format(schema)).build(), null);
+
+        assertEquals(explicit, viaDefault);
+    }
+
+    @Test
+    void openAIRequestSchemaOverridesStoredDefault() {
+        OpenAIChatModel model =
+                OpenAIChatModel.builder()
+                        .apiKey("test-key")
+                        .modelName("gpt-4.1-mini")
+                        .generateOptions(
+                                GenerateOptions.builder()
+                                        .responseFormat(format(schema("x".repeat(4000))))
+                                        .build())
+                        .build();
+        GenerateOptions request =
+                GenerateOptions.builder().responseFormat(format(schema("tiny"))).build();
+
+        assertEquals(estimate(request, null), estimate(request, model));
+    }
+
+    @Test
+    void openAIDefaultSchemaReachesTheWireAndIsPricedLikeAnExplicitOne() {
+        String description = "x".repeat(4000);
+        Map<String, Object> schema = schema(description);
+
+        HttpTransport transport = mock(HttpTransport.class);
+        when(transport.execute(any(HttpRequest.class)))
+                .thenReturn(
+                        HttpResponse.builder()
+                                .statusCode(200)
+                                .body(
+                                        "{\"id\":\"c\",\"object\":\"chat.completion\",\"model\":\"gpt-4.1-mini\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}")
+                                .build());
+        OpenAIChatModel model =
+                OpenAIChatModel.builder().apiKey("test-key").modelName("gpt-4.1-mini").stream(false)
+                        .generateOptions(
+                                GenerateOptions.builder().responseFormat(format(schema)).build())
+                        .httpTransport(transport)
+                        .build();
+
+        StepVerifier.create(model.stream(MESSAGES, null, null)).expectNextCount(1).verifyComplete();
+
+        ArgumentCaptor<HttpRequest> captor = ArgumentCaptor.forClass(HttpRequest.class);
+        verify(transport).execute(captor.capture());
+        JsonNode sentBody =
+                JsonUtils.getJsonCodec().fromJson(captor.getValue().getBody(), JsonNode.class);
+        assertTrue(
+                sentBody.toString().contains(description),
+                "the model default schema must reach the wire");
+        assertEquals(
+                estimate(GenerateOptions.builder().responseFormat(format(schema)).build(), null),
+                estimate(null, model));
+    }
+
+    @Test
+    void dashScopeDefaultSchemaIsPricedLikeAnExplicitOne() {
+        Map<String, Object> schema = schema("x".repeat(4000));
+        DashScopeChatModel model =
+                DashScopeChatModel.builder()
+                        .apiKey("test-key")
+                        .modelName("qwen-plus")
+                        .defaultOptions(
+                                GenerateOptions.builder().responseFormat(format(schema)).build())
+                        .build();
+
+        long viaDefault = estimate(null, model);
+        long explicit =
+                estimate(GenerateOptions.builder().responseFormat(format(schema)).build(), null);
+
+        assertEquals(explicit, viaDefault);
+    }
+
+    @Test
+    void dashScopeRequestSchemaOverridesStoredDefault() {
+        DashScopeChatModel model =
+                DashScopeChatModel.builder()
+                        .apiKey("test-key")
+                        .modelName("qwen-plus")
+                        .defaultOptions(
+                                GenerateOptions.builder()
+                                        .responseFormat(format(schema("x".repeat(4000))))
+                                        .build())
+                        .build();
+        GenerateOptions request =
+                GenerateOptions.builder().responseFormat(format(schema("tiny"))).build();
+
+        assertEquals(estimate(request, null), estimate(request, model));
+    }
+
+    @Test
+    void anthropicDefaultSchemaIsPricedLikeAnExplicitOne() {
+        Map<String, Object> schema = schema("x".repeat(4000));
+        AnthropicChatModel model =
+                AnthropicChatModel.builder()
+                        .apiKey("test-key")
+                        .modelName("claude-sonnet-4-5-20250929")
+                        .defaultOptions(
+                                GenerateOptions.builder().responseFormat(format(schema)).build())
+                        .build();
+
+        long viaDefault = estimate(null, model);
+        long explicit =
+                estimate(GenerateOptions.builder().responseFormat(format(schema)).build(), null);
+
+        assertEquals(explicit, viaDefault);
+    }
+
+    @Test
+    void anthropicRequestSchemaOverridesStoredDefault() {
+        AnthropicChatModel model =
+                AnthropicChatModel.builder()
+                        .apiKey("test-key")
+                        .modelName("claude-sonnet-4-5-20250929")
+                        .defaultOptions(
+                                GenerateOptions.builder()
+                                        .responseFormat(format(schema("x".repeat(4000))))
+                                        .build())
+                        .build();
+        GenerateOptions request =
+                GenerateOptions.builder().responseFormat(format(schema("tiny"))).build();
+
+        assertEquals(estimate(request, null), estimate(request, model));
+    }
+
+    @Test
+    void geminiDefaultSchemaIsPricedLikeAnExplicitOne() {
+        Map<String, Object> schema = schema("x".repeat(4000));
+        GeminiChatModel model =
+                GeminiChatModel.builder()
+                        .apiKey("test-key")
+                        .modelName("gemini-2.5-flash")
+                        .defaultOptions(
+                                GenerateOptions.builder().responseFormat(format(schema)).build())
+                        .build();
+
+        long viaDefault = estimate(null, model);
+        long explicit =
+                estimate(GenerateOptions.builder().responseFormat(format(schema)).build(), null);
+
+        assertEquals(explicit, viaDefault);
+    }
+
+    @Test
+    void geminiRequestSchemaOverridesStoredDefault() {
+        GeminiChatModel model =
+                GeminiChatModel.builder()
+                        .apiKey("test-key")
+                        .modelName("gemini-2.5-flash")
+                        .defaultOptions(
+                                GenerateOptions.builder()
+                                        .responseFormat(format(schema("x".repeat(4000))))
+                                        .build())
+                        .build();
+        GenerateOptions request =
+                GenerateOptions.builder().responseFormat(format(schema("tiny"))).build();
+
+        assertEquals(estimate(request, null), estimate(request, model));
     }
 
     @Test
