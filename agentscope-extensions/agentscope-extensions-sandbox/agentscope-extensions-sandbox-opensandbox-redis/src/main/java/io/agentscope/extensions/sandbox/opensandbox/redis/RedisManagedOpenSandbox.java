@@ -123,11 +123,6 @@ public final class RedisManagedOpenSandbox implements Sandbox, SandboxFileTransf
     }
 
     @Override
-    public String getWorkspaceRoot() {
-        return delegate.getWorkspaceRoot();
-    }
-
-    @Override
     public SandboxState getState() {
         return delegate.getState();
     }

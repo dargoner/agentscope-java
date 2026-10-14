@@ -97,12 +97,6 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
     }
 
     @Override
-    public String getWorkspaceRoot(RuntimeContext runtimeContext) {
-        Sandbox active = resolveSandbox(runtimeContext);
-        return active != null ? active.getWorkspaceRoot() : "/workspace";
-    }
-
-    @Override
     public ExecuteResponse execute(
             RuntimeContext runtimeContext, String command, Integer timeoutSeconds) {
         Sandbox active = requireSandbox(runtimeContext);
@@ -239,20 +233,11 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
     /**
      * Resolves the {@link Sandbox} bound to the current call, preferring the per-call binding
      * carried on {@code runtimeContext} (concurrency-safe under parallel distinct-session calls,
-     * issue #2490), then the legacy {@code sandbox} field for
-     * direct {@link #setSandbox} callers that do not thread a per-call context.
+     * issue #2490) and falling back to the legacy {@code sandbox} field for direct
+     * {@link #setSandbox} callers that do not thread a per-call context.
      */
     private Sandbox requireSandbox(RuntimeContext runtimeContext) {
-        Sandbox s = resolveSandbox(runtimeContext);
-        if (s == null) {
-            throw new SandboxException.SandboxConfigurationException(
-                    "No active sandbox — sandbox filesystem used outside of a call context");
-        }
-        return s;
-    }
-
-    private Sandbox resolveSandbox(RuntimeContext runtimeContext) {
-        Sandbox resolved = null;
+        Sandbox s = null;
         if (runtimeContext != null) {
             SandboxAcquireResult bound = runtimeContext.get(SandboxAcquireResult.class);
             if (bound != null) {
@@ -260,13 +245,17 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
                     throw new SandboxException.SandboxConfigurationException(
                             "Sandbox acquisition has been released for this call");
                 }
-                resolved = bound.getSandbox();
+                s = bound.getSandbox();
             }
         }
-        if (resolved == null) {
-            resolved = sandbox;
+        if (s == null) {
+            s = sandbox;
         }
-        return resolved;
+        if (s == null) {
+            throw new SandboxException.SandboxConfigurationException(
+                    "No active sandbox — sandbox filesystem used outside of a call context");
+        }
+        return s;
     }
 
     private String shellSingleQuote(String s) {

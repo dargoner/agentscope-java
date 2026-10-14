@@ -42,6 +42,7 @@ public class AgentRunSandboxClientOptions extends SandboxClientOptions {
     private int sandboxIdleTimeoutSeconds = 1800;
     private AgentRunNasMountConfig nasConfig;
     private List<AgentRunOssMountConfig> ossMountConfigs = new ArrayList<>();
+    private String workspaceRoot = AgentRunSandboxState.DEFAULT_WORKSPACE_ROOT;
     private int connectTimeoutSeconds = 30;
     private int readTimeoutSeconds = 120;
     private int maxRetries = 3;
@@ -234,6 +235,16 @@ public class AgentRunSandboxClientOptions extends SandboxClientOptions {
         if (mount != null) {
             this.ossMountConfigs.add(mount);
         }
+        return this;
+    }
+
+    public String getWorkspaceRoot() {
+        return workspaceRoot;
+    }
+
+    public AgentRunSandboxClientOptions setWorkspaceRoot(String workspaceRoot) {
+        this.workspaceRoot =
+                workspaceRoot != null ? workspaceRoot : AgentRunSandboxState.DEFAULT_WORKSPACE_ROOT;
         return this;
     }
 

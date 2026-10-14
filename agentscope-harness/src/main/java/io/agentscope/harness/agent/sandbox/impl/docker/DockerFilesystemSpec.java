@@ -46,7 +46,7 @@ public class DockerFilesystemSpec extends SandboxFilesystemSpec {
     }
 
     public DockerFilesystemSpec workspaceRoot(String workspaceRoot) {
-        defaultWorkspaceSpec.setRoot(workspaceRoot);
+        options.workspaceRoot(workspaceRoot);
         return this;
     }
 
@@ -76,13 +76,29 @@ public class DockerFilesystemSpec extends SandboxFilesystemSpec {
         return this;
     }
 
+    /**
+     * Appends raw arguments to {@code docker run}. Repeated calls accumulate in call order;
+     * {@code null} or blank entries are ignored.
+     *
+     * @param additionalRunArgs additional docker run arguments
+     * @return this spec
+     */
     public DockerFilesystemSpec additionalRunArgs(String... additionalRunArgs) {
         options.additionalRunArgs(additionalRunArgs);
         return this;
     }
 
+    /**
+     * Appends raw arguments to {@code docker run}, same as {@link #additionalRunArgs(String...)}.
+     * Repeated calls accumulate in call order; a {@code null} list is a no-op.
+     *
+     * @param additionalRunArgs additional docker run arguments
+     * @return this spec
+     */
     public DockerFilesystemSpec additionalRunArgs(List<String> additionalRunArgs) {
-        options.setAdditionalRunArgs(additionalRunArgs);
+        if (additionalRunArgs != null) {
+            options.additionalRunArgs(additionalRunArgs.toArray(String[]::new));
+        }
         return this;
     }
 

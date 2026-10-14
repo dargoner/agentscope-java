@@ -74,6 +74,7 @@ public class AgentRunSandboxClient implements SandboxClient<AgentRunSandboxClien
         AgentRunSandboxState state = new AgentRunSandboxState();
         state.setSessionId(sessionId);
         state.setWorkspaceSpec(workspaceSpec);
+        state.setWorkspaceRoot(merged.getWorkspaceRoot());
         state.setTemplateName(merged.getTemplateName());
         state.setAccountId(merged.getAccountId());
         state.setRegion(merged.getRegion());
@@ -81,9 +82,7 @@ public class AgentRunSandboxClient implements SandboxClient<AgentRunSandboxClien
         state.setSandboxId(sandboxId);
         state.setSandboxOwned(true);
         state.setWorkspaceRootReady(false);
-        state.setWorkspaceOnNas(
-                isWorkspaceUnderMounts(
-                        merged, workspaceSpec != null ? workspaceSpec.getRoot() : null));
+        state.setWorkspaceOnNas(isWorkspaceUnderMounts(merged));
 
         if (snapshotSpec != null) {
             state.setSnapshot(snapshotSpec.build(sessionId));
@@ -144,7 +143,8 @@ public class AgentRunSandboxClient implements SandboxClient<AgentRunSandboxClien
         return new AgentRunSandbox(state, merged, http, mcp);
     }
 
-    private static boolean isWorkspaceUnderMounts(AgentRunSandboxClientOptions opt, String root) {
+    private static boolean isWorkspaceUnderMounts(AgentRunSandboxClientOptions opt) {
+        String root = opt.getWorkspaceRoot();
         if (root == null || root.isBlank()) {
             return false;
         }
@@ -197,6 +197,9 @@ public class AgentRunSandboxClient implements SandboxClient<AgentRunSandboxClien
         if (call.getOssMountConfigs() != null && !call.getOssMountConfigs().isEmpty()) {
             o.setOssMountConfigs(call.getOssMountConfigs());
         }
+        if (call.getWorkspaceRoot() != null) {
+            o.setWorkspaceRoot(call.getWorkspaceRoot());
+        }
         if (call.getHttpClient() != null) {
             o.setHttpClient(call.getHttpClient());
         }
@@ -219,6 +222,7 @@ public class AgentRunSandboxClient implements SandboxClient<AgentRunSandboxClien
         o.setSandboxIdleTimeoutSeconds(src.getSandboxIdleTimeoutSeconds());
         o.setNasConfig(src.getNasConfig());
         o.setOssMountConfigs(src.getOssMountConfigs());
+        o.setWorkspaceRoot(src.getWorkspaceRoot());
         o.setHttpClient(src.getHttpClient());
         o.setConnectTimeoutSeconds(src.getConnectTimeoutSeconds());
         o.setReadTimeoutSeconds(src.getReadTimeoutSeconds());

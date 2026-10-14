@@ -132,7 +132,7 @@ public class DockerSandbox extends AbstractBaseSandbox implements SandboxFileTra
     protected ExecResult doExec(RuntimeContext runtimeContext, String command, int timeoutSeconds)
             throws Exception {
         String containerId = dockerState.getContainerId();
-        String workspaceRoot = dockerState.getWorkspaceSpec().getRoot();
+        String workspaceRoot = dockerState.getWorkspaceRoot();
 
         ProcessBuilder pb = new ProcessBuilder(buildExecCommand(containerId, workspaceRoot));
         Process process = pb.start();
@@ -236,7 +236,7 @@ public class DockerSandbox extends AbstractBaseSandbox implements SandboxFileTra
     @Override
     protected InputStream doPersistWorkspace() throws Exception {
         String containerId = dockerState.getContainerId();
-        String workspaceRoot = dockerState.getWorkspaceSpec().getRoot();
+        String workspaceRoot = dockerState.getWorkspaceRoot();
 
         List<String> tarCmd = new ArrayList<>();
         tarCmd.add("docker");
@@ -295,7 +295,7 @@ public class DockerSandbox extends AbstractBaseSandbox implements SandboxFileTra
     @Override
     protected void doHydrateWorkspace(InputStream archive) throws Exception {
         String containerId = dockerState.getContainerId();
-        String workspaceRoot = dockerState.getWorkspaceSpec().getRoot();
+        String workspaceRoot = dockerState.getWorkspaceRoot();
 
         // Ensure the workspace directory exists inside the container
         runDockerCliBlocking(30, "docker", "exec", containerId, "mkdir", "-p", workspaceRoot);
@@ -369,14 +369,14 @@ public class DockerSandbox extends AbstractBaseSandbox implements SandboxFileTra
     @Override
     protected void doSetupWorkspace() throws Exception {
         String containerId = dockerState.getContainerId();
-        String workspaceRoot = dockerState.getWorkspaceSpec().getRoot();
+        String workspaceRoot = dockerState.getWorkspaceRoot();
         runDockerCliBlocking(30, "docker", "exec", containerId, "mkdir", "-p", workspaceRoot);
     }
 
     @Override
     protected void doDestroyWorkspace() throws Exception {
         String containerId = dockerState.getContainerId();
-        String workspaceRoot = dockerState.getWorkspaceSpec().getRoot();
+        String workspaceRoot = dockerState.getWorkspaceRoot();
         if (containerId != null && !containerId.isBlank()) {
             try {
                 runDockerCliBlocking(30, "docker", "exec", containerId, "rm", "-rf", workspaceRoot);
@@ -391,8 +391,8 @@ public class DockerSandbox extends AbstractBaseSandbox implements SandboxFileTra
     }
 
     @Override
-    public String getWorkspaceRoot() {
-        return dockerState.getWorkspaceSpec().getRoot();
+    protected String getWorkspaceRoot() {
+        return dockerState.getWorkspaceRoot();
     }
 
     @Override
@@ -452,7 +452,7 @@ public class DockerSandbox extends AbstractBaseSandbox implements SandboxFileTra
             throw new IllegalArgumentException("Docker container is unavailable");
         }
         String resolved = resolveContainerPath(path);
-        String root = normalizeAbsolutePath(dockerState.getWorkspaceSpec().getRoot());
+        String root = normalizeAbsolutePath(dockerState.getWorkspaceRoot());
         if (root == null
                 || resolved.equals(root)
                 || !resolved.startsWith("/".equals(root) ? "/" : root + "/")) {
@@ -481,7 +481,7 @@ public class DockerSandbox extends AbstractBaseSandbox implements SandboxFileTra
         if (path.startsWith("/") || normalized.startsWith("/")) {
             return normalizeAbsolutePath(normalized);
         }
-        String root = normalizeAbsolutePath(dockerState.getWorkspaceSpec().getRoot());
+        String root = normalizeAbsolutePath(dockerState.getWorkspaceRoot());
         if (root == null) {
             throw new IllegalArgumentException("Sandbox workspace root is unavailable");
         }
@@ -695,7 +695,7 @@ public class DockerSandbox extends AbstractBaseSandbox implements SandboxFileTra
                     }
                     String containerPath =
                             WorkspaceMountSupport.containerMountPath(
-                                    dockerState.getWorkspaceSpec().getRoot(), e.getKey());
+                                    dockerState.getWorkspaceRoot(), e.getKey());
                     String mode = bm.isReadOnly() ? "ro" : "rw";
                     cmd.add("-v");
                     cmd.add(host + ":" + containerPath + ":" + mode);

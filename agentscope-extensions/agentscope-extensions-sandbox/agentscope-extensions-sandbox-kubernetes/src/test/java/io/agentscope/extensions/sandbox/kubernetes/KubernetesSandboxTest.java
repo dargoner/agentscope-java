@@ -63,10 +63,8 @@ class KubernetesSandboxTest {
 
         state = new KubernetesSandboxState();
         state.setSessionId("session-1");
-        io.agentscope.harness.agent.sandbox.WorkspaceSpec ws =
-                new io.agentscope.harness.agent.sandbox.WorkspaceSpec();
-        ws.setRoot("/workspace");
-        state.setWorkspaceSpec(ws);
+        state.setWorkspaceSpec(new io.agentscope.harness.agent.sandbox.WorkspaceSpec());
+        state.setWorkspaceRoot("/workspace");
         state.setFileApiBaseDir("/workspace");
         sandbox = new KubernetesSandbox(state, sdkSandbox);
     }

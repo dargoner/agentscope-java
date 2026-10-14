@@ -932,11 +932,16 @@ public class ConversationCompactor {
 
     /**
      * Aggregate tool-result pruning: walks backward through TOOL messages, protects the most
-     * recent {@code protectTokens} worth of tool output, then replaces older oversized tool
-     * results with a head+tail preview when the total prunable amount exceeds
-     * {@code minimumTokens}.
+     * recent {@code protectTokens} worth of tool output — each result in a batched tool message
+     * counted independently — then replaces older oversized tool results with a head+tail
+     * preview when the total prunable amount exceeds {@code minimumTokens}.
      *
-     * <p>Non-LLM operation. Returns the original list if no pruning occurred.
+     * <p>Non-LLM operation. Returns the original list if no pruning occurred. The pruned block
+     * keeps its metadata and execution state — only the output text is replaced with the
+     * preview — so downstream consumers of markers such as {@code agentscope.tool_result_evicted}
+     * or {@link ToolResultBlock#METADATA_SUSPENDED} keep working. The preserved markers describe
+     * the pre-prune payload, though: consumers must not assume the block text is the full
+     * payload (e.g. an eviction pointer's referenced content is no longer inline after pruning).
      */
     List<Msg> pruneToolResults(List<Msg> messages, CompactionConfig.PruneConfig pruneConfig) {
         if (pruneConfig == null || messages == null || messages.isEmpty()) {
@@ -960,13 +965,6 @@ public class ConversationCompactor {
             if (blocks == null) {
                 continue;
             }
-            int tokens = TokenCounterUtil.calculateToken(List.of(msg));
-            // Protection is per message so a message that carries several tool results is not
-            // counted once per block. The newest tool messages fill the protect window first.
-            if (protectedTokens < protectBudget) {
-                protectedTokens += tokens;
-                continue;
-            }
             boolean messagePruned = false;
             long prunedCost = 0;
             for (int j = blocks.size() - 1; j >= 0; j--) {
@@ -978,6 +976,12 @@ public class ConversationCompactor {
                 }
                 String text = extractToolResultText(tr);
                 if (text.isBlank()) {
+                    continue;
+                }
+                // Charge this result only, not every sibling in a batched tool message.
+                int tokens = TokenCounterUtil.calculateToken(List.of(msg.withContent(List.of(tr))));
+                if (protectedTokens < protectBudget) {
+                    protectedTokens += tokens;
                     continue;
                 }
                 // Unregistered media inside a tool result must not be silently dropped by a
@@ -1022,6 +1026,7 @@ public class ConversationCompactor {
                             .executionDetails(tr.getExecutionDetails())
                             .build();
             newBlocks.set(blockIdx, pruned);
+            // withContent keeps id/name/role/metadata/timestamp/usage of the carrying message.
             result.set(msgIdx, msg.withContent(newBlocks));
         }
 

@@ -24,7 +24,6 @@ import io.agentscope.harness.agent.filesystem.CompositeFilesystem;
 import io.agentscope.harness.agent.filesystem.OverlayFilesystem;
 import io.agentscope.harness.agent.filesystem.ProjectAwareOverlay;
 import io.agentscope.harness.agent.filesystem.local.LocalFilesystemWithShell;
-import io.agentscope.harness.agent.filesystem.model.ExecuteResponse;
 import io.agentscope.harness.agent.filesystem.sandbox.AbstractSandboxFilesystem;
 import io.agentscope.harness.agent.workspace.LocalFsMode;
 import io.agentscope.harness.agent.workspace.PathPolicy;
@@ -59,9 +58,9 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
             ## Runtime Environment
             This is the %s. We are setting up the context for our chat.
             Today's date is %s.
-            The workspace directory is: %s
             My operating system is: %s
-            Temporary files directory: %s
+            The workspace directory is: %s
+            The project's temporary directory is: %s
             %s
             """;
 
@@ -199,24 +198,6 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
                             RuntimeContext rc = ctx != null ? ctx : RuntimeContext.empty();
                             String base = currentPrompt != null ? currentPrompt : "";
                             collectWorkspaceMaterials(rc);
-                            // Direct middleware callers historically received the rendered
-                            // workspace prompt. Keep that compatibility for callers without an
-                            // agent while the normal agent pipeline consumes the structured
-                            // materials through HarnessContextBuilder.
-                            if (agent == null
-                                    && !(workspaceManager.getFilesystem()
-                                            instanceof OverlayFilesystem)) {
-                                WorkspaceContextMaterials materials =
-                                        rc.get(WorkspaceContextMaterials.class);
-                                String content =
-                                        materials == null
-                                                ? ""
-                                                : materials.items().stream()
-                                                        .map(ContextItem::content)
-                                                        .filter(s -> s != null && !s.isBlank())
-                                                        .collect(Collectors.joining("\n\n"));
-                                return base + "\n## Session Context\n" + content;
-                            }
                             return base;
                         })
                 .subscribeOn(Schedulers.boundedElastic());
@@ -256,7 +237,7 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
 
         String workspaceParagraph =
                 buildWorkspaceParagraph(
-                        workspace, effectiveWorkspace, filesystem, artifactDeliveryEnabled, rc);
+                        workspace, effectiveWorkspace, filesystem, artifactDeliveryEnabled);
         WorkspaceContextMaterials.register(
                 rc,
                 List.of(
@@ -336,12 +317,8 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
             Path workspace,
             Path effectiveWorkspace,
             AbstractFilesystem fs,
-            boolean artifactDeliveryEnabled,
-            RuntimeContext rc) {
+            boolean artifactDeliveryEnabled) {
         StringBuilder sb = new StringBuilder("## Workspace\n");
-        sb.append("The workspace directory is: ")
-                .append(effectiveWorkspace.toAbsolutePath())
-                .append("\n");
         LocalFilesystemWithShell localUpper = detectLocalUpper(fs);
         Path project = localUpper != null ? localUpper.getShellCwd() : null;
         if (project != null) {
@@ -379,20 +356,11 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
                                 + " the project (overlay copy-on-write).\n");
             }
             sb.append("Shell commands run with `pwd` set to the project directory.\n");
-            appendHostPlatformInfo(
-                    sb,
-                    System.getProperty("os.name") + " " + System.getProperty("os.version"),
-                    System.getProperty("java.io.tmpdir"));
         } else if (fs instanceof AbstractSandboxFilesystem sandbox
                 && !(fs instanceof OverlayFilesystem)) {
-            sb.append("Sandbox root: ")
-                    .append(sandbox.getWorkspaceRoot(rc))
-                    .append(" (container id: ")
+            sb.append("Sandbox root: /workspace (container id: ")
                     .append(sandbox.id())
                     .append(")\n");
-            sb.append(
-                    "The harness-side workspace files (AGENTS.md, skills, knowledge,"
-                            + " MEMORY.md) are projected into this sandbox. ");
             if (artifactDeliveryEnabled) {
                 sb.append(
                         "Files are isolated inside this container. The host filesystem is not"
@@ -404,15 +372,6 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
                                 + " accessible and there is no mechanism for moving files across"
                                 + " the boundary.\n");
             }
-            appendHostPlatformInfo(
-                    sb,
-                    querySandbox(
-                            sandbox,
-                            rc,
-                            "cat /etc/os-release 2>/dev/null | grep ^PRETTY_NAME | cut -d="
-                                    + " -f2 | tr -d '\"'",
-                            querySandbox(sandbox, rc, "uname -srm", "Linux")),
-                    querySandbox(sandbox, rc, "echo \"${TMPDIR:-/tmp}\"", "/tmp"));
         } else if (fs instanceof CompositeFilesystem) {
             sb.append("Distributed workspace template root: ")
                     .append(workspace.toAbsolutePath())
@@ -421,10 +380,6 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
                     "Runtime data (MEMORY.md, sessions, tasks, skills) lives in a shared remote"
                             + " store, not on the local host. Reads of project-authored template"
                             + " files fall back to the workspace template root above.\n");
-            appendHostPlatformInfo(
-                    sb,
-                    System.getProperty("os.name") + " " + System.getProperty("os.version"),
-                    System.getProperty("java.io.tmpdir"));
         } else {
             sb.append("Your working directory is: ")
                     .append(workspace.toAbsolutePath())
@@ -432,10 +387,6 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
             sb.append(
                     "Treat this directory as the single global workspace for file operations"
                             + " unless explicitly instructed otherwise.\n");
-            appendHostPlatformInfo(
-                    sb,
-                    System.getProperty("os.name") + " " + System.getProperty("os.version"),
-                    System.getProperty("java.io.tmpdir"));
         }
         sb.append(
                 "AGENTS.md defines persona and local conventions — honor them when consistent"
@@ -465,31 +416,6 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
                             + " cannot access your container's filesystem directly.\n");
         }
         return sb.toString();
-    }
-
-    /**
-     * Executes a shell command in the sandbox and returns the stripped output, or the given
-     * fallback string if execution fails.
-     */
-    private static String querySandbox(
-            AbstractSandboxFilesystem sandbox, RuntimeContext rc, String command, String fallback) {
-        try {
-            ExecuteResponse result = sandbox.execute(rc, command, null);
-            if (result.exitCode() != null && result.exitCode() == 0 && result.output() != null) {
-                String out = result.output().strip();
-                if (!out.isEmpty()) {
-                    return out;
-                }
-            }
-        } catch (Exception e) {
-            // fall through
-        }
-        return fallback;
-    }
-
-    private static void appendHostPlatformInfo(StringBuilder sb, String osInfo, String tmpdir) {
-        sb.append("My operating system is: ").append(osInfo).append("\n");
-        sb.append("Temporary files directory: ").append(tmpdir).append("\n");
     }
 
     /**
@@ -560,7 +486,7 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
     private String buildSessionDynamicPart(RuntimeContext rc) {
         List<String> parts = new ArrayList<>();
         if (rc != null && rc.getSessionId() != null) {
-            parts.add("Session ID: " + rc.getSessionId());
+            parts.add("AgentStateStore ID: " + rc.getSessionId());
         }
         if (environmentMemory != null && !environmentMemory.isBlank()) {
             parts.add(environmentMemory);
@@ -615,7 +541,7 @@ public class WorkspaceContextMiddleware implements HarnessRuntimeMiddleware {
         }
 
         if (!knowledgeFiles.isEmpty()) {
-            if (!sb.isEmpty()) {
+            if (sb.length() > 0) {
                 sb.append("\n");
             }
             sb.append("Knowledge files:\n");
