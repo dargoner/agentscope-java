@@ -28,6 +28,7 @@ import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.AgentRun;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentEventEmitter;
 import io.agentscope.core.event.AgentEventType;
 import io.agentscope.core.event.CustomEvent;
 import io.agentscope.core.message.GenerateReason;
@@ -50,6 +51,7 @@ import io.agentscope.harness.agent.context.ContextTokenEstimator;
 import io.agentscope.harness.agent.context.HarnessContextBuilder;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.memory.compaction.ConversationCompactor;
+import io.agentscope.harness.agent.memory.compaction.TokenCounterUtil;
 import io.agentscope.harness.agent.workspace.WorkspaceConstants;
 import io.agentscope.harness.agent.workspace.WorkspaceManager;
 import java.io.IOException;
@@ -61,9 +63,11 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import reactor.core.publisher.Flux;
@@ -737,6 +741,91 @@ class CompactionMiddlewareTest {
         assertEquals(2, state.getContext().size());
         assertEquals("old context", state.getContext().get(0).getTextContent());
         assertEquals("latest request", state.getContext().get(1).getTextContent());
+    }
+
+    /**
+     * Standalone reasoning cannot derive a conversation budget from the model window, so the
+     * fallback budget of {@link CompactionConfig#FALLBACK_TRIGGER_TOKENS} governs the trigger: one
+     * token below it passes through untouched without any compaction attempt, hitting it exactly
+     * starts one and surfaces the lifecycle pair on the parent stream. The summarization input of
+     * this unknown-window environment cannot fit the auxiliary 64k budget, so the attempt settles
+     * as failed and the request is still forwarded unchanged without reaching the provider. The
+     * boundary is pinned with the shared estimator so the trigger and the final request budget keep
+     * agreeing.
+     */
+    @Test
+    void standaloneReasoningTriggersExactlyAtFallbackBudget() {
+        assertFallbackBudgetBoundary(399_955, false);
+        assertFallbackBudgetBoundary(399_956, true);
+    }
+
+    private void assertFallbackBudgetBoundary(int oversizedChars, boolean expectAttempt) {
+        PromptRecordingModel model = new PromptRecordingModel();
+        CompactionConfig config = CompactionConfig.builder().triggerMessages(0).prune(null).build();
+        List<Msg> conversation =
+                List.of(userMessage("a".repeat(oversizedChars)), userMessage("latest"));
+        int estimated = TokenCounterUtil.calculateToken(conversation);
+        assertEquals(
+                expectAttempt
+                        ? CompactionConfig.FALLBACK_TRIGGER_TOKENS
+                        : CompactionConfig.FALLBACK_TRIGGER_TOKENS - 1,
+                estimated,
+                "the constructed conversation must land exactly on the fallback boundary");
+        List<AgentEvent> events = new CopyOnWriteArrayList<>();
+        CompactionMiddleware middleware = new CompactionMiddleware(null, model, config, false);
+        AtomicReference<ReasoningInput> forwarded = new AtomicReference<>();
+
+        StepVerifier.create(
+                        middleware
+                                .onReasoning(
+                                        agent(),
+                                        context("user", "fallback-budget"),
+                                        new ReasoningInput(conversation, List.of(), null),
+                                        next -> {
+                                            forwarded.set(next);
+                                            return Flux.empty();
+                                        })
+                                .contextWrite(
+                                        reactorContext ->
+                                                reactorContext.put(
+                                                        AgentEventEmitter.CONTEXT_KEY,
+                                                        (AgentEventEmitter) events::add)))
+                .verifyComplete();
+
+        ReasoningInput forwardedInput = forwarded.get();
+        assertNotNull(forwardedInput, "reasoning must receive the prepared input");
+        assertTrue(
+                model.prompts.isEmpty(),
+                "the standalone boundary must never reach the summarization provider");
+        assertEquals(2, forwardedInput.messages().size());
+        assertEquals(
+                conversation.get(0).getTextContent(),
+                forwardedInput.messages().get(0).getTextContent(),
+                "the sub-limit conversation and the degraded attempt both forward the prefix");
+        assertEquals(
+                conversation.get(1).getTextContent(),
+                forwardedInput.messages().get(1).getTextContent());
+        if (!expectAttempt) {
+            assertTrue(
+                    events.isEmpty(),
+                    "staying below the fallback budget must not start a compaction attempt");
+            return;
+        }
+        assertEquals(2, events.size(), "hitting the fallback budget must emit one lifecycle pair");
+        CustomEvent started = (CustomEvent) events.get(0);
+        CustomEvent finished = (CustomEvent) events.get(1);
+        assertEquals(ConversationCompactor.STARTED_EVENT_NAME, started.getName());
+        assertEquals("started", started.getValue().get("status"));
+        assertEquals(ConversationCompactor.FINISHED_EVENT_NAME, finished.getName());
+        assertEquals(
+                started.getValue().get("compactionId"), finished.getValue().get("compactionId"));
+        assertEquals(
+                "failed",
+                finished.getValue().get("status"),
+                "the 160k prefix cannot fit the auxiliary 64k summarization budget");
+        assertEquals(
+                ContextBudgetExceededException.class.getSimpleName(),
+                finished.getValue().get("errorType"));
     }
 
     /** An ordinary compaction failure skips compaction and invokes original reasoning once. */
