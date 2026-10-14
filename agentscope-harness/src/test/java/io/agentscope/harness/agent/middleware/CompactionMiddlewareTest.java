@@ -270,6 +270,41 @@ class CompactionMiddlewareTest {
     }
 
     /**
+     * The overflow guard skips the retry when there is no durable state to compact: a null state
+     * and an empty context both propagate the provider error untouched and spend no summary call.
+     */
+    @Test
+    void overflowGuardSkipsRetryWithoutDurableState() {
+        AtomicInteger summaryCalls = new AtomicInteger();
+        var companion =
+                new CompactionMiddleware(
+                                null, new CountingSummaryModel(summaryCalls), noCompactionConfig())
+                        .overflowRecovery();
+        var input = new ReasoningInput(List.of(userMessage("latest request")), List.of(), null);
+
+        IllegalStateException noState = new IllegalStateException("context_length_exceeded");
+        StepVerifier.create(
+                        companion.onReasoning(
+                                null,
+                                RuntimeContext.empty(),
+                                input,
+                                ignored -> Flux.error(noState)))
+                .expectErrorSatisfies(error -> assertSame(noState, error))
+                .verify();
+
+        IllegalStateException emptyContext = new IllegalStateException("context_length_exceeded");
+        RuntimeContext emptyState =
+                RuntimeContext.builder().agentState(AgentState.builder().build()).build();
+        StepVerifier.create(
+                        companion.onReasoning(
+                                null, emptyState, input, ignored -> Flux.error(emptyContext)))
+                .expectErrorSatisfies(error -> assertSame(emptyContext, error))
+                .verify();
+
+        assertEquals(0, summaryCalls.get(), "the guard must not spend a summary call");
+    }
+
+    /**
      * The full middleware (standalone wiring) must also recover stream-event overflows exactly
      * once through its own reasoning boundary.
      */
