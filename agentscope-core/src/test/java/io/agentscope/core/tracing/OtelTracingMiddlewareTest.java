@@ -40,6 +40,7 @@ import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.core.message.AssistantMessage;
 import io.agentscope.core.message.AudioBlock;
 import io.agentscope.core.message.Base64Source;
+import io.agentscope.core.message.DataBlock;
 import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.SystemMessage;
@@ -50,6 +51,7 @@ import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.message.URLSource;
 import io.agentscope.core.message.UserMessage;
+import io.agentscope.core.message.VideoBlock;
 import io.agentscope.core.middleware.ActingInput;
 import io.agentscope.core.middleware.AgentInput;
 import io.agentscope.core.middleware.ModelCallInput;
@@ -58,6 +60,7 @@ import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.ToolSchema;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.OpenTelemetry;
+import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.TracerProvider;
@@ -84,6 +87,15 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 class OtelTracingMiddlewareTest {
+
+    private static final AttributeKey<String> GEN_AI_INPUT_MESSAGES =
+            AttributeKey.stringKey("gen_ai.input.messages");
+    private static final AttributeKey<String> GEN_AI_OUTPUT_MESSAGES =
+            AttributeKey.stringKey("gen_ai.output.messages");
+    private static final AttributeKey<String> GEN_AI_TOOL_CALL_ARGUMENTS =
+            AttributeKey.stringKey("gen_ai.tool.call.arguments");
+    private static final AttributeKey<String> GEN_AI_TOOL_CALL_RESULT =
+            AttributeKey.stringKey("gen_ai.tool.call.result");
 
     private InMemorySpanExporter spanExporter;
     private OpenTelemetrySdk openTelemetrySdk;
@@ -829,19 +841,14 @@ class OtelTracingMiddlewareTest {
                 .collectList()
                 .block();
 
-        String result =
-                spanExporter
-                        .getFinishedSpanItems()
-                        .get(0)
-                        .getAttributes()
-                        .get(
-                                io.opentelemetry.api.common.AttributeKey.stringKey(
-                                        "gen_ai.tool.call.result"));
+        SpanData span = spanExporter.getFinishedSpanItems().get(0);
+        String result = span.getAttributes().get(GEN_AI_TOOL_CALL_RESULT);
         assertNotNull(result);
         assertTrue(result.contains("[image]"));
         assertTrue(result.contains("[audio]"));
         assertFalse(result.contains(base64Marker));
         assertFalse(result.contains("sig=abc"));
+        assertNoSensitiveLeak(span, base64Marker, signedUrl);
     }
 
     @Test
@@ -889,6 +896,368 @@ class OtelTracingMiddlewareTest {
         assertTrue(inputMessagesJson.contains("fetched content"));
         assertTrue(inputMessagesJson.contains("[image]"));
         assertFalse(inputMessagesJson.contains(base64Marker));
+        assertNoSensitiveLeak(spanExporter.getFinishedSpanItems().get(0), base64Marker);
+    }
+
+    @Test
+    void onActing_recordsClassOnlyErrorAndSanitizesNestedMediaWhenContentEnabled() {
+        Agent agent = stubAgent("tool-fail-agent", "agent-tool-fail");
+        ToolUseBlock toolCall =
+                ToolUseBlock.builder().id("call-fail").name("fetch").input(Map.of()).build();
+        ActingInput input = new ActingInput(List.of(toolCall));
+        String base64Marker = "BASE64-NESTED-FAIL-SECRET";
+        String signedUrl = "https://media.example/nested?sig=fail";
+        ToolResultBlock nested =
+                ToolResultBlock.builder()
+                        .id("inner-fail")
+                        .name("inner-fetch")
+                        .output(
+                                List.of(
+                                        TextBlock.builder().text("nested ok").build(),
+                                        ImageBlock.builder()
+                                                .source(
+                                                        Base64Source.builder()
+                                                                .mediaType("image/png")
+                                                                .data(base64Marker)
+                                                                .build())
+                                                .build(),
+                                        AudioBlock.builder()
+                                                .source(URLSource.builder().url(signedUrl).build())
+                                                .build(),
+                                        VideoBlock.builder()
+                                                .source(URLSource.builder().url(signedUrl).build())
+                                                .build(),
+                                        DataBlock.builder()
+                                                .source(
+                                                        Base64Source.builder()
+                                                                .mediaType(
+                                                                        "application/octet-stream")
+                                                                .data(base64Marker)
+                                                                .build())
+                                                .build()))
+                        .build();
+
+        Flux<AgentEvent> result =
+                middleware.onActing(
+                        agent,
+                        null,
+                        input,
+                        in ->
+                                Flux.concat(
+                                        Flux.just(
+                                                new ToolResultDataDeltaEvent(
+                                                        "reply-1", "call-fail", "fetch", nested)),
+                                        Flux.error(new RuntimeException("boom"))));
+        try {
+            result.collectList().block();
+        } catch (Exception ignored) {
+        }
+
+        SpanData span = spanExporter.getFinishedSpanItems().get(0);
+        assertClassOnlyFailure(span);
+        assertNotNull(span.getAttributes().get(GEN_AI_TOOL_CALL_ARGUMENTS));
+        String resultJson = span.getAttributes().get(GEN_AI_TOOL_CALL_RESULT);
+        assertNotNull(resultJson);
+        assertTrue(resultJson.contains("nested ok"));
+        assertTrue(resultJson.contains("[image]"));
+        assertTrue(resultJson.contains("[audio]"));
+        assertTrue(resultJson.contains("[video]"));
+        assertTrue(resultJson.contains("[data]"));
+        assertNoSensitiveLeak(span, base64Marker, signedUrl);
+    }
+
+    @Test
+    void onActing_recordsClassOnlyErrorWithoutContentWhenContentDisabled() {
+        OtelTracingMiddleware defaultMiddleware = new OtelTracingMiddleware();
+        Agent agent = stubAgent("tool-fail-private", "agent-tool-fail-private");
+        ToolUseBlock toolCall =
+                ToolUseBlock.builder()
+                        .id("call-private-fail")
+                        .name("fetch")
+                        .input(Map.of())
+                        .build();
+        String base64Marker = "BASE64-PRIVATE-FAIL-SECRET";
+
+        Flux<AgentEvent> result =
+                defaultMiddleware.onActing(
+                        agent,
+                        null,
+                        new ActingInput(List.of(toolCall)),
+                        in ->
+                                Flux.concat(
+                                        Flux.just(
+                                                new ToolResultDataDeltaEvent(
+                                                        "reply-1",
+                                                        "call-private-fail",
+                                                        "fetch",
+                                                        ImageBlock.builder()
+                                                                .source(
+                                                                        Base64Source.builder()
+                                                                                .mediaType(
+                                                                                        "image/png")
+                                                                                .data(base64Marker)
+                                                                                .build())
+                                                                .build())),
+                                        Flux.error(new RuntimeException("boom"))));
+        try {
+            result.collectList().block();
+        } catch (Exception ignored) {
+        }
+
+        SpanData span = spanExporter.getFinishedSpanItems().get(0);
+        assertClassOnlyFailure(span);
+        assertNull(span.getAttributes().get(GEN_AI_TOOL_CALL_ARGUMENTS));
+        assertNull(span.getAttributes().get(GEN_AI_TOOL_CALL_RESULT));
+        assertNoSensitiveLeak(span, base64Marker);
+    }
+
+    @Test
+    void onModelCall_recordsClassOnlyErrorAndSanitizesNestedMediaWhenContentEnabled() {
+        Agent agent = stubAgent("model-fail-agent", "agent-model-fail");
+        String base64Marker = "BASE64-MODEL-FAIL-SECRET";
+        String signedUrl = "https://media.example/model?sig=fail";
+        ToolResultBlock mediaResult =
+                ToolResultBlock.builder()
+                        .id("call-model-fail")
+                        .name("fetch")
+                        .output(
+                                List.of(
+                                        TextBlock.builder().text("request payload").build(),
+                                        ToolResultBlock.builder()
+                                                .id("call-model-fail-inner")
+                                                .name("nested")
+                                                .output(
+                                                        List.of(
+                                                                ImageBlock.builder()
+                                                                        .source(
+                                                                                Base64Source
+                                                                                        .builder()
+                                                                                        .mediaType(
+                                                                                                "image/png")
+                                                                                        .data(
+                                                                                                base64Marker)
+                                                                                        .build())
+                                                                        .build(),
+                                                                AudioBlock.builder()
+                                                                        .source(
+                                                                                URLSource.builder()
+                                                                                        .url(
+                                                                                                signedUrl)
+                                                                                        .build())
+                                                                        .build()))
+                                                .build()))
+                        .build();
+        ModelCallInput input =
+                new ModelCallInput(
+                        List.of(new ToolResultMessage(List.of(mediaResult))),
+                        null,
+                        null,
+                        new StubModel("gpt-4o"));
+
+        Flux<AgentEvent> result =
+                middleware.onModelCall(
+                        agent, null, input, in -> Flux.error(new RuntimeException("boom")));
+        try {
+            result.collectList().block();
+        } catch (Exception ignored) {
+        }
+
+        SpanData span = spanExporter.getFinishedSpanItems().get(0);
+        assertClassOnlyFailure(span);
+        String inputMessagesJson = span.getAttributes().get(GEN_AI_INPUT_MESSAGES);
+        assertNotNull(inputMessagesJson);
+        assertTrue(inputMessagesJson.contains("request payload"));
+        assertTrue(inputMessagesJson.contains("[image]"));
+        assertTrue(inputMessagesJson.contains("[audio]"));
+        assertNull(span.getAttributes().get(GEN_AI_OUTPUT_MESSAGES));
+        assertNoSensitiveLeak(span, base64Marker, signedUrl);
+    }
+
+    @Test
+    void onModelCall_recordsClassOnlyErrorWithoutContentWhenContentDisabled() {
+        OtelTracingMiddleware defaultMiddleware = new OtelTracingMiddleware();
+        Agent agent = stubAgent("model-fail-private", "agent-model-fail-private");
+        String base64Marker = "BASE64-MODEL-PRIVATE-SECRET";
+        ToolResultBlock mediaResult =
+                ToolResultBlock.builder()
+                        .id("call-private-model")
+                        .name("fetch")
+                        .output(
+                                List.of(
+                                        ImageBlock.builder()
+                                                .source(
+                                                        Base64Source.builder()
+                                                                .mediaType("image/png")
+                                                                .data(base64Marker)
+                                                                .build())
+                                                .build()))
+                        .build();
+        ModelCallInput input =
+                new ModelCallInput(
+                        List.of(new ToolResultMessage(List.of(mediaResult))),
+                        null,
+                        null,
+                        new StubModel("gpt-4o"));
+
+        Flux<AgentEvent> result =
+                defaultMiddleware.onModelCall(
+                        agent, null, input, in -> Flux.error(new RuntimeException("boom")));
+        try {
+            result.collectList().block();
+        } catch (Exception ignored) {
+        }
+
+        SpanData span = spanExporter.getFinishedSpanItems().get(0);
+        assertClassOnlyFailure(span);
+        assertNull(span.getAttributes().get(GEN_AI_INPUT_MESSAGES));
+        assertNull(span.getAttributes().get(GEN_AI_OUTPUT_MESSAGES));
+        assertNoSensitiveLeak(span, base64Marker);
+    }
+
+    @Test
+    void onAgent_recordsClassOnlyErrorAndSanitizesNestedMediaInputWhenContentEnabled() {
+        Agent agent = stubAgent("agent-fail-media", "agent-fail-media-id");
+        String base64Marker = "BASE64-AGENT-FAIL-SECRET";
+        String signedUrl = "https://media.example/agent?sig=fail";
+        ToolResultBlock mediaResult =
+                ToolResultBlock.builder()
+                        .id("call-agent-fail")
+                        .name("fetch")
+                        .output(
+                                List.of(
+                                        TextBlock.builder().text("agent request").build(),
+                                        ToolResultBlock.builder()
+                                                .id("call-agent-fail-inner")
+                                                .name("nested")
+                                                .output(
+                                                        List.of(
+                                                                ImageBlock.builder()
+                                                                        .source(
+                                                                                Base64Source
+                                                                                        .builder()
+                                                                                        .mediaType(
+                                                                                                "image/png")
+                                                                                        .data(
+                                                                                                base64Marker)
+                                                                                        .build())
+                                                                        .build(),
+                                                                AudioBlock.builder()
+                                                                        .source(
+                                                                                URLSource.builder()
+                                                                                        .url(
+                                                                                                signedUrl)
+                                                                                        .build())
+                                                                        .build()))
+                                                .build()))
+                        .build();
+        AgentInput input =
+                new AgentInput(
+                        List.of(
+                                new UserMessage(
+                                        List.of(
+                                                TextBlock.builder()
+                                                        .text("agent fail input")
+                                                        .build(),
+                                                ImageBlock.builder()
+                                                        .source(
+                                                                Base64Source.builder()
+                                                                        .mediaType("image/png")
+                                                                        .data(base64Marker)
+                                                                        .build())
+                                                        .build())),
+                                new ToolResultMessage(List.of(mediaResult))));
+
+        Flux<AgentEvent> result =
+                middleware.onAgent(
+                        agent, null, input, in -> Flux.error(new RuntimeException("boom")));
+        try {
+            result.collectList().block();
+        } catch (Exception ignored) {
+        }
+
+        SpanData span = spanExporter.getFinishedSpanItems().get(0);
+        assertClassOnlyFailure(span);
+        String inputMessagesJson = span.getAttributes().get(GEN_AI_INPUT_MESSAGES);
+        assertNotNull(inputMessagesJson);
+        assertTrue(inputMessagesJson.contains("agent fail input"));
+        assertTrue(inputMessagesJson.contains("agent request"));
+        assertTrue(inputMessagesJson.contains("[image]"));
+        assertTrue(inputMessagesJson.contains("[audio]"));
+        assertNull(span.getAttributes().get(GEN_AI_OUTPUT_MESSAGES));
+        assertNoSensitiveLeak(span, base64Marker, signedUrl);
+    }
+
+    @Test
+    void onAgent_defaultMiddlewareFailureDoesNotRecordContent() {
+        OtelTracingMiddleware defaultMiddleware = new OtelTracingMiddleware();
+        Agent agent = stubAgent("agent-fail-private", "agent-fail-private-id");
+
+        Flux<AgentEvent> result =
+                defaultMiddleware.onAgent(
+                        agent,
+                        null,
+                        new AgentInput(List.of(new UserMessage("secret input"))),
+                        in -> Flux.error(new RuntimeException("boom")));
+        try {
+            result.collectList().block();
+        } catch (Exception ignored) {
+        }
+
+        SpanData span = spanExporter.getFinishedSpanItems().get(0);
+        assertClassOnlyFailure(span);
+        assertNull(span.getAttributes().get(GEN_AI_INPUT_MESSAGES));
+        assertNull(span.getAttributes().get(GEN_AI_OUTPUT_MESSAGES));
+        assertFalse(span.getAttributes().asMap().toString().contains("secret input"));
+    }
+
+    @Test
+    void onAgent_replacesMediaRecursivelyInOutputMessagesWhenContentEnabled() {
+        Agent agent = stubAgent("output-media-agent", "agent-output-media");
+        String base64Marker = "BASE64-OUTPUT-SECRET";
+        String signedUrl = "https://media.example/output?sig=xyz";
+        ToolResultBlock nested =
+                ToolResultBlock.builder()
+                        .id("out-inner")
+                        .name("render")
+                        .output(
+                                List.of(
+                                        TextBlock.builder().text("rendered").build(),
+                                        ImageBlock.builder()
+                                                .source(
+                                                        Base64Source.builder()
+                                                                .mediaType("image/png")
+                                                                .data(base64Marker)
+                                                                .build())
+                                                .build(),
+                                        AudioBlock.builder()
+                                                .source(URLSource.builder().url(signedUrl).build())
+                                                .build()))
+                        .build();
+
+        middleware
+                .onAgent(
+                        agent,
+                        null,
+                        new AgentInput(List.of()),
+                        in ->
+                                Flux.just(
+                                        new AgentResultEvent(
+                                                new AssistantMessage(
+                                                        List.of(
+                                                                TextBlock.builder()
+                                                                        .text("rendered done")
+                                                                        .build(),
+                                                                nested)))))
+                .collectList()
+                .block();
+
+        SpanData span = spanExporter.getFinishedSpanItems().get(0);
+        String outputMessagesJson = span.getAttributes().get(GEN_AI_OUTPUT_MESSAGES);
+        assertNotNull(outputMessagesJson);
+        assertTrue(outputMessagesJson.contains("rendered done"));
+        assertTrue(outputMessagesJson.contains("[image]"));
+        assertTrue(outputMessagesJson.contains("[audio]"));
+        assertNoSensitiveLeak(span, base64Marker, signedUrl);
     }
 
     @Test
@@ -1462,6 +1831,29 @@ class OtelTracingMiddlewareTest {
                 .filter(span -> span.getName().startsWith(prefix))
                 .findFirst()
                 .orElseThrow();
+    }
+
+    private static void assertClassOnlyFailure(SpanData span) {
+        assertEquals(StatusCode.ERROR, span.getStatus().getStatusCode());
+        assertEquals("RuntimeException", span.getStatus().getDescription());
+        assertFalse(span.getStatus().getDescription().contains("boom"));
+        assertTrue(
+                span.getEvents().stream().noneMatch(event -> "exception".equals(event.getName())),
+                "raw exceptions must not be recorded on the span");
+        assertFalse(span.getAttributes().asMap().toString().contains("boom"));
+    }
+
+    private static void assertNoSensitiveLeak(SpanData span, String... markers) {
+        span.getAttributes()
+                .forEach(
+                        (key, value) -> {
+                            String text = String.valueOf(value);
+                            for (String marker : markers) {
+                                assertFalse(
+                                        text.contains(marker),
+                                        "attribute " + key.getKey() + " leaked " + marker);
+                            }
+                        });
     }
 
     /**
