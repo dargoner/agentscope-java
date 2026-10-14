@@ -16,6 +16,7 @@
 package io.agentscope.core.tracing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -37,12 +38,17 @@ import io.agentscope.core.event.ToolResultDataDeltaEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
 import io.agentscope.core.message.AssistantMessage;
+import io.agentscope.core.message.AudioBlock;
+import io.agentscope.core.message.Base64Source;
+import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.SystemMessage;
 import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolResultMessage;
 import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.message.URLSource;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.middleware.ActingInput;
 import io.agentscope.core.middleware.AgentInput;
@@ -164,7 +170,12 @@ class OtelTracingMiddlewareTest {
         List<SpanData> spans = spanExporter.getFinishedSpanItems();
         assertEquals(1, spans.size());
         assertEquals(StatusCode.ERROR, spans.get(0).getStatus().getStatusCode());
-        assertTrue(spans.get(0).getStatus().getDescription().contains("boom"));
+        assertEquals("RuntimeException", spans.get(0).getStatus().getDescription());
+        assertFalse(spans.get(0).getStatus().getDescription().contains("boom"));
+        assertTrue(
+                spans.get(0).getEvents().stream()
+                        .noneMatch(event -> "exception".equals(event.getName())),
+                "raw exceptions must not be recorded on the span");
     }
 
     @Test
@@ -771,6 +782,113 @@ class OtelTracingMiddlewareTest {
                                         "gen_ai.tool.call.result"));
         assertNotNull(result);
         assertTrue(result.contains("data result"));
+    }
+
+    @Test
+    void onActing_replacesMediaInToolResultAttributeWhenContentEnabled() {
+        Agent agent = stubAgent("tool-media-agent", "agent-tool-media");
+        ToolUseBlock toolCall =
+                ToolUseBlock.builder().id("call-media").name("lookup").input(Map.of()).build();
+        ActingInput input = new ActingInput(List.of(toolCall));
+        String base64Marker = "BASE64-SECRET-TOKEN";
+        String signedUrl = "https://media.example/secret?sig=abc";
+
+        middleware
+                .onActing(
+                        agent,
+                        null,
+                        input,
+                        in ->
+                                Flux.just(
+                                        new ToolResultDataDeltaEvent(
+                                                "reply-1",
+                                                "call-media",
+                                                "lookup",
+                                                ImageBlock.builder()
+                                                        .source(
+                                                                Base64Source.builder()
+                                                                        .mediaType("image/png")
+                                                                        .data(base64Marker)
+                                                                        .build())
+                                                        .build()),
+                                        new ToolResultDataDeltaEvent(
+                                                "reply-1",
+                                                "call-media",
+                                                "lookup",
+                                                AudioBlock.builder()
+                                                        .source(
+                                                                URLSource.builder()
+                                                                        .url(signedUrl)
+                                                                        .build())
+                                                        .build()),
+                                        new ToolResultEndEvent(
+                                                "reply-1",
+                                                "call-media",
+                                                "lookup",
+                                                ToolResultState.SUCCESS)))
+                .collectList()
+                .block();
+
+        String result =
+                spanExporter
+                        .getFinishedSpanItems()
+                        .get(0)
+                        .getAttributes()
+                        .get(
+                                io.opentelemetry.api.common.AttributeKey.stringKey(
+                                        "gen_ai.tool.call.result"));
+        assertNotNull(result);
+        assertTrue(result.contains("[image]"));
+        assertTrue(result.contains("[audio]"));
+        assertFalse(result.contains(base64Marker));
+        assertFalse(result.contains("sig=abc"));
+    }
+
+    @Test
+    void onModelCall_replacesMediaInToolResultMessagesWhenContentEnabled() {
+        String base64Marker = "BASE64-INPUT-MESSAGE-SECRET";
+        Agent agent = stubAgent("tool-media-message-agent", "agent-tool-media-msg");
+        ToolResultBlock mediaResult =
+                ToolResultBlock.builder()
+                        .id("call-media-msg")
+                        .name("fetch")
+                        .output(
+                                List.of(
+                                        TextBlock.builder().text("fetched content").build(),
+                                        ImageBlock.builder()
+                                                .source(
+                                                        Base64Source.builder()
+                                                                .mediaType("image/png")
+                                                                .data(base64Marker)
+                                                                .build())
+                                                .build()))
+                        .build();
+        ModelCallInput input =
+                new ModelCallInput(
+                        List.of(new ToolResultMessage(List.of(mediaResult))),
+                        null,
+                        null,
+                        new StubModel("gpt-4o"));
+
+        middleware
+                .onModelCall(
+                        agent, null, input, in -> Flux.just(new ModelCallEndEvent("reply-1", null)))
+                .collectList()
+                .block();
+
+        String inputMessagesJson =
+                spanExporter
+                        .getFinishedSpanItems()
+                        .get(0)
+                        .getAttributes()
+                        .get(
+                                io.opentelemetry.api.common.AttributeKey.stringKey(
+                                        "gen_ai.input.messages"));
+
+        assertNotNull(inputMessagesJson);
+        assertTrue(inputMessagesJson.contains("fetched content"));
+        assertTrue(inputMessagesJson.contains("[image]"));
+        assertFalse(inputMessagesJson.contains(base64Marker));
     }
 
     @Test

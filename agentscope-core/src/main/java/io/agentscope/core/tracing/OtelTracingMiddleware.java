@@ -28,12 +28,16 @@ import io.agentscope.core.event.ToolResultDataDeltaEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.event.ToolResultStartEvent;
 import io.agentscope.core.event.ToolResultTextDeltaEvent;
+import io.agentscope.core.message.AudioBlock;
 import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.DataBlock;
+import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ThinkingBlock;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.message.VideoBlock;
 import io.agentscope.core.middleware.ActingInput;
 import io.agentscope.core.middleware.AgentInput;
 import io.agentscope.core.middleware.MiddlewareBase;
@@ -299,9 +303,12 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                     .doOnError(
                                             e -> {
                                                 if (ended.compareAndSet(false, true)) {
+                                                    // Only the exception class is exported:
+                                                    // raw messages and stack traces can embed
+                                                    // URLs, provider payloads or media fragments.
                                                     span.setStatus(
-                                                            StatusCode.ERROR, e.getMessage());
-                                                    span.recordException(e);
+                                                            StatusCode.ERROR,
+                                                            e.getClass().getSimpleName());
                                                     span.end();
                                                 }
                                             })
@@ -396,9 +403,12 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                     .doOnError(
                                             e -> {
                                                 if (ended.compareAndSet(false, true)) {
+                                                    // Only the exception class is exported:
+                                                    // raw messages and stack traces can embed
+                                                    // URLs, provider payloads or media fragments.
                                                     span.setStatus(
-                                                            StatusCode.ERROR, e.getMessage());
-                                                    span.recordException(e);
+                                                            StatusCode.ERROR,
+                                                            e.getClass().getSimpleName());
                                                     span.end();
                                                 }
                                             })
@@ -518,9 +528,12 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                                     setToolCallIds(span, callIds);
                                                     setToolResultAttribute(
                                                             span, input.toolCalls(), toolResults);
+                                                    // Only the exception class is exported:
+                                                    // raw messages and stack traces can embed
+                                                    // URLs, provider payloads or media fragments.
                                                     span.setStatus(
-                                                            StatusCode.ERROR, e.getMessage());
-                                                    span.recordException(e);
+                                                            StatusCode.ERROR,
+                                                            e.getClass().getSimpleName());
                                                     span.end();
                                                 }
                                             })
@@ -630,6 +643,48 @@ public class OtelTracingMiddleware implements MiddlewareBase {
             return id;
         }
         return name != null ? name : "unknown";
+    }
+
+    /**
+     * Replaces media blocks with textual placeholders before tracing serialization: raw media
+     * sources carry Base64 payloads and signed URLs that must not reach the telemetry pipeline.
+     * Nested tool results are sanitized recursively.
+     */
+    private static ContentBlock sanitizeMediaBlock(ContentBlock block) {
+        if (block instanceof ImageBlock) {
+            return TextBlock.builder().text("[image]").build();
+        }
+        if (block instanceof AudioBlock) {
+            return TextBlock.builder().text("[audio]").build();
+        }
+        if (block instanceof VideoBlock) {
+            return TextBlock.builder().text("[video]").build();
+        }
+        if (block instanceof DataBlock) {
+            return TextBlock.builder().text("[data]").build();
+        }
+        if (block instanceof ToolResultBlock nested) {
+            return ToolResultBlock.builder()
+                    .id(nested.getId())
+                    .name(nested.getName())
+                    .output(sanitizeMediaBlocks(nested.getOutput()))
+                    .metadata(nested.getMetadata())
+                    .state(nested.getState())
+                    .executionDetails(nested.getExecutionDetails())
+                    .build();
+        }
+        return block;
+    }
+
+    private static List<ContentBlock> sanitizeMediaBlocks(List<ContentBlock> blocks) {
+        if (blocks == null || blocks.isEmpty()) {
+            return blocks;
+        }
+        List<ContentBlock> sanitized = new ArrayList<>(blocks.size());
+        for (ContentBlock block : blocks) {
+            sanitized.add(sanitizeMediaBlock(block));
+        }
+        return sanitized;
     }
 
     private void setToolResultAttribute(
@@ -828,7 +883,8 @@ public class OtelTracingMiddleware implements MiddlewareBase {
             } else if (block instanceof ToolResultBlock toolResultBlock) {
                 parts.add(
                         new ToolCallResponsePart(
-                                toolResultBlock.getId(), toolResultBlock.getOutput()));
+                                toolResultBlock.getId(),
+                                sanitizeMediaBlocks(toolResultBlock.getOutput())));
             }
         }
         return parts;
@@ -932,7 +988,7 @@ public class OtelTracingMiddleware implements MiddlewareBase {
             if (text.length() > 0) {
                 blocks.add(TextBlock.builder().text(text.toString()).build());
             }
-            blocks.addAll(data);
+            blocks.addAll(sanitizeMediaBlocks(data));
             return blocks;
         }
     }
