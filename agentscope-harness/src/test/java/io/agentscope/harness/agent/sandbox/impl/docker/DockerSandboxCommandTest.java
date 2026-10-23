@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -70,7 +71,7 @@ class DockerSandboxCommandTest {
 
     @Test
     void execProcessDestroysTheHostProcessOnTimeout() throws Exception {
-        Process process = new ProcessBuilder("sh", "-s").start();
+        Process process = startWaitingProcess();
 
         assertThrows(
                 SandboxException.ExecTimeoutException.class,
@@ -86,7 +87,7 @@ class DockerSandboxCommandTest {
 
     @Test
     void execProcessDestroysTheHostProcessWhenInterrupted() throws Exception {
-        Process process = new ProcessBuilder("sh", "-s").start();
+        Process process = startWaitingProcess();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread worker =
                 new Thread(
@@ -114,7 +115,7 @@ class DockerSandboxCommandTest {
 
     @Test
     void execProcessDestroysTheHostProcessWhenWritingFails() throws Exception {
-        Process delegate = new ProcessBuilder("sh", "-s").start();
+        Process delegate = startWaitingProcess();
         Process process = new FailingStdinProcess(delegate);
 
         assertThrows(
@@ -151,6 +152,24 @@ class DockerSandboxCommandTest {
                             + " /workspace/large.txt";
             ExecResult largeResult = sandbox.exec(RuntimeContext.empty(), large, 30);
             assertEquals("large-script-ok", largeResult.stdout());
+        }
+    }
+
+    private static Process startWaitingProcess() throws IOException {
+        String executable =
+                System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java";
+        return new ProcessBuilder(
+                        Path.of(System.getProperty("java.home"), "bin", executable).toString(),
+                        "-cp",
+                        System.getProperty("java.class.path"),
+                        WaitingProcess.class.getName())
+                .start();
+    }
+
+    public static final class WaitingProcess {
+        public static void main(String[] args) throws Exception {
+            System.in.readAllBytes();
+            Thread.sleep(TimeUnit.MINUTES.toMillis(1));
         }
     }
 

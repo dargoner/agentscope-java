@@ -22,11 +22,15 @@ import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.message.VideoBlock;
+import io.agentscope.core.util.JsonUtils;
 import io.agentscope.harness.agent.memory.compaction.MediaReference.Disposition;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * Renders messages and content blocks into plain text for summarization LLM input.
@@ -37,6 +41,8 @@ import java.util.Objects;
  * dropped.
  */
 public final class CompactionMediaRenderer {
+
+    private static final int SUMMARY_PREVIEW_CHARS = 600;
 
     private final Disposition defaultDisposition;
 
@@ -87,7 +93,11 @@ public final class CompactionMediaRenderer {
             return tb.getText() == null ? "" : tb.getText().strip();
         }
         if (block instanceof ToolUseBlock tu) {
-            return "[tool_call: " + (tu.getName() == null ? "?" : tu.getName()) + "]";
+            return "[tool_call: "
+                    + (tu.getName() == null ? "?" : tu.getName())
+                    + " "
+                    + renderToolArgs(tu)
+                    + "]";
         }
         if (block instanceof ToolResultBlock tr) {
             return renderToolResult(tr, ctx);
@@ -114,6 +124,9 @@ public final class CompactionMediaRenderer {
     private String renderToolResult(ToolResultBlock tr, RenderContext ctx) {
         StringBuilder sb = new StringBuilder("[tool_result: ");
         sb.append(tr.getName() == null ? "?" : tr.getName());
+        if (tr.getState() == ToolResultState.ERROR) {
+            sb.append(" (error)");
+        }
         sb.append("]");
         List<ContentBlock> output = tr.getOutput();
         if (output != null && !output.isEmpty()) {
@@ -126,13 +139,36 @@ public final class CompactionMediaRenderer {
                 }
                 first = false;
                 String parentId = ctx.messageId == null ? "msg" : ctx.messageId;
-                sb.append(
+                String rendered =
                         renderBlock(
-                                child, new RenderContext(parentId + "." + ctx.ordinal, ordinal)));
+                                child, new RenderContext(parentId + "." + ctx.ordinal, ordinal));
+                sb.append(
+                        child instanceof TextBlock
+                                ? ConversationCompactor.buildPrunePreview(
+                                        rendered, SUMMARY_PREVIEW_CHARS)
+                                : rendered);
                 ordinal++;
             }
         }
         return sb.toString().strip();
+    }
+
+    private static String renderToolArgs(ToolUseBlock toolUse) {
+        String json = JsonUtils.resolveToolCallArgsJson(toolUse);
+        if (json.length() <= SUMMARY_PREVIEW_CHARS) {
+            return json;
+        }
+        var codec = JsonUtils.getJsonCodec();
+        Map<?, ?> args = codec.fromJson(json, Map.class);
+        return args.entrySet().stream()
+                .map(
+                        entry ->
+                                codec.toJson(entry.getKey())
+                                        + ":"
+                                        + ConversationCompactor.buildPrunePreview(
+                                                codec.toJson(entry.getValue()),
+                                                SUMMARY_PREVIEW_CHARS))
+                .collect(Collectors.joining(",", "{", "}"));
     }
 
     /** Context used to build stable references for media blocks. */

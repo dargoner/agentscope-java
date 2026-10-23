@@ -347,6 +347,8 @@ AG-UI 前端可以在 `RunAgentInput.tools` 中传入工具 schema。adapter 将
 
 前端不需要在 `resume[]` 中回传 `metadata`；只需要发送 `interruptId`、`status` 和 `payload`。通过 Spring `AguiRequestProcessor` 入口时，AgentScope Java 会在服务端记录最近一次 `RUN_FINISHED.outcome.interrupts[]`，校验下一次 `resume[]` 是否覆盖所有 open interrupts，并把原始 interrupt 传给 adapter 做恢复转换。
 
+processor 会在同步初始化错误响应结束前释放当前 run 的租约。取消事件订阅时也会异步释放租约，包括在 adapter 初始化期间取消的情况；清理完成后即可发起新的 run。
+
 ## 示例项目
 
 完整示例见 [agentscope-examples/documentation](https://github.com/agentscope-ai/agentscope-java/tree/main/agentscope-examples/documentation)：

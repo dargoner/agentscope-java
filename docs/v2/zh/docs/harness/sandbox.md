@@ -35,6 +35,8 @@ agent.call(msg, RuntimeContext.builder()
 
 同一 `userId` 的多次 `call()` → 自动复用同一沙箱（或从快照恢复）；不同 `userId` → 各自独立。如果 `userId` 缺失，自动降级为按 `sessionId` 隔离。
 
+Harness 将原生会话日志保存在宿主工作区，沙箱文件工具无法访问该日志。多副本部署应配置共享、持久化的 `sessionLogStore`。关闭 agent 时，只会关闭文件系统配置创建并拥有的客户端，且仅关闭一次；注入的客户端仍由调用方管理。构建失败时也会关闭本次创建的客户端。
+
 ## IsolationScope —— 谁和谁共享同一沙箱
 
 所有沙箱配置都集中在 `SandboxFilesystemSpec`（如 `DockerFilesystemSpec`）上。核心参数是 `isolationScope`：
@@ -285,17 +287,19 @@ Redis lifecycle lock 只保护短暂的创建、恢复、暂停、快照、删�
 | 文本/查找 | `sed` `grep`（支持 `-rHnF` `--include`）`find` | `read_file` 分页、`grep_files`、`glob_files` |
 | 元数据 | GNU 风格 `stat -c`（非 BSD `stat -f`） | `list_files`、`glob_files` |
 | 归档/编码 | `tar`、`base64`（编码 + `-d` 解码） | 快照持久化/恢复、文件上传下载 |
-| 解释器 | `python3` | `edit_file`（精确字符串替换） |
+| 解释器 | 可选：`python3` | `edit_file` 原生快速路径；缺少时 `edit_file` 会回退到下载/替换/上传 |
 | 文件系统 | 工作区根目录（默认 `/workspace`）可写 | 全部 |
 
-以 `ubuntu:24.04`、`debian` 为基础的镜像天然满足（`python3` 可能需额外安装）；`alpine`（BusyBox `stat` / `grep` 行为不同）和 distroless 镜像**不满足**。
+以 `ubuntu:24.04`、`debian` 为基础的镜像天然满足；`python3` 是可选项，仅用于启用 `edit_file` 原生快速路径。没有可执行的 `python3` 时，编辑仍会通过文件传输回退路径工作，但由于需要经由宿主机传输文件，速度可能较慢。`alpine`（BusyBox `stat` / `grep` 行为不同）和 distroless 镜像不满足其他基线要求。
 
 快速自检（在镜像内执行，全部成功即基本达标）：
 
 ```bash
-sh -c 'echo ok' && python3 --version && tar --version \
+sh -c 'echo ok' && { python3 --version 2>/dev/null || echo 'python3 缺失；edit_file 将使用传输回退路径'; } && tar --version \
   && printf x | base64 | base64 -d && stat -c %Y /tmp && grep -rHnF --include='*.txt' x /tmp; true
 ```
+
+`edit_file` 会拒绝完整命令（包括编码后的参数与脚本）超过 112 KiB 的请求；异常大的编辑应拆成多次调用。该限制针对整条命令，而不是分别限制 `oldString` 和 `newString`。
 
 ### Kubernetes（agent-sandbox）附加约束
 

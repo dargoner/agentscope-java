@@ -881,24 +881,29 @@ public class ConversationCompactor {
      * <p>When a native session is active, include its logical history lookup. Otherwise use a
      * summary without claiming that a durable full history exists.
      *
+     * <p>Both variants carry the same continuation preamble: the summary is established
+     * background, and the model continues from it directly — no recap, no fresh greeting, no
+     * mention of the summarization step itself.
+     *
      * <p>The message name is set to {@link #SUMMARY_MSG_NAME} so hooks can identify generated
      * summaries, and the stable content-based ID keeps repeated summaries identifiable.
      */
     private static Msg buildSummaryMessage(String summary, String historyReference) {
-        String content;
-        if (historyReference != null) {
-            content =
-                    "You are in the middle of a conversation that has been summarized.\n\n"
-                            + "Retrieve earlier conversation details with "
-                            + historyReference
-                            + ".\n\n"
-                            + "A condensed summary follows:\n\n"
-                            + "<summary>\n"
-                            + summary
-                            + "\n</summary>";
-        } else {
-            content = "Here is a summary of the conversation to date:\n\n" + summary;
-        }
+        String historyHint =
+                historyReference == null
+                        ? ""
+                        : "Earlier conversation details are retrievable with "
+                                + historyReference
+                                + ".\n\n";
+        String content =
+                "You are continuing a conversation that has been summarized.\n\n"
+                        + historyHint
+                        + "A condensed summary of the conversation so far follows. Treat it as "
+                        + "established background: continue the work directly — do not recap the "
+                        + "summary, do not greet the user anew, and do not mention the "
+                        + "summarization.\n\n<summary>\n"
+                        + summary
+                        + "\n</summary>";
         return Msg.builder()
                 .id(buildSummaryMessageId(content))
                 .role(MsgRole.USER)
@@ -1036,7 +1041,7 @@ public class ConversationCompactor {
         return result;
     }
 
-    private static String buildPrunePreview(String text, int maxChars) {
+    static String buildPrunePreview(String text, int maxChars) {
         int half = maxChars / 2;
         String head = text.substring(0, Math.min(half, text.length()));
         String tail =

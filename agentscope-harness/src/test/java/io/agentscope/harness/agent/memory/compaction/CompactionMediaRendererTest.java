@@ -234,7 +234,7 @@ class CompactionMediaRendererTest {
         ToolUseBlock block = ToolUseBlock.builder().id("call_1").name("read_file").build();
         String rendered =
                 renderer.renderBlock(block, new CompactionMediaRenderer.RenderContext("m1", 0));
-        assertTrue(rendered.contains("[tool_call: read_file]"));
+        assertTrue(rendered.contains("[tool_call: read_file {"));
     }
 
     @Test

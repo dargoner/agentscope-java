@@ -193,71 +193,86 @@ public class AguiRequestProcessor {
                                     Sinks.Empty<Void> terminalSignal = Sinks.empty();
                                     AtomicBoolean terminalPersisted = new AtomicBoolean(false);
                                     AtomicBoolean releaseAttempted = new AtomicBoolean(false);
-                                    try {
-                                        RunAgentInput effectiveInput = input;
-                                        if (agentResolver.hasMemory(runtimeContext)) {
-                                            logger.debug(
-                                                    "Using server-side memory for thread {} user"
-                                                            + " {}, extracting follow-up messages",
-                                                    threadId,
-                                                    runtimeContext.getUserId());
-                                            effectiveInput = extractLatestUserMessage(input);
-                                        }
+                                    return Flux.using(
+                                            () -> lease,
+                                            ignoredLease -> {
+                                                try {
+                                                    RunAgentInput effectiveInput = input;
+                                                    if (agentResolver.hasMemory(runtimeContext)) {
+                                                        logger.debug(
+                                                                "Using server-side memory for"
+                                                                        + " thread {} user {},"
+                                                                        + " extracting follow-up"
+                                                                        + " messages",
+                                                                threadId,
+                                                                runtimeContext.getUserId());
+                                                        effectiveInput =
+                                                                extractLatestUserMessage(input);
+                                                    }
 
-                                        RuntimeContext effectiveRuntimeContext =
-                                                resumeCoordinator.addResumeInterrupts(
-                                                        input, runtimeContext, lease);
-                                        AguiAgentAdapter adapter =
-                                                adapterFactory.create(agent, config);
-                                        AtomicBoolean runErrorSeen = new AtomicBoolean(false);
-                                        Flux<AguiEvent> agentEvents =
-                                                Objects.requireNonNull(
-                                                                adapter.run(
-                                                                        effectiveInput,
-                                                                        effectiveRuntimeContext),
-                                                                "adapter event stream is null")
-                                                        .doOnNext(
-                                                                event -> {
-                                                                    if (event
-                                                                            instanceof
-                                                                            AguiEvent.RunError) {
-                                                                        runErrorSeen.set(true);
-                                                                    }
-                                                                })
-                                                        .concatMap(
-                                                                event ->
-                                                                        terminalEvent(
-                                                                                input,
-                                                                                lease,
-                                                                                event,
-                                                                                runErrorSeen.get(),
-                                                                                terminalSignal,
-                                                                                terminalPersisted))
-                                                        .concatWith(
-                                                                releaseBeforeComplete(
-                                                                        lease,
-                                                                        terminalPersisted,
-                                                                        releaseAttempted))
-                                                        .doFinally(
-                                                                signal ->
-                                                                        terminalSignal
-                                                                                .tryEmitEmpty());
-                                        Flux<AguiEvent> renewal =
-                                                renewalStream(lease, terminalSignal);
-                                        return Flux.merge(agentEvents, renewal)
-                                                .doFinally(
-                                                        signal -> {
-                                                            if (!terminalPersisted.get()
-                                                                    && releaseAttempted
-                                                                            .compareAndSet(
-                                                                                    false, true)) {
-                                                                releaseAsync(lease);
-                                                            }
-                                                        });
-                                    } catch (Throwable error) {
-                                        releaseAsync(lease);
-                                        return processorErrorEvents(input, error);
-                                    }
+                                                    RuntimeContext effectiveRuntimeContext =
+                                                            resumeCoordinator.addResumeInterrupts(
+                                                                    input, runtimeContext, lease);
+                                                    AguiAgentAdapter adapter =
+                                                            adapterFactory.create(agent, config);
+                                                    AtomicBoolean runErrorSeen =
+                                                            new AtomicBoolean(false);
+                                                    Flux<AguiEvent> agentEvents =
+                                                            Objects.requireNonNull(
+                                                                            adapter.run(
+                                                                                    effectiveInput,
+                                                                                    effectiveRuntimeContext),
+                                                                            "adapter event stream"
+                                                                                    + " is null")
+                                                                    .doOnNext(
+                                                                            event -> {
+                                                                                if (event
+                                                                                        instanceof
+                                                                                        AguiEvent
+                                                                                                .RunError) {
+                                                                                    runErrorSeen
+                                                                                            .set(
+                                                                                                    true);
+                                                                                }
+                                                                            })
+                                                                    .concatMap(
+                                                                            event ->
+                                                                                    terminalEvent(
+                                                                                            input,
+                                                                                            lease,
+                                                                                            event,
+                                                                                            runErrorSeen
+                                                                                                    .get(),
+                                                                                            terminalSignal,
+                                                                                            terminalPersisted))
+                                                                    .concatWith(
+                                                                            releaseBeforeComplete(
+                                                                                    lease,
+                                                                                    terminalPersisted,
+                                                                                    releaseAttempted))
+                                                                    .doFinally(
+                                                                            signal ->
+                                                                                    terminalSignal
+                                                                                            .tryEmitEmpty());
+                                                    Flux<AguiEvent> renewal =
+                                                            renewalStream(lease, terminalSignal);
+                                                    return Flux.merge(agentEvents, renewal);
+                                                } catch (Throwable error) {
+                                                    return processorErrorEvents(input, error)
+                                                            .concatWith(
+                                                                    releaseBeforeComplete(
+                                                                            lease,
+                                                                            terminalPersisted,
+                                                                            releaseAttempted));
+                                                }
+                                            },
+                                            ignoredLease -> {
+                                                if (!terminalPersisted.get()
+                                                        && releaseAttempted.compareAndSet(
+                                                                false, true)) {
+                                                    releaseAsync(lease);
+                                                }
+                                            });
                                 })
                         .subscribeOn(Schedulers.boundedElastic());
         return new ProcessResult(agent, events, runtimeContext);
