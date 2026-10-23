@@ -348,6 +348,8 @@ For permission confirmations, `payload.approved` must be the boolean `true` to a
 
 The front end does not need to echo `metadata` in `resume[]`; it only sends `interruptId`, `status`, and `payload`. Through the Spring `AguiRequestProcessor` entry point, AgentScope Java records the latest `RUN_FINISHED.outcome.interrupts[]` server-side, validates that the next `resume[]` covers all open interrupts, and passes the originating interrupts into the adapter for conversion.
 
+The processor releases the active-run lease before completing a synchronous setup-error response. Cancelling an event subscription also releases its lease asynchronously, including cancellation during adapter initialization; start a new run after that cleanup completes.
+
 ## Example Project
 
 See the complete example at [agentscope-examples/documentation](https://github.com/agentscope-ai/agentscope-java/tree/main/agentscope-examples/documentation):

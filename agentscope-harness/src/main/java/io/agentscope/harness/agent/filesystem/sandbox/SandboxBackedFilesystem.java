@@ -62,10 +62,26 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
     private static final Logger log = LoggerFactory.getLogger(SandboxBackedFilesystem.class);
 
     private final String fsId;
+    private final AbstractFilesystem runtimeFilesystem;
     private volatile Sandbox sandbox;
 
     public SandboxBackedFilesystem() {
+        this(null);
+    }
+
+    /** Creates a sandbox proxy whose runtime journal is stored on the host filesystem. */
+    public SandboxBackedFilesystem(AbstractFilesystem runtimeFilesystem) {
+        this.runtimeFilesystem = runtimeFilesystem;
         this.fsId = "sandbox-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    @Override
+    public io.agentscope.core.session.AtomicSessionStorage sessionStorage(RuntimeContext context) {
+        if (runtimeFilesystem == null) {
+            throw new UnsupportedOperationException(
+                    "Filesystem does not support durable session storage: " + getClass().getName());
+        }
+        return runtimeFilesystem.sessionStorage(context);
     }
 
     @Override

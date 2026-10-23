@@ -210,6 +210,9 @@ public class HarnessAgent implements Agent, AutoCloseable {
     private final SkillAuditLog skillAuditLog;
     private final MemoryConfig memoryConfig;
     private final Toolkit ownedMcpToolkit;
+    private final List<AutoCloseable> ownedSandboxClients;
+    private boolean closed;
+    private Throwable closeFailure;
 
     /** The subagent middleware (either SubagentsMiddleware or DynamicSubagentsMiddleware). */
     private final Object subagentMiddleware;
@@ -244,9 +247,11 @@ public class HarnessAgent implements Agent, AutoCloseable {
             Object subagentMiddleware,
             DistributedStore distributedStore,
             WorkspacePathNormalizer pathNormalizer,
-            Toolkit ownedMcpToolkit) {
+            Toolkit ownedMcpToolkit,
+            List<AutoCloseable> ownedSandboxClients) {
         this.delegate = delegate;
         this.ownedMcpToolkit = ownedMcpToolkit;
+        this.ownedSandboxClients = List.copyOf(ownedSandboxClients);
         this.workspaceManager = workspaceManager;
         this.workspaceFactory = workspaceFactory;
         this.ownedWorkspaceIndex = ownedWorkspaceIndex;
@@ -506,24 +511,52 @@ public class HarnessAgent implements Agent, AutoCloseable {
     }
 
     @Override
-    public void close() {
-        try {
-            sessions.values().forEach(AgentSession::close);
-            // Drain fire-and-forget memory flush/maintenance so async memory/*.md writes do not
-            // race with resource cleanup (e.g., temp workspace deletion in tests).
-            io.agentscope.harness.agent.memory.MemoryBackgroundTasks.awaitQuiescence(
-                    5, java.util.concurrent.TimeUnit.SECONDS);
-            shutdownTaskRepository();
-        } finally {
-            try {
-                if (ownedWorkspaceIndex != null) {
-                    ownedWorkspaceIndex.close();
-                }
-            } finally {
-                ownedMcpToolkit.closeMcpClients();
-                delegate.close();
+    public synchronized void close() {
+        if (!closed) {
+            closed = true;
+            for (AgentSession session : sessions.values()) {
+                closeFailure = closeResource(closeFailure, session::close);
+            }
+            closeFailure =
+                    closeResource(
+                            closeFailure,
+                            () ->
+                                    io.agentscope.harness.agent.memory.MemoryBackgroundTasks
+                                            .awaitQuiescence(
+                                                    5, java.util.concurrent.TimeUnit.SECONDS));
+            closeFailure = closeResource(closeFailure, this::shutdownTaskRepository);
+            if (ownedWorkspaceIndex != null) {
+                closeFailure = closeResource(closeFailure, ownedWorkspaceIndex::close);
+            }
+            closeFailure = closeResource(closeFailure, ownedMcpToolkit::closeMcpClients);
+            closeFailure = closeResource(closeFailure, delegate::close);
+            for (AutoCloseable client : ownedSandboxClients) {
+                closeFailure = closeResource(closeFailure, client);
             }
         }
+        if (closeFailure instanceof Error error) {
+            throw error;
+        }
+        if (closeFailure instanceof RuntimeException runtimeException) {
+            throw runtimeException;
+        }
+        if (closeFailure != null) {
+            throw new IllegalStateException("Failed to close sandbox client", closeFailure);
+        }
+    }
+
+    private static Throwable closeResource(Throwable failure, AutoCloseable resource) {
+        try {
+            resource.close();
+        } catch (Throwable closeFailure) {
+            if (failure == null) {
+                return closeFailure;
+            }
+            if (failure != closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+        }
+        return failure;
     }
 
     private void shutdownTaskRepository() {
@@ -2701,8 +2734,14 @@ public class HarnessAgent implements Agent, AutoCloseable {
         public synchronized HarnessAgent build() {
             var configuredMessageBus = messageBus;
             var configuredAsyncToolRegistry = asyncToolRegistry;
+            List<AutoCloseable> ownedSandboxClients = new ArrayList<>();
             try {
-                return buildInstance(inner.copy());
+                return buildInstance(inner.copy(), ownedSandboxClients);
+            } catch (RuntimeException | Error failure) {
+                for (AutoCloseable client : ownedSandboxClients) {
+                    closeResource(failure, client);
+                }
+                throw failure;
             } finally {
                 // Workspace-derived collaborators belong to this build's filesystem, especially
                 // when sandbox bindings or workspace indexes have per-agent lifetimes.
@@ -2711,7 +2750,8 @@ public class HarnessAgent implements Agent, AutoCloseable {
             }
         }
 
-        private HarnessAgent buildInstance(ReActAgent.Builder inner) {
+        private HarnessAgent buildInstance(
+                ReActAgent.Builder inner, List<AutoCloseable> ownedSandboxClients) {
             // Toolkit deep-copy: each agent gets its own toolkit so harness-registered tools and
             // user-registered tools never bleed across builds.
             Toolkit agentToolkit = this.toolkit.copy();
@@ -2817,13 +2857,19 @@ public class HarnessAgent implements Agent, AutoCloseable {
             SandboxContext defaultSandboxContext = null;
             SandboxBackedFilesystem capturedSandboxFs = null;
             if (sandboxFilesystemSpec != null) {
-                capturedSandboxFs = new SandboxBackedFilesystem();
+                capturedSandboxFs = new SandboxBackedFilesystem(filesystem);
                 filesystem =
                         filesystemRoutes.isEmpty()
                                 ? capturedSandboxFs
                                 : new RoutedSandboxFilesystem(capturedSandboxFs, filesystemRoutes);
 
-                defaultSandboxContext = sandboxFilesystemSpec.toSandboxContext(resolvedWorkspace);
+                SandboxFilesystemSpec.Materialization materialization =
+                        sandboxFilesystemSpec.materialize(resolvedWorkspace);
+                defaultSandboxContext = materialization.context();
+                if (materialization.clientOwned()
+                        && materialization.client() instanceof AutoCloseable closeable) {
+                    ownedSandboxClients.add(closeable);
+                }
 
                 if (isLocalSession(effectiveSession)) {
                     log.warn(
@@ -3336,7 +3382,8 @@ public class HarnessAgent implements Agent, AutoCloseable {
                     capturedSubagentMw,
                     distributedStore,
                     pathNormalizer,
-                    agentToolkit);
+                    agentToolkit,
+                    ownedSandboxClients);
         }
     }
 }

@@ -35,6 +35,8 @@ agent.call(msg, RuntimeContext.builder()
 
 Same `userId` across `call()` → automatically reuses the same sandbox (or restores from snapshot). Different `userId` → separate sandbox. When `userId` is absent, falls back to `sessionId` as the isolation key.
 
+Harness stores the native session journal in the host workspace, outside the sandbox filesystem tools. For multi-replica deployments, configure a shared durable `sessionLogStore`. Closing the agent closes clients created and owned by its filesystem spec exactly once; injected clients remain caller-owned. A failed build also closes any client it created.
+
 ## IsolationScope — who shares a sandbox
 
 All sandbox configuration lives on the `SandboxFilesystemSpec` (e.g. `DockerFilesystemSpec`). The key parameter is `isolationScope`:

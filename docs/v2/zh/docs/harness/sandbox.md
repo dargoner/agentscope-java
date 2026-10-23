@@ -35,6 +35,8 @@ agent.call(msg, RuntimeContext.builder()
 
 同一 `userId` 的多次 `call()` → 自动复用同一沙箱（或从快照恢复）；不同 `userId` → 各自独立。如果 `userId` 缺失，自动降级为按 `sessionId` 隔离。
 
+Harness 将原生会话日志保存在宿主工作区，沙箱文件工具无法访问该日志。多副本部署应配置共享、持久化的 `sessionLogStore`。关闭 agent 时，只会关闭文件系统配置创建并拥有的客户端，且仅关闭一次；注入的客户端仍由调用方管理。构建失败时也会关闭本次创建的客户端。
+
 ## IsolationScope —— 谁和谁共享同一沙箱
 
 所有沙箱配置都集中在 `SandboxFilesystemSpec`（如 `DockerFilesystemSpec`）上。核心参数是 `isolationScope`：

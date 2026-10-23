@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.harness.agent.filesystem.local.LocalFilesystem;
 import io.agentscope.harness.agent.filesystem.model.FileDownloadResponse;
 import io.agentscope.harness.agent.filesystem.model.FileUploadResponse;
 import io.agentscope.harness.agent.sandbox.ExecResult;
@@ -35,6 +36,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.AbstractMap;
 import java.util.HashMap;
 import java.util.List;
@@ -42,10 +44,36 @@ import java.util.Map;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SandboxBackedFilesystemTest {
 
     private static final RuntimeContext RT = RuntimeContext.empty();
+
+    @Test
+    void sessionJournalPersistsOnHostAndIsIsolatedByUser(@TempDir Path workspace) {
+        LocalFilesystem host =
+                new LocalFilesystem(workspace, true, 10, context -> List.of(context.getUserId()));
+        RuntimeContext alice = RuntimeContext.builder().userId("alice").build();
+        RuntimeContext bob = RuntimeContext.builder().userId("bob").build();
+        byte[] bytes = "journal".getBytes(StandardCharsets.UTF_8);
+        SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem(host);
+
+        assertTrue(filesystem.sessionStorage(alice).compareAndSet("journal", 0, bytes));
+        SandboxBackedFilesystem reopened = new SandboxBackedFilesystem(host);
+        assertArrayEquals(bytes, reopened.sessionStorage(alice).read("journal").bytes());
+        assertNull(reopened.sessionStorage(bob).read("journal"));
+        assertThrows(
+                SecurityException.class,
+                () -> host.read(alice, ".agentscope-runtime/journal", 0, 100));
+    }
+
+    @Test
+    void directConstructionWithoutHostRejectsSessionStorage() {
+        assertThrows(
+                UnsupportedOperationException.class,
+                () -> new SandboxBackedFilesystem().sessionStorage(RT));
+    }
 
     @Test
     void releasedContextCannotFallBackToAnotherCallsSandbox() {
