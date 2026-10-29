@@ -15,6 +15,10 @@
  */
 package io.agentscope.harness.agent.middleware;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
@@ -28,9 +32,12 @@ import io.agentscope.core.model.Model;
 import io.agentscope.core.session.SessionLogException;
 import io.agentscope.core.state.AgentState;
 import io.agentscope.core.util.ExceptionUtils;
+import io.agentscope.core.util.JsonException;
+import io.agentscope.core.util.JsonUtils;
 import io.agentscope.harness.agent.memory.MemoryFlushManager;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.memory.compaction.ConversationCompactor;
+import io.agentscope.harness.agent.memory.compaction.TokenCounterUtil;
 import io.agentscope.harness.agent.workspace.WorkspaceManager;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -40,6 +47,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.function.Function;
+import java.util.function.ToLongFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.Exceptions;
@@ -72,6 +80,16 @@ import reactor.core.publisher.Mono;
 public class CompactionMiddleware implements HarnessRuntimeMiddleware {
 
     private static final Logger log = LoggerFactory.getLogger(CompactionMiddleware.class);
+
+    /**
+     * Reads serialized histories as exact decimal trees: restored copies keep their values
+     * across Integer/Double/BigDecimal coercion, while edits to decimal metadata beyond
+     * double precision still compare unequal. Numbers compare by exact value only, so
+     * scale-only and notation-only changes ("1.10" vs "1.1", "1e2" vs "100") count as
+     * unchanged.
+     */
+    private static final ObjectReader HISTORY_VALUES =
+            new ObjectMapper().reader().with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
     private final WorkspaceManager workspaceManager;
     private final Model model;
@@ -129,19 +147,10 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                 .flatMapMany(
                         prepared ->
                                 next.apply(
-                                                new ReasoningInput(
-                                                        prepared.messages(),
-                                                        prepared.tools(),
-                                                        prepared.options()))
-                                        .onErrorResume(
-                                                error ->
-                                                        recoverFromOverflow(
-                                                                agent,
-                                                                ctx,
-                                                                prepared,
-                                                                next,
-                                                                error,
-                                                                executionModel)));
+                                        new ReasoningInput(
+                                                prepared.messages(),
+                                                prepared.tools(),
+                                                prepared.options())));
     }
 
     /**
@@ -158,104 +167,89 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                     RuntimeContext ctx,
                     ReasoningInput input,
                     Function<ReasoningInput, Flux<AgentEvent>> next) {
-                Model agentModel = agent instanceof ReActAgent react ? react.getModel() : model;
-                final Model executionModel = agentModel == null ? model : agentModel;
+                if (!(agent instanceof ReActAgent react) || !react.sessionLogEnabled())
+                    return next.apply(input);
+                AgentState initialState = RuntimeContext.resolveAgentState(ctx, agent);
+                List<Msg> initialHistory =
+                        initialState == null ? List.of() : List.copyOf(initialState.getContext());
                 return next.apply(input)
                         .onErrorResume(
-                                error ->
-                                        recoverFromOverflow(
-                                                agent,
-                                                ctx,
-                                                new ModelCallInput(
-                                                        input.messages(),
-                                                        input.tools(),
-                                                        input.options(),
-                                                        executionModel),
-                                                next,
-                                                error,
-                                                executionModel));
+                                error -> {
+                                    if (ExceptionUtils.containsInterruptedException(error)
+                                            || SessionLogException.causedBy(error)
+                                            || !isContextOverflowError(error))
+                                        return Flux.error(error);
+                                    AgentState state = RuntimeContext.resolveAgentState(ctx, agent);
+                                    if (state == null || state.getContext().isEmpty())
+                                        return Flux.error(error);
+                                    List<Msg> before = List.copyOf(state.getContext());
+                                    // The final request preparer may already have compacted state
+                                    // before the provider rejected the request. Retry from that
+                                    // latest history.
+                                    var retryMessages = new ArrayList<Msg>();
+                                    input.messages().stream()
+                                            .filter(
+                                                    message ->
+                                                            message.getRole() == MsgRole.SYSTEM
+                                                                    || (message.isRequestProjection(
+                                                                                    initialHistory)
+                                                                            && message
+                                                                                    .isRequestProjection(
+                                                                                            before)))
+                                            .forEach(retryMessages::add);
+                                    retryMessages.addAll(before);
+                                    var forced =
+                                            new CompactionMiddleware(
+                                                    workspaceManager,
+                                                    model,
+                                                    CompactionConfig.builder()
+                                                            .triggerMessages(1)
+                                                            .keepMessages(1)
+                                                            .keepTokens(0)
+                                                            .flushBeforeCompact(
+                                                                    config.isFlushBeforeCompact())
+                                                            .build(),
+                                                    memoryHooksEnabled);
+                                    return forced.prepareCandidate(
+                                                    agent,
+                                                    ctx,
+                                                    new ModelCallInput(
+                                                            retryMessages,
+                                                            input.tools(),
+                                                            input.options(),
+                                                            react.getModel()),
+                                                    CompactionConfig.FALLBACK_TRIGGER_TOKENS,
+                                                    before)
+                                            .flatMapMany(
+                                                    candidate -> {
+                                                        if (candidate.history().equals(before)
+                                                                || !state.getContext()
+                                                                        .equals(before))
+                                                            return Flux.error(error);
+                                                        applyToContext(state, candidate.history());
+                                                        // next creates a new model call; the turn,
+                                                        // execution and writer stay unchanged.
+                                                        return next.apply(
+                                                                        new ReasoningInput(
+                                                                                candidate
+                                                                                        .input()
+                                                                                        .messages(),
+                                                                                candidate
+                                                                                        .input()
+                                                                                        .tools(),
+                                                                                candidate
+                                                                                        .input()
+                                                                                        .options()))
+                                                                .onErrorResume(
+                                                                        retryError ->
+                                                                                Flux.error(
+                                                                                        associateFirstOverflow(
+                                                                                                error,
+                                                                                                retryError)));
+                                                    });
+                                });
             }
         };
-    }
-
-    /**
-     * Retries a provider context overflow inside the same execution, before its recorder is
-     * closed: compact the latest durable history, then replay the reasoning step exactly once.
-     * Non-overflow errors, user interruptions and session-log failures propagate untouched. A
-     * failed retry propagates its own error with the first overflow attached as its cause (or as
-     * suppressed when the retry error already carries one), so the first overflow stays the
-     * primary cause; cancellations are never rewritten.
-     */
-    private Flux<AgentEvent> recoverFromOverflow(
-            Agent agent,
-            RuntimeContext ctx,
-            ModelCallInput view,
-            Function<ReasoningInput, Flux<AgentEvent>> next,
-            Throwable error,
-            Model executionModel) {
-        if (ExceptionUtils.containsInterruptedException(error)
-                || SessionLogException.causedBy(error)
-                || !isContextOverflowError(error)) return Flux.error(error);
-        AgentState state = RuntimeContext.resolveAgentState(ctx, agent);
-        if (state == null || state.getContext().isEmpty()) return Flux.error(error);
-        List<Msg> before = List.copyOf(state.getContext());
-        // The final request preparer may already have compacted state before the provider
-        // rejected the request. Retry from that latest history, keeping only request-only prefix
-        // messages (the system prompt and synthetics not already durable).
-        var retryMessages = new ArrayList<Msg>();
-        view.messages().stream()
-                .filter(message -> message.getRole() == MsgRole.SYSTEM || isSynthetic(message))
-                .filter(message -> !before.contains(message))
-                .forEach(retryMessages::add);
-        retryMessages.addAll(before);
-        log.info(
-                "Provider rejected model request as context overflow; compacting {} messages"
-                        + " and retrying once",
-                before.size());
-        var forced =
-                new CompactionMiddleware(
-                        workspaceManager,
-                        model,
-                        CompactionConfig.builder()
-                                .triggerMessages(1)
-                                .keepMessages(1)
-                                .keepTokens(0)
-                                .flushBeforeCompact(config.isFlushBeforeCompact())
-                                .build(),
-                        memoryHooksEnabled);
-        ModelCallInput retryInput =
-                new ModelCallInput(retryMessages, view.tools(), view.options(), executionModel);
-        return forced.prepareCandidate(
-                        agent,
-                        ctx,
-                        retryInput,
-                        CompactionConfig.FALLBACK_TRIGGER_TOKENS,
-                        before,
-                        "EMERGENCY")
-                .flatMapMany(
-                        candidate -> {
-                            // Accept the recovery only when compaction actually reduced the
-                            // model view, and only while no concurrent state change happened.
-                            // The candidate is never written to durable history here: the retry
-                            // goes through the final request preparer, which validates budget and
-                            // tool pairing and owns the only commit point. Durable history stays
-                            // untouched when it carries synthetics that can never re-commit; the
-                            // reduced view still unblocks the retry.
-                            if (candidate.input().messages().equals(retryMessages)
-                                    || !state.getContext().equals(before)) return Flux.error(error);
-                            // next creates a new model call; the turn, execution and writer
-                            // stay unchanged.
-                            return next.apply(
-                                            new ReasoningInput(
-                                                    candidate.input().messages(),
-                                                    candidate.input().tools(),
-                                                    candidate.input().options()))
-                                    .onErrorResume(
-                                            retryError ->
-                                                    Flux.error(
-                                                            associateFirstOverflow(
-                                                                    error, retryError)));
-                        });
     }
 
     /**
@@ -333,7 +327,42 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
             ModelCallInput input,
             int conversationBudget,
             List<Msg> canonical) {
-        return prepareCandidate(agent, ctx, input, conversationBudget, canonical, "NORMAL");
+        return prepareCandidate(
+                agent,
+                ctx,
+                input,
+                conversationBudget,
+                canonical,
+                TokenCounterUtil::calculateToken,
+                message -> TokenCounterUtil.calculateToken(List.of(message)));
+    }
+
+    /**
+     * Prepares a candidate using the final request compiler's conversation token counter.
+     * The counter excludes fixed inputs already deducted from {@code conversationBudget}.
+     * The separate tool-result counter prices one result without unrelated projections or
+     * fixed request overhead, using the same estimation rules.
+     */
+    public Mono<Candidate> prepareCandidate(
+            Agent agent,
+            RuntimeContext ctx,
+            ModelCallInput input,
+            int conversationBudget,
+            List<Msg> canonical,
+            ToLongFunction<List<Msg>> tokenCounter,
+            ToLongFunction<Msg> toolResultTokenCounter) {
+        return Mono.deferContextual(
+                contextView ->
+                        prepareCandidateMono(
+                                agent,
+                                ctx,
+                                input,
+                                conversationBudget,
+                                canonical,
+                                AgentEventEmitter.fromContext(contextView).orElse(null),
+                                "NORMAL",
+                                tokenCounter,
+                                toolResultTokenCounter));
     }
 
     /**
@@ -358,7 +387,9 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                                 conversationBudget,
                                 canonical,
                                 AgentEventEmitter.fromContext(contextView).orElse(null),
-                                mode));
+                                mode,
+                                TokenCounterUtil::calculateToken,
+                                message -> TokenCounterUtil.calculateToken(List.of(message))));
     }
 
     private Mono<Candidate> prepareCandidateMono(
@@ -368,14 +399,16 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
             int conversationBudget,
             List<Msg> canonical,
             AgentEventEmitter emitter,
-            String mode) {
+            String mode,
+            ToLongFunction<List<Msg>> tokenCounter,
+            ToLongFunction<Msg> toolResultTokenCounter) {
         return Mono.defer(
                 () -> {
                     RuntimeContext rc = ctx == null ? RuntimeContext.empty() : ctx;
                     List<Msg> prefix = new ArrayList<>();
                     List<Msg> conversation = new ArrayList<>();
                     for (Msg msg : input.messages()) {
-                        if (msg.getRole() == MsgRole.SYSTEM || isSynthetic(msg)) {
+                        if (msg.getRole() == MsgRole.SYSTEM || msg.isRequestProjection(canonical)) {
                             prefix.add(msg);
                         } else {
                             conversation.add(msg);
@@ -405,11 +438,13 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                     }
                     ConversationCompactor compactor =
                             new ConversationCompactor(
-                                    model, new MemoryFlushManager(workspaceManager, model));
-                    // Commit only if the view is exactly the canonical history. Hook-added context
-                    // must never leak into durable history, and concurrent changes must not be
-                    // erased.
-                    boolean canCommit = canonical.equals(conversation);
+                                    model,
+                                    new MemoryFlushManager(workspaceManager, model),
+                                    tokenCounter,
+                                    toolResultTokenCounter);
+                    // Copies may retain message IDs. Only an unchanged view can become durable;
+                    // matching IDs alone must not persist hook-edited content or metadata.
+                    boolean canCommit = sameSerializedHistory(canonical, conversation);
                     return compactor
                             .compactIfNeeded(
                                     rc,
@@ -448,9 +483,20 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                 });
     }
 
-    private static boolean isSynthetic(Msg msg) {
-        return msg.getMetadata() != null
-                && Boolean.TRUE.equals(msg.getMetadata().get(Msg.METADATA_SYNTHETIC));
+    private static boolean sameSerializedHistory(List<Msg> canonical, List<Msg> conversation) {
+        if (canonical.equals(conversation)) return true;
+        if (canonical.size() != conversation.size()) return false;
+        var codec = JsonUtils.getJsonCodec();
+        try {
+            // Normalize restored number types without rounding distinct decimal metadata values.
+            return HISTORY_VALUES
+                    .readTree(codec.toJson(canonical))
+                    .equals(HISTORY_VALUES.readTree(codec.toJson(conversation)));
+        } catch (JsonException | JsonProcessingException error) {
+            // A history that cannot be serialized or parsed cannot be proven unchanged; skip
+            // the writeback instead of failing the reasoning call.
+            return false;
+        }
     }
 
     private static void applyToContext(AgentState state, List<Msg> compacted) {

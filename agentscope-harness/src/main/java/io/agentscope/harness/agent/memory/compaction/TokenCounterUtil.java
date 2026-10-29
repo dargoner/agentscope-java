@@ -15,48 +15,28 @@
  */
 package io.agentscope.harness.agent.memory.compaction;
 
-import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.Msg;
-import io.agentscope.harness.agent.context.TokenAccountingService;
+import io.agentscope.core.middleware.ModelCallInput;
+import io.agentscope.harness.agent.context.ContextTokenEstimator;
 import java.util.List;
 
-/**
- * Estimates the token count of conversation messages for the compaction trigger.
- *
- * <p>The counting rules live in {@link TokenAccountingService} so the trigger and the final request
- * budget agree on the cost of the same message or media block. This class is a thin adapter kept
- * for its stable static signature.
- */
+/** Message-only compatibility entry point for the default Harness token estimator. */
 public class TokenCounterUtil {
 
-    private static final TokenAccountingService SERVICE = TokenAccountingService.defaults();
-
     /**
-     * Calculates the estimated total input tokens for a list of messages.
+     * Estimates message tokens with the same text, tool and media rules as final input checks.
      *
-     * @param messages the list of messages to estimate tokens for
-     * @return estimated number of input tokens, saturating at {@link Integer#MAX_VALUE}
+     * @param messages messages to estimate; null or empty lists count as zero
+     * @return estimated tokens, capped at the legacy integer return type's maximum
      */
     public static int calculateToken(List<Msg> messages) {
         if (messages == null || messages.isEmpty()) {
             return 0;
         }
-        long tokens = SERVICE.countMessages(messages);
-        return tokens > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) tokens;
-    }
-
-    /**
-     * Calculates the estimated token cost of a set of content blocks, excluding per-message
-     * overhead. Used to price only the selected blocks that pruning will actually shrink.
-     */
-    public static int calculateBlockToken(List<ContentBlock> blocks) {
-        long tokens = SERVICE.countBlocks(blocks);
-        return tokens > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) tokens;
-    }
-
-    /** Calculates the per-message overhead only (fixed cost plus role/name text). */
-    public static int calculateMessageOverhead(Msg msg) {
-        long tokens = SERVICE.messageOverhead(msg);
-        return tokens > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) tokens;
+        long tokens =
+                ContextTokenEstimator.approximate()
+                        .estimate(new ModelCallInput(messages, List.of(), null, null))
+                        .tokens();
+        return (int) Math.min(Integer.MAX_VALUE, tokens);
     }
 }

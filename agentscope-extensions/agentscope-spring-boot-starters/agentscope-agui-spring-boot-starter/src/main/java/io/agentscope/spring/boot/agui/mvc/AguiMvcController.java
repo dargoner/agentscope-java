@@ -180,7 +180,14 @@ public class AguiMvcController {
                                 new BaseSubscriber<>() {
                                     @Override
                                     protected void hookOnNext(AguiEvent event) {
-                                        sendEvent(emitter, event);
+                                        if (sendEvent(emitter, event) || !interruptOnDisconnect) {
+                                            return;
+                                        }
+                                        logger.info(
+                                                "SSE event send failed for run {}, interrupting"
+                                                        + " agent",
+                                                runId);
+                                        interruptAndCancel(result, threadId, this);
                                     }
 
                                     @Override
@@ -307,12 +314,14 @@ public class AguiMvcController {
         return queryParams;
     }
 
-    private void sendEvent(SseEmitter emitter, AguiEvent event) {
+    private boolean sendEvent(SseEmitter emitter, AguiEvent event) {
+        String jsonData = encoder.encodeToJson(event);
         try {
-            String jsonData = encoder.encodeToJson(event);
             emitter.send(SseEmitter.event().data(jsonData, MediaType.APPLICATION_JSON));
-        } catch (IOException e) {
+            return true;
+        } catch (IOException | IllegalStateException e) {
             logger.debug("Failed to send SSE event: {}", e.getMessage());
+            return false;
         }
     }
 
@@ -325,7 +334,14 @@ public class AguiMvcController {
         try {
             String errorJson =
                     encoder.encodeToJson(
-                            new AguiEvent.Raw(threadId, runId, Map.of("error", errorMessage)));
+                            new AguiEvent.Raw(
+                                    threadId,
+                                    runId,
+                                    Map.of(
+                                            "error",
+                                            errorMessage != null
+                                                    ? errorMessage
+                                                    : "Unknown error")));
             emitter.send(SseEmitter.event().data(errorJson, MediaType.APPLICATION_JSON));
             if (includeFinished) {
                 String finishJson =
@@ -333,7 +349,7 @@ public class AguiMvcController {
                 emitter.send(SseEmitter.event().data(finishJson, MediaType.APPLICATION_JSON));
             }
             emitter.complete();
-        } catch (IOException e) {
+        } catch (Exception e) {
             logger.debug("Failed to send error event: {}", e.getMessage());
             try {
                 emitter.completeWithError(e);

@@ -277,12 +277,16 @@ public class AguiWebFluxHandler {
 
     private Flux<ServerSentEvent<String>> createErrorEventStream(
             String threadId, String runId, String errorMessage, boolean includeFinished) {
-        String safeErrorMessage =
-                errorMessage != null ? errorMessage : "AG-UI request failed unexpectedly";
         String errorEvent =
                 encoder.encodeToJson(
                                 new AguiEvent.Raw(
-                                        threadId, runId, Map.of("error", safeErrorMessage)))
+                                        threadId,
+                                        runId,
+                                        Map.of(
+                                                "error",
+                                                errorMessage != null
+                                                        ? errorMessage
+                                                        : "Unknown error")))
                         .trim();
         Flux<ServerSentEvent<String>> events =
                 Flux.just(ServerSentEvent.<String>builder().data(errorEvent).build());

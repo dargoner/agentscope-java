@@ -27,6 +27,7 @@ import io.agentscope.core.state.AgentState;
 import io.agentscope.harness.agent.filesystem.AbstractFilesystem;
 import io.agentscope.harness.agent.filesystem.model.WriteResult;
 import io.agentscope.harness.agent.memory.compaction.ToolResultEvictionConfig;
+import io.agentscope.harness.agent.memory.compaction.ToolResultPreview;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -269,10 +270,15 @@ public class ToolResultEvictionMiddleware implements HarnessRuntimeMiddleware {
                         ? new LinkedHashMap<>()
                         : new LinkedHashMap<>(originalMetadata);
         metadata.put(EVICTED_METADATA_KEY, true);
+        int charsPerEnd =
+                Math.min(
+                        config.getPreviewChars(),
+                        ToolResultPreview.textLength(toolResult.getOutput()) / 2);
         return new ToolResultBlock(
                 toolResult.getId(),
                 toolResult.getName(),
-                List.of(TextBlock.builder().text(placeholder).build()),
+                ToolResultPreview.create(
+                        toolResult.getOutput(), charsPerEnd, placeholder, "\n\n...\n\n"),
                 metadata,
                 toolResult.getState(),
                 toolResult.getExecutionDetails());
@@ -331,10 +337,7 @@ public class ToolResultEvictionMiddleware implements HarnessRuntimeMiddleware {
                         len, evictionPath, evictionPath));
 
         if (pLen > 0) {
-            sb.append(String.format("Preview (first %,d chars):%n", pLen));
-            sb.append(fullText, 0, pLen);
-            sb.append(String.format("%n%n... and last %,d chars:%n", pLen));
-            sb.append(fullText, len - pLen, len);
+            sb.append(String.format("Preview (first and last %,d chars):%n", pLen));
         }
 
         return sb.toString();
