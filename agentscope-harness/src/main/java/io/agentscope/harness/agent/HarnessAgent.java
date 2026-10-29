@@ -2692,6 +2692,32 @@ public class HarnessAgent implements Agent, AutoCloseable {
             }
         }
 
+        /**
+         * Wait tools may be used with repositories supplied by external subagent middleware, not
+         * only by the middleware built in {@link #buildInstance}. Prefer the middleware that
+         * produced the task IDs before falling back to builder-level repositories.
+         */
+        private TaskRepository resolveWaitTaskRepository(Object internalSubagentMw) {
+            if (internalSubagentMw instanceof SubagentsMiddleware sm) {
+                return sm.getTaskRepository();
+            }
+            if (internalSubagentMw instanceof DynamicSubagentsMiddleware dsm) {
+                return dsm.getTaskRepository();
+            }
+            for (MiddlewareBase middleware : middlewares) {
+                if (middleware instanceof SubagentsMiddleware sm) {
+                    return sm.getTaskRepository();
+                }
+                if (middleware instanceof DynamicSubagentsMiddleware dsm) {
+                    return dsm.getTaskRepository();
+                }
+            }
+            if (taskRepository != null) {
+                return taskRepository;
+            }
+            return distributedStore != null ? distributedStore.taskRepository() : null;
+        }
+
         private HarnessAgent buildInstance(
                 ReActAgent.Builder inner, PendingSandboxClient pendingSandboxClient) {
             // Toolkit deep-copy: each agent gets its own toolkit so harness-registered tools and
@@ -3034,12 +3060,7 @@ public class HarnessAgent implements Agent, AutoCloseable {
                         new AsyncToolMiddleware(messageBus, asyncToolTimeout, asyncToolRegistry));
             }
             if (messageBus != null) {
-                TaskRepository waitTaskRepo = null;
-                if (capturedSubagentMw instanceof SubagentsMiddleware sm) {
-                    waitTaskRepo = sm.getTaskRepository();
-                } else if (capturedSubagentMw instanceof DynamicSubagentsMiddleware dsm) {
-                    waitTaskRepo = dsm.getTaskRepository();
-                }
+                TaskRepository waitTaskRepo = resolveWaitTaskRepository(capturedSubagentMw);
                 io.agentscope.harness.agent.tool.WaitAsyncResultsTool waitTool =
                         new io.agentscope.harness.agent.tool.WaitAsyncResultsTool(
                                 messageBus, waitTaskRepo);
