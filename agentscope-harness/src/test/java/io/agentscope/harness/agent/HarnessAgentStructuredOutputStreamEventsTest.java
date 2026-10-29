@@ -314,8 +314,12 @@ class HarnessAgentStructuredOutputStreamEventsTest {
                     client.getCreateCount(),
                     "first subscription must acquire the sandbox exactly once (create)");
 
+            // Each subscription is its own execution: the first run's id must not be reused.
             List<AgentEvent> second =
-                    agent.streamEvents(List.of(userMsg()), weatherSchema(), ctx)
+                    agent.streamEvents(
+                                    List.of(userMsg()),
+                                    weatherSchema(),
+                                    RuntimeContext.builder(ctx).runId(null).build())
                             .collectList()
                             .block(Duration.ofSeconds(10));
             assertNotNull(second);

@@ -17,6 +17,7 @@ package io.agentscope.harness.agent.memory.compaction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -1541,11 +1542,11 @@ class ConversationCompactorTest {
     }
 
     /**
-     * Verifies that tool-result pruning preserves metadata, state and execution details, and skips
-     * blocks that contain unregistered media instead of replacing them with a text-only preview.
+     * Verifies that tool-result pruning preserves metadata, state and execution details, and keeps
+     * media blocks intact while only the text portion is replaced with a preview.
      */
     @Test
-    void pruneToolResults_preservesMetadataStateAndExecutionDetailsAndSkipsMediaBlocks() {
+    void pruneToolResults_preservesMetadataStateAndExecutionDetailsAndKeepsMediaBlocks() {
         ConversationCompactor compactor =
                 new ConversationCompactor(new RecordingModel(), mock(MemoryFlushManager.class));
         PruneConfig pruneConfig =
@@ -1597,18 +1598,16 @@ class ConversationCompactorTest {
         assertEquals(ToolResultState.ERROR, prunedBlock.getState());
         assertSame(details, prunedBlock.getExecutionDetails());
 
-        ToolResultBlock unchangedBlock =
-                pruned.get(1).getContentBlocks(ToolResultBlock.class).get(0);
-        assertEquals(2, unchangedBlock.getOutput().size());
-        assertEquals("0123456789abcdefghij", toolOutput(pruned.get(1)));
-        assertEquals(ToolResultState.SUCCESS, unchangedBlock.getState());
-        assertTrue(
-                unchangedBlock.getOutput().stream().anyMatch(block -> block instanceof ImageBlock));
+        ToolResultBlock mediaBlock = pruned.get(1).getContentBlocks(ToolResultBlock.class).get(0);
+        assertEquals(2, mediaBlock.getOutput().size());
+        assertTrue(toolOutput(pruned.get(1)).contains("chars pruned"));
+        assertEquals(ToolResultState.SUCCESS, mediaBlock.getState());
+        assertTrue(mediaBlock.getOutput().stream().anyMatch(block -> block instanceof ImageBlock));
     }
 
     /** Verifies tool-result pruning never drops audio, video or data blocks. */
     @Test
-    void pruneToolResults_skipsBlocksWithAudioVideoDataMedia() {
+    void pruneToolResults_keepsBlocksWithAudioVideoDataMedia() {
         ConversationCompactor compactor =
                 new ConversationCompactor(new RecordingModel(), mock(MemoryFlushManager.class));
         PruneConfig pruneConfig =
@@ -1634,21 +1633,22 @@ class ConversationCompactorTest {
 
         List<Msg> pruned = compactor.pruneToolResults(List.of(withMedia), pruneConfig);
 
-        assertSame(withMedia, pruned.get(0));
-        assertEquals("0123456789abcdefghij", toolOutput(pruned.get(0)));
-        ToolResultBlock unchanged = pruned.get(0).getContentBlocks(ToolResultBlock.class).get(0);
-        assertEquals(4, unchanged.getOutput().size());
-        assertTrue(unchanged.getOutput().stream().anyMatch(block -> block instanceof AudioBlock));
-        assertTrue(unchanged.getOutput().stream().anyMatch(block -> block instanceof VideoBlock));
-        assertTrue(unchanged.getOutput().stream().anyMatch(block -> block instanceof DataBlock));
+        assertNotSame(withMedia, pruned.get(0));
+        assertTrue(toolOutput(pruned.get(0)).contains("chars pruned"));
+        ToolResultBlock mediaBlock = pruned.get(0).getContentBlocks(ToolResultBlock.class).get(0);
+        assertEquals(4, mediaBlock.getOutput().size());
+        assertTrue(mediaBlock.getOutput().stream().anyMatch(block -> block instanceof AudioBlock));
+        assertTrue(mediaBlock.getOutput().stream().anyMatch(block -> block instanceof VideoBlock));
+        assertTrue(mediaBlock.getOutput().stream().anyMatch(block -> block instanceof DataBlock));
     }
 
     /**
-     * Verifies that a single tool message carrying several large tool results contributes its
-     * tokens to the prunable budget once, not once per block.
+     * Verifies that each tool result in a batched tool message is charged to the prunable budget
+     * individually, so a message carrying several large results crosses the threshold even though
+     * the message itself was only just above it.
      */
     @Test
-    void pruneCountsEachMessageOnceWhenItCarriesMultipleToolResults() {
+    void pruneChargesEachToolResultInABatchedMessage() {
         ConversationCompactor compactor =
                 new ConversationCompactor(new RecordingModel(), mock(MemoryFlushManager.class));
         ToolResultBlock first =
@@ -1680,9 +1680,18 @@ class ConversationCompactorTest {
 
         List<Msg> result = compactor.pruneToolResults(List.of(message), pruneConfig);
 
-        // Counting the message once keeps the budget below the threshold, so nothing is pruned.
-        assertSame(message, result.get(0));
-        assertFalse(toolOutput(result.get(0)).contains("chars pruned"));
+        // Each result is charged separately, so the combined budget crosses the threshold.
+        assertNotSame(message, result.get(0));
+        List<ToolResultBlock> blocks = result.get(0).getContentBlocks(ToolResultBlock.class);
+        assertEquals(2, blocks.size());
+        for (ToolResultBlock block : blocks) {
+            assertTrue(
+                    block.getOutput().stream()
+                            .anyMatch(
+                                    content ->
+                                            content instanceof TextBlock text
+                                                    && text.getText().contains("chars pruned")));
+        }
     }
 
     /**

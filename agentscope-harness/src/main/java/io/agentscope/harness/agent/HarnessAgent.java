@@ -85,6 +85,7 @@ import io.agentscope.harness.agent.memory.MemoryConfig;
 import io.agentscope.harness.agent.memory.MemoryConsolidator;
 import io.agentscope.harness.agent.memory.MemoryFlushManager;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
+import io.agentscope.harness.agent.memory.compaction.ConversationCompactor;
 import io.agentscope.harness.agent.memory.compaction.ToolResultEvictionConfig;
 import io.agentscope.harness.agent.middleware.AgentTraceMiddleware;
 import io.agentscope.harness.agent.middleware.AsyncToolMiddleware;
@@ -148,6 +149,7 @@ import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -1163,23 +1165,36 @@ public class HarnessAgent implements Agent, AutoCloseable {
 
     private Mono<Msg> wrappedCall(
             List<Msg> msgs, RuntimeContext effective, Supplier<Mono<Msg>> inner) {
-        return Mono.using(
-                        () -> {
-                            if (sandboxLifecycleMw != null) {
-                                sandboxLifecycleMw.acquireForCall(effective);
-                            }
-                            return effective;
-                        },
-                        eff -> inner.get(),
-                        eff -> {
-                            if (sandboxLifecycleMw != null) {
-                                sandboxLifecycleMw.releaseForCall(eff);
-                            }
-                        })
-                // Cancelling runs the upstream cleanup chain (recorder appends and flushes)
-                // synchronously; deliver it on a worker so a caller that may be a Reactor event
-                // loop never blocks on recorder storage interactions.
-                .cancelOn(Schedulers.boundedElastic());
+        Mono<Msg> base =
+                Mono.using(
+                                () -> {
+                                    if (sandboxLifecycleMw != null) {
+                                        sandboxLifecycleMw.acquireForCall(effective);
+                                    }
+                                    return effective;
+                                },
+                                eff -> inner.get(),
+                                eff -> {
+                                    if (sandboxLifecycleMw != null) {
+                                        sandboxLifecycleMw.releaseForCall(eff);
+                                    }
+                                })
+                        // Cancelling runs the upstream cleanup chain (recorder appends and
+                        // flushes) synchronously; deliver it on a worker so a caller that may be
+                        // a Reactor event loop never blocks on recorder storage interactions.
+                        .cancelOn(Schedulers.boundedElastic());
+        // Legacy state-store sessions have no session log, so the companion middleware cannot
+        // retry there; recover through the state store instead.
+        if (compactionHook != null && !delegate.sessionLogEnabled()) {
+            return base.onErrorResume(
+                    e -> {
+                        if (CompactionMiddleware.isContextOverflowError(e)) {
+                            return recoverFromOverflow(msgs, effective);
+                        }
+                        return Mono.error(e);
+                    });
+        }
+        return base;
     }
 
     /**
@@ -1264,6 +1279,92 @@ public class HarnessAgent implements Agent, AutoCloseable {
             b.put(WorkspacePathNormalizer.class, pathNormalizer);
         }
         return b.build();
+    }
+
+    private Mono<Msg> recoverFromOverflow(List<Msg> msgs, RuntimeContext effective) {
+        if (compactionHook != null) {
+            log.warn(
+                    "Context overflow detected, triggering emergency compaction via"
+                            + " CompactionMiddleware");
+            return forceCompactAndRetry(msgs, effective);
+        }
+        return Mono.error(
+                new RuntimeException(
+                        "Context overflow: no compaction configured, unable to recover"));
+    }
+
+    /**
+     * Compacts the failed call's context, persists the result and retries once.
+     *
+     * <p>A failed call persists the state it accumulated, including this turn's input, and the
+     * retry reloads the session from the state store. The compacted context is therefore persisted
+     * before retrying (otherwise the reload restores the original, oversized context), and when
+     * the input is already in the context the retry continues from it with an empty input instead
+     * of appending the input a second time.
+     */
+    private Mono<Msg> forceCompactAndRetry(List<Msg> msgs, RuntimeContext effective) {
+        RuntimeContext ctx = effective != null ? effective : RuntimeContext.empty();
+        AgentState state = RuntimeContext.resolveAgentState(effective, delegate);
+        List<Msg> allMsgs = state.contextMutable();
+        if (allMsgs.isEmpty()) {
+            return Mono.error(
+                    new RuntimeException("Context overflow: context is empty, cannot compact"));
+        }
+        // Decide before compaction, which may fold the input into the summary.
+        List<Msg> retryInput = isInContext(msgs, allMsgs) ? List.of() : msgs;
+        String agentId = getName();
+        String sessionId =
+                effective != null && effective.getSessionId() != null
+                        ? effective.getSessionId()
+                        : "default";
+
+        CompactionConfig forceConfig = CompactionConfig.builder().triggerMessages(1).build();
+        String effectiveFlushPrompt =
+                memoryConfig.flushPrompt() != null
+                        ? memoryConfig.flushPrompt()
+                        : MemoryFlushManager.DEFAULT_FLUSH_PROMPT;
+        MemoryFlushManager fm =
+                new MemoryFlushManager(workspaceManager, getModel(), effectiveFlushPrompt);
+        ConversationCompactor compactor = new ConversationCompactor(getModel(), fm);
+
+        return compactor
+                .compactIfNeeded(ctx, allMsgs, forceConfig, agentId, sessionId)
+                .flatMap(
+                        opt -> {
+                            if (opt.isEmpty()) {
+                                return Mono.error(
+                                        new RuntimeException(
+                                                "Context overflow: emergency compaction yielded no"
+                                                        + " result"));
+                            }
+                            List<Msg> compacted = opt.get();
+                            return Mono.fromRunnable(
+                                            () ->
+                                                    delegate.updateAgentState(
+                                                            ctx,
+                                                            "overflow_compaction",
+                                                            s -> {
+                                                                s.contextMutable().clear();
+                                                                s.contextMutable()
+                                                                        .addAll(compacted);
+                                                            }))
+                                    .subscribeOn(Schedulers.boundedElastic())
+                                    .then(Mono.defer(() -> delegate.call(retryInput, ctx)));
+                        });
+    }
+
+    /** Whether every message of {@code input} is already present in {@code context}, by id. */
+    private static boolean isInContext(List<Msg> input, List<Msg> context) {
+        if (input == null || input.isEmpty()) {
+            return false;
+        }
+        Set<String> contextIds = new HashSet<>();
+        for (Msg msg : context) {
+            if (msg.getId() != null) {
+                contextIds.add(msg.getId());
+            }
+        }
+        return input.stream().allMatch(m -> m.getId() != null && contextIds.contains(m.getId()));
     }
 
     public static Builder builder() {

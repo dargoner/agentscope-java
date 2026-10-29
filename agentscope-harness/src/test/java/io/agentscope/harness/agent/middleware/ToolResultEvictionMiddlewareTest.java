@@ -589,7 +589,7 @@ class ToolResultEvictionMiddlewareTest {
     }
 
     @Test
-    void skipsEvictionWhenToolResultContainsMedia() throws IOException {
+    void evictsTextOfMediaContainingResultAndKeepsMedia() throws IOException {
         LocalFilesystem filesystem =
                 new LocalFilesystem(tempDir, LocalFsMode.ROOTED, PathPolicy.empty(), 10, null);
         ToolResultEvictionMiddleware middleware =
@@ -629,24 +629,20 @@ class ToolResultEvictionMiddlewareTest {
                 .collectList()
                 .block();
 
-        assertSame(input, forwarded.get());
-        assertEquals(FULL_OUTPUT, toolOutput(forwarded.get().messages().get(0)));
+        assertNotSame(input, forwarded.get());
         ToolResultBlock result =
                 forwarded.get().messages().get(0).getContentBlocks(ToolResultBlock.class).get(0);
-        assertFalse(
-                Boolean.TRUE.equals(
-                        result.getMetadata()
-                                .get(ToolResultEvictionMiddleware.EVICTED_METADATA_KEY)));
+        assertEquals(
+                true, result.getMetadata().get(ToolResultEvictionMiddleware.EVICTED_METADATA_KEY));
         assertEquals(ToolResultState.SUCCESS, result.getState());
+        assertTrue(result.getOutput().stream().anyMatch(block -> block instanceof ImageBlock));
+        String forwardedText = toolOutput(forwarded.get().messages().get(0));
+        assertTrue(forwardedText.contains("Tool output was too large"));
+        assertFalse(forwardedText.contains(FULL_OUTPUT));
 
-        Path resultDir = tempDir.resolve("large_tool_results/Test_Agent");
-        if (Files.exists(resultDir)) {
-            try (var files = Files.list(resultDir)) {
-                assertEquals(
-                        0L,
-                        files.count(),
-                        "No file should be written for media-containing results");
-            }
+        try (var files = Files.list(tempDir.resolve("large_tool_results/Test_Agent"))) {
+            Path stored = files.findFirst().orElseThrow();
+            assertEquals(FULL_OUTPUT, Files.readString(stored));
         }
     }
 

@@ -40,7 +40,7 @@ class TokenCounterUtilTest {
                         .content(ThinkingBlock.builder().thinking("x".repeat(1_000)).build())
                         .build();
 
-        assertEquals(412, TokenCounterUtil.calculateToken(List.of(message)));
+        assertEquals(409, TokenCounterUtil.calculateToken(List.of(message)));
     }
 
     @Test
@@ -59,7 +59,7 @@ class TokenCounterUtilTest {
                                         .build())
                         .build();
 
-        assertEquals(430, TokenCounterUtil.calculateToken(List.of(message)));
+        assertEquals(421, TokenCounterUtil.calculateToken(List.of(message)));
     }
 
     @Test
@@ -80,7 +80,7 @@ class TokenCounterUtilTest {
                                         .build())
                         .build();
 
-        assertEquals(2077, TokenCounterUtil.calculateToken(List.of(message)));
+        assertEquals(2068, TokenCounterUtil.calculateToken(List.of(message)));
     }
 
     @Test

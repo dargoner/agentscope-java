@@ -151,6 +151,7 @@ class CompactionMiddlewareTest {
             var agent =
                     ReActAgent.builder()
                             .name("emergency-no-memory-test")
+                            .sessionLogStore(new InMemorySessionLogStore())
                             .model(new OverflowOnceModel(calls, "answer"))
                             .middleware(recovery.overflowRecovery())
                             .build();
@@ -192,6 +193,7 @@ class CompactionMiddlewareTest {
             var agent =
                     ReActAgent.builder()
                             .name("emergency-memory-test")
+                            .sessionLogStore(new InMemorySessionLogStore())
                             .model(new OverflowOnceModel(calls, "answer"))
                             .middleware(recovery.overflowRecovery())
                             .build();
@@ -404,9 +406,12 @@ class CompactionMiddlewareTest {
         assertTrue(facts.stream().filter(e -> e.type().equals("model/end")).count() >= 2);
     }
 
-    /** Without a session log the recovery companion still recovers overflow once. */
+    /**
+     * Without a session log the recovery companion cannot tell persisted history from synthetic
+     * projections, so it skips the retry and lets the provider error propagate untouched.
+     */
     @Test
-    void overflowRecoveryWorksWithoutSessionLog() {
+    void overflowRecoverySkipsRetryWithoutSessionLog() {
         AtomicInteger calls = new AtomicInteger();
         var recovery = new CompactionMiddleware(null, new SuccessfulSummaryModel(), fixedConfig());
         var agent =
@@ -415,14 +420,14 @@ class CompactionMiddlewareTest {
                         .model(new OverflowOnceModel(calls, "answer"))
                         .middleware(recovery.overflowRecovery())
                         .build();
-        var reply =
-                agent.call(
+        StepVerifier.create(
+                        agent.call(
                                 List.of(userMessage("old context"), userMessage("latest request")),
-                                context("user", "no-log-session"))
-                        .block(Duration.ofSeconds(10));
-        assertNotNull(reply);
-        assertEquals("answer", reply.getTextContent());
-        assertEquals(2, calls.get());
+                                context("user", "no-log-session")))
+                .expectErrorSatisfies(
+                        error -> assertTrue(error.getMessage().contains("context_length_exceeded")))
+                .verify(Duration.ofSeconds(10));
+        assertEquals(1, calls.get(), "the guard must not retry the provider call");
     }
 
     /**
@@ -461,8 +466,8 @@ class CompactionMiddlewareTest {
     }
 
     /**
-     * The full middleware (standalone wiring) must also recover stream-event overflows exactly
-     * once through its own reasoning boundary.
+     * The full middleware wiring (preparer plus recovery companion) must recover stream-event
+     * overflows exactly once.
      */
     @Test
     void streamEventsOverflowRecoveryCompletesOnce() {
@@ -474,6 +479,7 @@ class CompactionMiddlewareTest {
                         .model(new OverflowOnceModel(calls, "answer"))
                         .sessionLogStore(new InMemorySessionLogStore())
                         .middleware(recovery)
+                        .middleware(recovery.overflowRecovery())
                         .build();
         List<AgentEvent> events =
                 agent.streamEvents(
@@ -499,6 +505,7 @@ class CompactionMiddlewareTest {
         var agent =
                 ReActAgent.builder()
                         .name("overflow-lifecycle-test")
+                        .sessionLogStore(new InMemorySessionLogStore())
                         .model(new OverflowOnceModel(calls, "answer"))
                         .middleware(recovery.overflowRecovery())
                         .build();
@@ -649,6 +656,7 @@ class CompactionMiddlewareTest {
         var agent =
                 ReActAgent.builder()
                         .name("overflow-null-cause-test")
+                        .sessionLogStore(new InMemorySessionLogStore())
                         .model(model)
                         .middleware(recovery.overflowRecovery())
                         .build();
@@ -700,6 +708,7 @@ class CompactionMiddlewareTest {
         var agent =
                 ReActAgent.builder()
                         .name("overflow-cancel-test")
+                        .sessionLogStore(new InMemorySessionLogStore())
                         .model(model)
                         .middleware(recovery.overflowRecovery())
                         .build();
@@ -750,6 +759,7 @@ class CompactionMiddlewareTest {
         var agent =
                 ReActAgent.builder()
                         .name("overflow-summary-failure-test")
+                        .sessionLogStore(new InMemorySessionLogStore())
                         .model(model)
                         .middleware(recovery.overflowRecovery())
                         .build();
@@ -785,6 +795,7 @@ class CompactionMiddlewareTest {
         var agent =
                 ReActAgent.builder()
                         .name("overflow-synthetic-test")
+                        .sessionLogStore(new InMemorySessionLogStore())
                         .model(new EmptyThenOverflowThenAnswerModel(calls))
                         .middleware(recovery.overflowRecovery())
                         .build();
@@ -821,6 +832,7 @@ class CompactionMiddlewareTest {
         var agent =
                 ReActAgent.builder()
                         .name("rejected-retry-test")
+                        .sessionLogStore(new InMemorySessionLogStore())
                         .model(new OverflowOnceModel(calls, "answer"))
                         .middleware(recovery.overflowRecovery())
                         .modelRequestPreparer(preparer)
@@ -867,6 +879,7 @@ class CompactionMiddlewareTest {
         var agent =
                 ReActAgent.builder()
                         .name("real-chain-rejected-retry")
+                        .sessionLogStore(new InMemorySessionLogStore())
                         .model(new OverflowOnceModel(calls, "answer"))
                         .middleware(recovery.overflowRecovery())
                         .modelRequestPreparer(new HarnessContextBuilder(policy, null, null))

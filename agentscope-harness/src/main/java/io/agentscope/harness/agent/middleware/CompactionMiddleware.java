@@ -219,16 +219,21 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                                                             input.options(),
                                                             react.getModel()),
                                                     CompactionConfig.FALLBACK_TRIGGER_TOKENS,
-                                                    before)
+                                                    before,
+                                                    "EMERGENCY")
                                             .flatMapMany(
                                                     candidate -> {
                                                         if (candidate.history().equals(before)
                                                                 || !state.getContext()
                                                                         .equals(before))
                                                             return Flux.error(error);
-                                                        applyToContext(state, candidate.history());
-                                                        // next creates a new model call; the turn,
-                                                        // execution and writer stay unchanged.
+                                                        // The candidate is not written to durable
+                                                        // history here: the retry goes through the
+                                                        // final request preparer, which validates
+                                                        // budget and tool pairing and owns the only
+                                                        // commit point. next creates a new model
+                                                        // call; the turn, execution and writer stay
+                                                        // unchanged.
                                                         return next.apply(
                                                                         new ReasoningInput(
                                                                                 candidate

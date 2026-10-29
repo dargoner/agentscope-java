@@ -218,12 +218,6 @@ public class ToolResultEvictionMiddleware implements HarnessRuntimeMiddleware {
         if (toolName != null && config.getExcludedToolNames().contains(toolName)) {
             return null;
         }
-        // Only text-only tool results are evicted. If the result contains media or other
-        // non-text blocks, skip eviction so unregistered media is not silently replaced by a
-        // text placeholder.
-        if (containsNonTextBlock(toolResult)) {
-            return null;
-        }
         String fullText = extractText(toolResult);
         if (fullText.length() <= config.getMaxResultChars()) {
             return null;
@@ -295,13 +289,6 @@ public class ToolResultEvictionMiddleware implements HarnessRuntimeMiddleware {
             }
         }
         return sb.toString();
-    }
-
-    private boolean containsNonTextBlock(ToolResultBlock toolResult) {
-        if (toolResult.getOutput() == null) {
-            return false;
-        }
-        return toolResult.getOutput().stream().anyMatch(b -> !(b instanceof TextBlock));
     }
 
     private String buildEvictionPath(String agentName, String toolCallId, String fullText) {

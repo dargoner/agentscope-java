@@ -470,7 +470,7 @@ public class ConversationCompactor {
     private static Map<String, Object> failedCompactionEndPayload(
             String compactionId,
             int beforeMsgCount,
-            int beforeTokenCount,
+            long beforeTokenCount,
             Throwable error,
             long durationMs) {
         Map<String, Object> payload =
@@ -1180,11 +1180,11 @@ public class ConversationCompactor {
         if (!anyModified) {
             return tu;
         }
+        // Drop raw content so request formatters serialize the truncated input.
         return ToolUseBlock.builder()
                 .id(tu.getId())
                 .name(tu.getName())
                 .input(newInput)
-                .content(tu.getContent())
                 .metadata(tu.getMetadata())
                 .state(tu.getState())
                 .build();

@@ -652,6 +652,7 @@ public final class HarnessContextBuilder implements ModelRequestPreparer {
         // output reservation must be read from the same effective options: a default
         // maxTokens that never appears in request options still consumes budget.
         GenerateOptions effective = input.model().resolveOptions(input.options());
+        if (effective == null) effective = input.options();
         if (effective != null) {
             if (effective.getMaxTokens() != null)
                 output = Math.max(output, effective.getMaxTokens());
