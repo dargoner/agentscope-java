@@ -159,7 +159,7 @@ class CompactionMiddlewareTest {
             var reply =
                     agent.call(
                                     List.of(
-                                            userMessage("old context"),
+                                            userMessage("old context" + PAD),
                                             userMessage("latest request")),
                                     context("user", "emergency-no-memory-session"))
                             .block(Duration.ofSeconds(10));
@@ -201,7 +201,7 @@ class CompactionMiddlewareTest {
             var reply =
                     agent.call(
                                     List.of(
-                                            userMessage("old context"),
+                                            userMessage("old context" + PAD),
                                             userMessage("latest request")),
                                     context("user", "emergency-memory-session"))
                             .block(Duration.ofSeconds(10));
@@ -271,7 +271,8 @@ class CompactionMiddlewareTest {
                                                         .addAll(
                                                                 List.of(
                                                                         userMessage(
-                                                                                "prior summary"),
+                                                                                "prior summary"
+                                                                                        + PAD),
                                                                         userMessage("latest")));
                                                 return Flux.error(
                                                         new IllegalStateException(
@@ -357,7 +358,10 @@ class CompactionMiddlewareTest {
         var ctx = context("user", "notice-overflow");
         var run =
                 agent.prepareCall(
-                        List.of(userMessage("old request"), notice, userMessage("latest request")),
+                        List.of(
+                                userMessage("old request" + PAD),
+                                notice,
+                                userMessage("latest request")),
                         ctx);
         assertEquals("answer", run.stream().blockLast(Duration.ofSeconds(10)).getTextContent());
         assertEquals(2, calls.get());
@@ -395,7 +399,8 @@ class CompactionMiddlewareTest {
         var ctx = context("user", "overflow-session");
         var run =
                 agent.prepareCall(
-                        List.of(userMessage("old context"), userMessage("latest request")), ctx);
+                        List.of(userMessage("old context" + PAD), userMessage("latest request")),
+                        ctx);
         assertEquals("answer", run.stream().blockLast(Duration.ofSeconds(10)).getTextContent());
         assertEquals(AgentRun.Status.COMPLETED, run.status());
         assertEquals(2, calls.get());
@@ -472,7 +477,10 @@ class CompactionMiddlewareTest {
     @Test
     void streamEventsOverflowRecoveryCompletesOnce() {
         AtomicInteger calls = new AtomicInteger();
-        var recovery = new CompactionMiddleware(null, new SuccessfulSummaryModel(), fixedConfig());
+        // Boundary compaction runs first here; a summary it produced cannot be reduced again, so
+        // this fixture leaves boundary compaction idle to exercise the recovery path itself.
+        var recovery =
+                new CompactionMiddleware(null, new SuccessfulSummaryModel(), noCompactionConfig());
         var agent =
                 ReActAgent.builder()
                         .name("overflow-stream-test")
@@ -483,7 +491,9 @@ class CompactionMiddlewareTest {
                         .build();
         List<AgentEvent> events =
                 agent.streamEvents(
-                                List.of(userMessage("old context"), userMessage("latest request")),
+                                List.of(
+                                        userMessage("old context" + PAD),
+                                        userMessage("latest request")),
                                 context("user", "stream-session"))
                         .collectList()
                         .block(Duration.ofSeconds(10));
@@ -511,7 +521,9 @@ class CompactionMiddlewareTest {
                         .build();
         List<AgentEvent> events =
                 agent.streamEvents(
-                                List.of(userMessage("old context"), userMessage("latest request")),
+                                List.of(
+                                        userMessage("old context" + PAD),
+                                        userMessage("latest request")),
                                 context("user", "lifecycle-session"))
                         .collectList()
                         .block(Duration.ofSeconds(10));
@@ -559,7 +571,9 @@ class CompactionMiddlewareTest {
                         .build();
         List<Signal<AgentEvent>> signals =
                 agent.streamEvents(
-                                List.of(userMessage("old context"), userMessage("latest request")),
+                                List.of(
+                                        userMessage("old context" + PAD),
+                                        userMessage("latest request")),
                                 context("user", "overflow-always-session"))
                         .materialize()
                         .collectList()
@@ -610,7 +624,9 @@ class CompactionMiddlewareTest {
                         .build();
         List<Signal<AgentEvent>> signals =
                 agent.streamEvents(
-                                List.of(userMessage("old context"), userMessage("latest request")),
+                                List.of(
+                                        userMessage("old context" + PAD),
+                                        userMessage("latest request")),
                                 context("user", "overflow-cause-session"))
                         .materialize()
                         .collectList()
@@ -662,7 +678,9 @@ class CompactionMiddlewareTest {
                         .build();
         List<Signal<AgentEvent>> signals =
                 agent.streamEvents(
-                                List.of(userMessage("old context"), userMessage("latest request")),
+                                List.of(
+                                        userMessage("old context" + PAD),
+                                        userMessage("latest request")),
                                 context("user", "overflow-null-cause-session"))
                         .materialize()
                         .collectList()
@@ -714,7 +732,9 @@ class CompactionMiddlewareTest {
                         .build();
         List<Signal<AgentEvent>> signals =
                 agent.streamEvents(
-                                List.of(userMessage("old context"), userMessage("latest request")),
+                                List.of(
+                                        userMessage("old context" + PAD),
+                                        userMessage("latest request")),
                                 context("user", "overflow-cancel-session"))
                         .materialize()
                         .collectList()
@@ -801,7 +821,9 @@ class CompactionMiddlewareTest {
                         .build();
         var reply =
                 agent.call(
-                                List.of(userMessage("old context"), userMessage("latest request")),
+                                List.of(
+                                        userMessage("old context" + PAD),
+                                        userMessage("latest request")),
                                 context("user", "synthetic-session"))
                         .block(Duration.ofSeconds(10));
         assertNotNull(reply);
@@ -840,7 +862,9 @@ class CompactionMiddlewareTest {
         var ctx = context("user", "rejected-retry-session");
         List<Signal<AgentEvent>> signals =
                 agent.streamEvents(
-                                List.of(userMessage("old context"), userMessage("latest request")),
+                                List.of(
+                                        userMessage("old context" + PAD),
+                                        userMessage("latest request")),
                                 ctx)
                         .materialize()
                         .collectList()
@@ -855,21 +879,21 @@ class CompactionMiddlewareTest {
         // The emergency summarization succeeded, but its candidate history must not be written
         // before the final request preparer validated the retry request.
         assertEquals(2, historyAtRejection.size());
-        assertEquals("old context", historyAtRejection.get(0).getTextContent());
+        assertEquals("old context" + PAD, historyAtRejection.get(0).getTextContent());
         assertEquals("latest request", historyAtRejection.get(1).getTextContent());
         AgentState state = ctx.getAgentState();
         assertNotNull(state, "the call-scoped state remains readable after the failed run");
         assertEquals(2, state.getContext().size());
-        assertEquals("old context", state.getContext().get(0).getTextContent());
+        assertEquals("old context" + PAD, state.getContext().get(0).getTextContent());
     }
 
     /**
-     * Real preparer chain for the same contract: the emergency candidate is validated by an actual
-     * {@link HarnessContextBuilder}, whose budget check rejects the oversized summary itself; the
-     * builder's own rejection propagates and the canonical history stays untouched.
+     * Real preparer chain for the rejection contract: a summary candidate that cannot reduce the
+     * full history is rejected before the {@link HarnessContextBuilder} sees it, so the provider
+     * overflow propagates unchanged and the canonical history stays untouched.
      */
     @Test
-    void realContextBuilderRejectsOversizedEmergencyCandidateAndKeepsHistory() {
+    void realContextBuilderKeepsHistoryWhenEmergencySummaryDoesNotReduce() {
         AtomicInteger calls = new AtomicInteger();
         AtomicInteger summaryCalls = new AtomicInteger();
         var recovery =
@@ -896,11 +920,13 @@ class CompactionMiddlewareTest {
         Signal<AgentEvent> terminal = signals.get(signals.size() - 1);
         assertTrue(terminal.isOnError(), "stream must terminate with an error signal");
         assertTrue(
-                terminal.getThrowable() instanceof ContextBudgetExceededException,
-                "the real context builder must reject the oversized emergency candidate, but got: "
+                terminal.getThrowable() instanceof IllegalStateException
+                        && "context_length_exceeded".equals(terminal.getThrowable().getMessage()),
+                "the provider overflow propagates when the candidate cannot reduce history, but"
+                        + " got: "
                         + terminal.getThrowable());
         assertEquals(1, summaryCalls.get(), "the emergency summary must actually run");
-        assertEquals(1, calls.get(), "the rejected retry must not reach the provider again");
+        assertEquals(1, calls.get(), "a non-reducing candidate must not be retried");
         AgentState state = ctx.getAgentState();
         assertNotNull(state, "the call-scoped state remains readable after the failed run");
         assertEquals(2, state.getContext().size());
@@ -1298,6 +1324,9 @@ class CompactionMiddlewareTest {
                 .prune(null)
                 .build();
     }
+
+    /** Padding that keeps recovery fixtures larger than the fixed summary-wrapper cost. */
+    private static final String PAD = " earlier conversation detail".repeat(40);
 
     /**
      * Creates stable configuration that bypasses boundary compaction for model-stream interrupt and

@@ -214,8 +214,11 @@ class SandboxReleasePairingTest {
         return RuntimeContext.builder().sessionId(sessionId).userId("user-a").build();
     }
 
+    /** Padding that keeps the fixture larger than the fixed summary-wrapper cost. */
+    private static final String PAD = " earlier conversation detail".repeat(40);
+
     private static List<Msg> threeMessages() {
-        return List.of(userMsg("m1"), userMsg("m2"), userMsg("m3"));
+        return List.of(userMsg("m1" + PAD), userMsg("m2"), userMsg("m3"));
     }
 
     private static Msg userMsg(String text) {

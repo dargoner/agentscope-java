@@ -390,14 +390,22 @@ class AguiRequestProcessorTest {
             activeRun.dispose();
         }
 
-        Disposable nextRun = processor.process(request(input("run-3"))).events().subscribe();
+        Disposable nextRun = null;
         try {
-            for (int i = 0; i < 100 && adapterCount.get() < 2; i++) {
+            // Cancelling run-1 releases its lease asynchronously, so a follow-up run can still be
+            // rejected while the release is in flight. Retry like a client would until it starts.
+            for (int i = 0; i < 500 && adapterCount.get() < 2; i++) {
+                if (nextRun != null) {
+                    nextRun.dispose();
+                }
+                nextRun = processor.process(request(input("run-3"))).events().subscribe();
                 Thread.sleep(10L);
             }
             assertEquals(2, adapterCount.get());
         } finally {
-            nextRun.dispose();
+            if (nextRun != null) {
+                nextRun.dispose();
+            }
         }
     }
 
