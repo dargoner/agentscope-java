@@ -2796,13 +2796,29 @@ public class HarnessAgent implements Agent, AutoCloseable {
         /**
          * Builds a fresh runtime from this reusable configuration. Configure the builder before
          * sharing it; builds are serialized, while the resulting agents can execute concurrently.
+         * If a build fails, auto-wired state-store and filesystem configuration is restored so
+         * the same builder can be corrected and reused.
          */
         public synchronized HarnessAgent build() {
             var configuredMessageBus = messageBus;
             var configuredAsyncToolRegistry = asyncToolRegistry;
+            var configuredStateStoreOverride = stateStoreOverride;
+            var configuredRemoteStore =
+                    remoteFilesystemSpec != null ? remoteFilesystemSpec.store() : null;
+            var configuredSandboxSnapshotSpec =
+                    sandboxFilesystemSpec != null
+                            ? sandboxFilesystemSpec.getSnapshotSpecOverride()
+                            : null;
+            var configuredSandboxExecutionGuard =
+                    sandboxFilesystemSpec != null
+                            ? sandboxFilesystemSpec.getExecutionGuard()
+                            : null;
             PendingSandboxClient pendingSandboxClient = new PendingSandboxClient();
+            var successfulBuild = false;
             try {
-                return buildInstance(inner.copy(), pendingSandboxClient);
+                var agent = buildInstance(inner.copy(), pendingSandboxClient);
+                successfulBuild = true;
+                return agent;
             } catch (RuntimeException | Error failure) {
                 pendingSandboxClient.rollback(failure);
                 throw failure;
@@ -2811,6 +2827,17 @@ public class HarnessAgent implements Agent, AutoCloseable {
                 // when sandbox bindings or workspace indexes have per-agent lifetimes.
                 messageBus = configuredMessageBus;
                 asyncToolRegistry = configuredAsyncToolRegistry;
+                if (!successfulBuild) {
+                    stateStoreOverride = configuredStateStoreOverride;
+                    if (remoteFilesystemSpec != null) {
+                        remoteFilesystemSpec.restoreAutoInjectedStore(configuredRemoteStore);
+                    }
+                    if (sandboxFilesystemSpec != null) {
+                        sandboxFilesystemSpec
+                                .snapshotSpec(configuredSandboxSnapshotSpec)
+                                .executionGuard(configuredSandboxExecutionGuard);
+                    }
+                }
             }
         }
 
