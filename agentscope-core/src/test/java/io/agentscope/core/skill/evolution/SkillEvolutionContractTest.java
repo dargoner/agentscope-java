@@ -17,6 +17,7 @@ package io.agentscope.core.skill.evolution;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -145,6 +146,53 @@ class SkillEvolutionContractTest {
         assertEquals(
                 "guide\nbody", new String(files.get("docs/guide.txt"), StandardCharsets.UTF_8));
         assertEquals(CanonicalSkillHasher.hashMaterialized(files), SkillArtifactHasher.hash(skill));
+    }
+
+    @Test
+    void rawArtifactHashReproducesPersistedHashesAfterTheNamePolicyTightens() {
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("name", "skill_legacy_refined");
+        metadata.put("description", "persisted artifact");
+        String content = "# Instructions\nRun safely.\n";
+        Map<String, String> resources = linkedResources("notes.txt", "keep\r\n");
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new AgentSkill(metadata, content, resources, "integrity"));
+
+        String rawHash = SkillArtifactHasher.hash(metadata, content, resources);
+        assertEquals(
+                rawHash,
+                CanonicalSkillHasher.hashMaterialized(
+                        SkillArtifactMaterializer.materialize(metadata, content, resources)));
+        assertTrue(
+                SkillArtifactHasher.verify(
+                        metadata, content, resources, SkillArtifactHasher.ALGORITHM, rawHash));
+        assertFalse(
+                SkillArtifactHasher.verify(
+                        metadata,
+                        content,
+                        resources,
+                        SkillArtifactHasher.ALGORITHM,
+                        "0".repeat(64)));
+    }
+
+    @Test
+    void rawArtifactMaterialMatchesSkillMaterialForAcceptedNames() {
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("name", "demo");
+        metadata.put("description", "demo skill");
+        String content = "# Instructions\r\nRun safely.\r\n";
+        Map<String, String> resources = linkedResources("./docs//guide.txt", "guide\rbody");
+        AgentSkill skill = new AgentSkill(metadata, content, resources, "demo");
+
+        assertEquals(
+                SkillArtifactHasher.hash(skill),
+                SkillArtifactHasher.hash(metadata, content, resources));
+        assertArrayEquals(
+                SkillArtifactMaterializer.materialize(skill).get("docs/guide.txt"),
+                SkillArtifactMaterializer.materialize(metadata, content, resources)
+                        .get("docs/guide.txt"));
     }
 
     @Test
