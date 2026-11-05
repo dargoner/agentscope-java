@@ -285,11 +285,13 @@ class HarnessAgentSubagentStreamEventsTest {
                         .block();
 
         assertNotNull(events);
+        String childSourcePrefix = "sess-shared-source/" + childId + "/";
         List<AgentEvent> childEvents =
                 events.stream()
                         .filter(
                                 event ->
-                                        ("sess-shared-source/" + childId).equals(event.getSource()))
+                                        event.getSource() != null
+                                                && event.getSource().startsWith(childSourcePrefix))
                         .collect(Collectors.toList());
         assertFalse(
                 childEvents.isEmpty(),
