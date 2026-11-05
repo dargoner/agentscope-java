@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -1313,6 +1314,80 @@ class CompactionMiddlewareTest {
                 activeReply.get(5, TimeUnit.SECONDS).getGenerateReason()
                         == GenerateReason.INTERRUPTED);
         assertEquals(2, model.callCount.get());
+    }
+
+    /**
+     * Without a dedicated config model, the per-call model of the executing agent (its {@code
+     * RuntimeContext} modelId) drives compaction; the build-time field model must not serve it.
+     */
+    @Test
+    void perCallModelDrivesCompactionWhenNoDedicatedModel() {
+        ChatModelBase perCall =
+                new ChatModelBase() {
+                    public String getModelName() {
+                        return "per-call";
+                    }
+
+                    protected Flux<ChatResponse> doStream(
+                            List<Msg> messages, List<ToolSchema> tools, GenerateOptions options) {
+                        return Flux.just(
+                                ChatResponse.builder()
+                                        .content(
+                                                List.of(
+                                                        TextBlock.builder()
+                                                                .text("per-call-compacted")
+                                                                .build()))
+                                        .build());
+                    }
+                };
+        ChatModelBase defaultModel =
+                new ChatModelBase() {
+                    public String getModelName() {
+                        return "default";
+                    }
+
+                    protected Flux<ChatResponse> doStream(
+                            List<Msg> messages, List<ToolSchema> tools, GenerateOptions options) {
+                        return Flux.just(
+                                ChatResponse.builder()
+                                        .content(
+                                                List.of(
+                                                        TextBlock.builder()
+                                                                .text("default-model-compacted")
+                                                                .build()))
+                                        .build());
+                    }
+                };
+        ReActAgent agent = mock(ReActAgent.class);
+        when(agent.getName()).thenReturn("compaction-test-agent");
+        when(agent.getModel(any(RuntimeContext.class))).thenReturn(perCall);
+        when(agent.getModel()).thenReturn(defaultModel);
+        // No dedicated compaction model: the field is null, so compaction resolves the
+        // agent's per-call (RuntimeContext modelId) model instead of its default.
+        CompactionMiddleware middleware = new CompactionMiddleware(null, null, fixedConfig());
+
+        List<Msg> downstream = new ArrayList<>();
+        StepVerifier.create(
+                        middleware.onReasoning(
+                                agent,
+                                context("user", "session"),
+                                input("previous context" + PAD, "latest request"),
+                                next -> {
+                                    downstream.addAll(next.messages());
+                                    return Flux.empty();
+                                }))
+                .verifyComplete();
+
+        String rendered =
+                downstream.stream()
+                        .map(Msg::getTextContent)
+                        .collect(java.util.stream.Collectors.joining(" "));
+        assertTrue(
+                rendered.contains("per-call-compacted"),
+                () -> "expected per-call summary: " + rendered);
+        assertFalse(
+                rendered.contains("default-model-compacted"),
+                () -> "default model must not compact: " + rendered);
     }
 
     /** Creates stable configuration that enters the compaction branch. */
