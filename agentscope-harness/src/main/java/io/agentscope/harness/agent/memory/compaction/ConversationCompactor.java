@@ -932,7 +932,11 @@ public class ConversationCompactor {
      *
      * <p>Renders TEXT blocks verbatim; TOOL_USE and TOOL_RESULT blocks as concise inline
      * representations; Image/Data/Audio/Video blocks as stable placeholders so media semantics
-     * are preserved without leaking binary data, URLs or file paths into the summary.
+     * are preserved without leaking binary data, URLs or file paths into the summary. Tool calls
+     * retain their names and argument previews; tool results retain their names, error state, and
+     * head+tail previews. Documents retain a reference (name, MIME type, and where the bytes live)
+     * so a compacted conversation still records that a file was part of it. Omitted content is
+     * marked explicitly.
      */
     static String formatMessagesForSummary(List<Msg> messages) {
         CompactionMediaRenderer renderer = new CompactionMediaRenderer();

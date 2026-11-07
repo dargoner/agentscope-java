@@ -22,6 +22,7 @@ import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentEventStreams;
 import io.agentscope.core.event.AgentResultEvent;
 import io.agentscope.core.event.ConfirmResult;
+import io.agentscope.core.formatter.DocumentReferenceRenderer;
 import io.agentscope.core.message.GenerateReason;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
@@ -290,7 +291,9 @@ public final class AgentProtocolTaskStore {
                 return AWAITING_CONFIRM_SENTINEL;
             }
 
-            String text = reply != null ? reply.getTextContent() : "";
+            // The task result is a string, so a delivered document cannot travel as a block;
+            // render a reference instead of storing an empty reply.
+            String text = DocumentReferenceRenderer.renderMessageText(reply);
             clearSubmitContext(taskId);
             update(taskId, TaskStatus.COMPLETED, text, null, agentId, false, null);
             publishStatus(taskId, agentId, "success", null);

@@ -15,9 +15,11 @@
  */
 package io.agentscope.harness.agent.memory.compaction;
 
+import io.agentscope.core.formatter.DocumentReferenceRenderer;
 import io.agentscope.core.message.AudioBlock;
 import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.DataBlock;
+import io.agentscope.core.message.DocumentBlock;
 import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.TextBlock;
@@ -116,6 +118,9 @@ public final class CompactionMediaRenderer {
         }
         if (block instanceof DataBlock db) {
             return MediaReference.fromDataBlock(db, defaultDisposition).toPlaceholder();
+        }
+        if (block instanceof DocumentBlock db) {
+            return DocumentReferenceRenderer.render(db);
         }
         return "[unknown_block type=" + block.getClass().getSimpleName() + "]";
     }
