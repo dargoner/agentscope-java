@@ -40,9 +40,8 @@ import io.agentscope.core.agui.model.AguiContext;
 import io.agentscope.core.agui.model.AguiMessage;
 import io.agentscope.core.agui.model.AguiResume;
 import io.agentscope.core.agui.model.AguiTool;
-import io.agentscope.core.agui.model.DocumentInputContent;
-import io.agentscope.core.agui.model.InputContentUrlSource;
 import io.agentscope.core.agui.model.RunAgentInput;
+import io.agentscope.core.agui.model.TextInputContent;
 import io.agentscope.core.event.AgentEndEvent;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentResultEvent;
@@ -110,13 +109,15 @@ class AguiAgentAdapterV2Test {
                     inputBuilder()
                             .messages(
                                     List.of(
-                                            AguiMessage.userMessage(
+                                            AguiMessage.blocksMessage(
                                                     "msg-invalid",
+                                                    "assistant",
                                                     List.of(
-                                                            new DocumentInputContent(
-                                                                    new InputContentUrlSource(
-                                                                            "https://example.com/doc.pdf"),
-                                                                    null)))))
+                                                            new TextInputContent(
+                                                                    "assistant text must use the"
+                                                                        + " text content field")),
+                                                    null,
+                                                    null)))
                             .build();
 
             List<AguiEvent> events =
