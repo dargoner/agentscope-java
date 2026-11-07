@@ -299,10 +299,12 @@ class HarnessAgentStructuredOutputStreamEventsTest {
                         .filesystem(spec)
                         .build()) {
 
-            RuntimeContext ctx = RuntimeContext.builder().sessionId("sandbox-s1").build();
+            // Each stream subscription is a new execution, so it carries a fresh run ID while
+            // staying on the same session; reusing a runtime context would replay the run ID.
+            RuntimeContext firstCtx = RuntimeContext.builder().sessionId("sandbox-s1").build();
 
             List<AgentEvent> first =
-                    agent.streamEvents(List.of(userMsg()), WeatherResponse.class, ctx)
+                    agent.streamEvents(List.of(userMsg()), WeatherResponse.class, firstCtx)
                             .collectList()
                             .block(Duration.ofSeconds(10));
             assertNotNull(first);
@@ -314,8 +316,9 @@ class HarnessAgentStructuredOutputStreamEventsTest {
                     client.getCreateCount(),
                     "first subscription must acquire the sandbox exactly once (create)");
 
+            RuntimeContext secondCtx = RuntimeContext.builder().sessionId("sandbox-s1").build();
             List<AgentEvent> second =
-                    agent.streamEvents(List.of(userMsg()), weatherSchema(), ctx)
+                    agent.streamEvents(List.of(userMsg()), weatherSchema(), secondCtx)
                             .collectList()
                             .block(Duration.ofSeconds(10));
             assertNotNull(second);
