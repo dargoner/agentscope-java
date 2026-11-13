@@ -161,9 +161,11 @@ import io.agentscope.core.util.JsonUtils;
 import io.agentscope.core.util.MessageUtils;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -4004,8 +4006,19 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                     .firePreActing(executableToolCalls, toolkit)
                     .flatMap(
                             toolCalls -> {
+                                // Events from the acting core are published inside
+                                // actingStream (persist-then-publish ordering); this set lets
+                                // the outer forwarding below publish only middleware-added
+                                // events, so every event reaches subscribers exactly once.
+                                Set<AgentEvent> corePublished =
+                                        Collections.newSetFromMap(new IdentityHashMap<>());
                                 Function<ActingInput, Flux<AgentEvent>> actingCore =
-                                        ai -> actingStream(ai.toolCalls(), replyId, resultHolder);
+                                        ai ->
+                                                actingStream(
+                                                        ai.toolCalls(),
+                                                        replyId,
+                                                        resultHolder,
+                                                        corePublished);
                                 Flux<AgentEvent> stream =
                                         MiddlewareChain.build(
                                                         middlewaresAt(
@@ -4018,7 +4031,9 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                                 .apply(new ActingInput(toolCalls));
                                 return stream.doOnNext(
                                                 ev -> {
-                                                    publishEvent(ev);
+                                                    if (!corePublished.remove(ev)) {
+                                                        publishEvent(ev);
+                                                    }
                                                     if (ev instanceof RequestStopEvent rs) {
                                                         actingStopRequested.compareAndSet(null, rs);
                                                     }
@@ -4142,7 +4157,8 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
         Flux<AgentEvent> actingStream(
                 List<ToolUseBlock> toolCalls,
                 String replyId,
-                AtomicReference<List<Map.Entry<ToolUseBlock, ToolResultBlock>>> resultHolder) {
+                AtomicReference<List<Map.Entry<ToolUseBlock, ToolResultBlock>>> resultHolder,
+                Set<AgentEvent> corePublished) {
 
             // Grant gate ordered before the permission pipeline: an ungranted backend call
             // must not reach human confirmation — to the model it does not exist. Such calls
@@ -4155,7 +4171,12 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                 // Every call ungranted: resolve the whole batch without the permission
                 // pipeline (no confirmation can be requested for non-existent tools).
                 resultHolder.set(ungranted);
-                return ungrantedEvents(ungranted, replyId).doOnNext(this::publishEvent);
+                return ungrantedEvents(ungranted, replyId)
+                        .doOnNext(
+                                ev -> {
+                                    publishEvent(ev);
+                                    corePublished.add(ev);
+                                });
             }
 
             return evaluatePermissions(granted)
@@ -4246,9 +4267,14 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
                                     recordEvent(event);
                                     return saveStateToSession(this)
                                             .thenReturn(event)
-                                            .doOnNext(this::emitEvent);
+                                            .doOnNext(
+                                                    saved -> {
+                                                        emitEvent(saved);
+                                                        corePublished.add(saved);
+                                                    });
                                 }
                                 publishEvent(event);
+                                corePublished.add(event);
                                 return Mono.just(event);
                             });
         }

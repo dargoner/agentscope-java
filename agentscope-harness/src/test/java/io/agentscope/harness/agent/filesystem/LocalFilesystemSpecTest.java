@@ -40,21 +40,24 @@ class LocalFilesystemSpecTest {
     private static final RuntimeContext RT = RuntimeContext.empty();
 
     @Test
-    void nullProject_usesWorkspaceAsLowerLayer(@TempDir Path workspace) throws Exception {
-        // Create a file in workspace that the agent should be able to read
-        Path workspaceFile = workspace.resolve("workspace-file.txt");
-        Files.writeString(workspaceFile, "content from workspace", StandardCharsets.UTF_8);
+    void nullProject_doesNotFallBackToUserDir(@TempDir Path workspace) throws Exception {
+        // A root-level workspace file is no longer reachable by absolute path in ROOTED mode
+        // (namespace boundary, #3292), so the fallback regression to guard is ${user.dir}.
+        String userDir = System.getProperty("user.dir");
+        Path userDirFile = Path.of(userDir, "test-secret-nullproject.txt");
+        Files.writeString(userDirFile, "secret from user.dir", StandardCharsets.UTF_8);
+        try {
+            LocalFilesystemSpec spec = new LocalFilesystemSpec();
 
-        // Create spec without setting project (simulates framework default)
-        LocalFilesystemSpec spec = new LocalFilesystemSpec();
+            AbstractFilesystem fs = spec.toFilesystem(workspace, ns -> List.of("test"));
 
-        // Build filesystem
-        AbstractFilesystem fs = spec.toFilesystem(workspace, ns -> List.of("test"));
-
-        // Agent should be able to read workspace files
-        ReadResult result = fs.read(RT, workspaceFile.toAbsolutePath().toString(), 0, 0);
-        assertTrue(result.isSuccess(), "Agent should be able to read workspace files");
-        assertEquals("content from workspace", result.fileData().content());
+            ReadResult result = fs.read(RT, userDirFile.toAbsolutePath().toString(), 0, 0);
+            assertFalse(
+                    result.isSuccess(),
+                    "Agent must NOT fall back to user.dir when project is not set");
+        } finally {
+            Files.deleteIfExists(userDirFile);
+        }
     }
 
     @Test

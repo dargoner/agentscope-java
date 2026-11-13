@@ -356,7 +356,16 @@ public class LocalFilesystemSpec {
             // namespaceBoundary(Boolean) overrides the default either way.
             upper.namespaceBoundary(true);
         }
-        LocalFilesystem lower = new LocalFilesystem(effectiveProject, true, 10, null);
+        // Falling back to the workspace keeps ${user.dir} out of reach, but an unscoped
+        // fallback root would let a relative key (e.g. "alice/MEMORY.md") resolve into a
+        // sibling's namespace (#4053). Scope the fallback layer like the upper one; an
+        // explicitly configured project stays a shared, unscoped lower layer.
+        LocalFilesystem lower =
+                new LocalFilesystem(
+                        effectiveProject,
+                        true,
+                        10,
+                        project == null ? effectiveNamespaceFactory : null);
         if (projectWritable) {
             LocalFilesystem projectFs =
                     new LocalFilesystem(
