@@ -68,6 +68,8 @@ The sandbox snapshots its workspace at each `call()` end and restores at the nex
 - No snapshot → full init from `WorkspaceSpec` (cold start)
 - Snapshot read or restore failure → this `call()` fails and can be retried; snapshot state is never silently discarded
 
+An opened snapshot archive is closed even if workspace setup fails during restoration.
+
 Where snapshots land is decided by `snapshotSpec`:
 
 | Option | When |
@@ -272,6 +274,14 @@ This mode uses OpenSandbox **native snapshots**, which preserve the remote files
 Recovery tries the current native snapshot and then the previous one, and fails closed instead of silently starting an empty workspace when both known snapshots fail. If Redis metadata is lost, the client deterministically discovers matching OpenSandbox sandboxes and native snapshots and rebuilds metadata; a prior explicit delete is fenced by its tombstone so deleted generations cannot be resurrected. Explicit delete advances that tombstone before remote cleanup.
 
 The application owns and closes the injected Redisson client. Any prebuilt sandbox client injected with `.client(...)`, client used directly outside `HarnessAgent.builder().filesystem(...)`, or client supplied through a per-call `SandboxContext` remains caller-owned and is never closed by the agent. When the spec constructs the default `RedisOpenSandboxClient`, the agent owns that client and closes it once from `HarnessAgent.close()`, stopping its daemon sweeper scheduler. The internally constructed Redis client creates its OpenSandbox SDK/control-plane object from `clientOptions`; there is currently no separate public close operation for that object. Closing a borrowed sandbox handle releases that handle's lease. Neither closing the Redis client nor closing a borrowed handle shuts down Redisson. This module does not provide MCP integration, and MCP connection lifecycle is outside its scope.
+
+### Workspace root
+
+The sandbox paragraph in the system prompt and file-tool path normalization use the workspace root of the sandbox bound to the current call. A restored session keeps its saved directory rather than adopting a new agent configuration. Absolute paths under that root become workspace-relative; other paths remain subject to the existing filesystem policy.
+
+For E2B, the default root is `/home/user`. Set `new E2bFilesystemSpec().workspaceRoot("/home/user/project")` to change it. Alternatively, supply a `WorkspaceSpec` with that root. If both are explicitly supplied, their roots must match (trailing slashes are ignored); conflicting values fail when the sandbox context is built. The effective workspace specification is copied, so caller-owned entries and environment are preserved without modifying the supplied object. When older E2B state has inconsistent root fields, its saved execution directory remains authoritative and the manifest is aligned with it; no files are moved. Docker's default remains `/workspace`.
+
+Supplying a `WorkspaceSpec` only for entries or environment does not explicitly configure its root: its untouched `/workspace` default inherits the E2B execution root. Calling `setRoot("/workspace")`, however, is an explicit choice and conflicts with a different explicit `workspaceRoot(...)`.
 
 ## Runtime image contract
 

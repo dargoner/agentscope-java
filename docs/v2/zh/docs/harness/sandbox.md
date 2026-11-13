@@ -68,6 +68,8 @@ Harness 将原生会话日志保存在宿主工作区，沙箱文件工具无法
 - 没快照 → 按 `WorkspaceSpec` 全量初始化（冷启动）
 - 快照读取或恢复失败 → 本次 `call()` 报错，可重试；不会静默丢弃快照状态
 
+恢复时已经打开的快照归档流，即使工作区初始化失败也会关闭。
+
 快照存到哪里取决于你配的 `snapshotSpec`：
 
 | 选项 | 适合 |
@@ -271,6 +273,14 @@ Redis lifecycle lock 只保护短暂的创建、恢复、暂停、快照、删�
 恢复时先尝试 current 原生快照，再尝试 previous 快照；两个已知快照都失败时会 fail closed，不会静默启动空工作区。Redis 元数据丢失时，client 会确定性发现匹配的 OpenSandbox 沙箱与原生快照并重建元数据；之前的显式删除由 tombstone 隔离，已删除 generation 不会复活。显式 delete 会先推进 tombstone，再清理远端资源。
 
 应用负责持有并关闭注入的 Redisson client。通过 `.client(...)` 注入的预构建 sandbox client、绕过 `HarnessAgent.builder().filesystem(...)` 直接使用的 client，以及通过逐调用 `SandboxContext` 传入的 client 均由调用方持有，agent 绝不会关闭它们。spec 构建默认 `RedisOpenSandboxClient` 时，该 client 由 agent 持有，并由 `HarnessAgent.close()` 只关闭一次，从而停止其 daemon sweeper scheduler。内部构建的 Redis client 会根据 `clientOptions` 创建 OpenSandbox SDK/control-plane 对象；当前没有单独关闭该对象的公开操作。关闭借用的 sandbox handle 会释放该 handle 的 lease。关闭 Redis client 或借用的 handle 都不会 shutdown Redisson。本模块不提供 MCP 集成，MCP 连接生命周期不在其范围内。
+
+### 工作区根目录
+
+系统提示词中的沙箱目录说明和文件工具的路径归一化使用当前调用绑定的沙箱工作区根目录。恢复旧会话时保留已保存的目录，不改用 Agent 的新配置。根目录内的绝对路径会转换为工作区相对路径，其他路径继续受现有文件系统策略约束。
+
+E2B 默认根目录是 `/home/user`，可通过 `new E2bFilesystemSpec().workspaceRoot("/home/user/project")` 修改，也可以提供设置了根目录的 `WorkspaceSpec`。如果显式提供两者，根目录必须一致（忽略末尾斜杠），否则构建沙箱上下文时报错。有效工作区配置通过复制生成，不修改调用者提供的对象，并保留其中的 entries 和 environment。恢复根目录字段不一致的旧 E2B 状态时，以已保存的实际执行目录为准，只对齐 manifest，不移动文件。Docker 默认目录仍为 `/workspace`。
+
+如果提供 `WorkspaceSpec` 只是为了配置 entries 或 environment，没有调用 `setRoot(...)`，其默认的 `/workspace` 不算显式配置，会沿用 E2B 的执行根目录。但是，主动调用 `setRoot("/workspace")` 属于显式选择，会与另一个不同的显式 `workspaceRoot(...)` 配置产生冲突。
 
 ## 运行时镜像约束
 
