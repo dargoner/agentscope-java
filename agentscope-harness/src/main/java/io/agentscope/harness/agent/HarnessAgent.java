@@ -1136,7 +1136,7 @@ public class HarnessAgent implements Agent, AutoCloseable {
         RuntimeContext effective =
                 ensureSessionDefaults(ctx != null ? ctx : RuntimeContext.empty());
         return wrappedStreamEvents(
-                effective, () -> delegate.streamEvents(msgs, structuredModel, effective));
+                effective, eff -> delegate.streamEvents(msgs, structuredModel, eff));
     }
 
     /**
@@ -1156,7 +1156,7 @@ public class HarnessAgent implements Agent, AutoCloseable {
     public Flux<AgentEvent> streamEvents(List<Msg> msgs, JsonNode schema, RuntimeContext ctx) {
         RuntimeContext effective =
                 ensureSessionDefaults(ctx != null ? ctx : RuntimeContext.empty());
-        return wrappedStreamEvents(effective, () -> delegate.streamEvents(msgs, schema, effective));
+        return wrappedStreamEvents(effective, eff -> delegate.streamEvents(msgs, schema, eff));
     }
 
     @Override
