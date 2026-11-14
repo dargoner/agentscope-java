@@ -59,10 +59,10 @@ class SandboxBackedFilesystemTest {
         byte[] bytes = "journal".getBytes(StandardCharsets.UTF_8);
         SandboxBackedFilesystem filesystem = new SandboxBackedFilesystem(host);
 
-        assertTrue(filesystem.sessionStorage(alice).compareAndSet("journal", 0, bytes));
+        assertTrue(filesystem.journalStorage(alice).compareAndSet("journal", 0, bytes));
         SandboxBackedFilesystem reopened = new SandboxBackedFilesystem(host);
-        assertArrayEquals(bytes, reopened.sessionStorage(alice).read("journal").bytes());
-        assertNull(reopened.sessionStorage(bob).read("journal"));
+        assertArrayEquals(bytes, reopened.journalStorage(alice).read("journal").bytes());
+        assertNull(reopened.journalStorage(bob).read("journal"));
         assertThrows(
                 SecurityException.class,
                 () -> host.read(alice, ".agentscope-runtime/journal", 0, 100));
@@ -72,7 +72,7 @@ class SandboxBackedFilesystemTest {
     void directConstructionWithoutHostRejectsSessionStorage() {
         assertThrows(
                 UnsupportedOperationException.class,
-                () -> new SandboxBackedFilesystem().sessionStorage(RT));
+                () -> new SandboxBackedFilesystem().journalStorage(RT));
     }
 
     @Test

@@ -120,11 +120,6 @@ public class RedisOpenSandboxFilesystemSpec extends SandboxFilesystemSpec {
     }
 
     @Override
-    protected boolean isClientOwned(SandboxClient<?> client) {
-        return client == ownedClient;
-    }
-
-    @Override
     protected OpenSandboxClientOptions clientOptions() {
         return options;
     }

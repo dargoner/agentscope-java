@@ -161,7 +161,7 @@ class RedisOpenSandboxFilesystemSpecTest {
 
         externalAgent.close();
 
-        assertFalse(externalSpec.materialize(null).clientOwned());
+        assertSame(externalClient, externalSpec.toSandboxContext(null).getClient());
         verify((AutoCloseable) externalClient, never()).close();
     }
 

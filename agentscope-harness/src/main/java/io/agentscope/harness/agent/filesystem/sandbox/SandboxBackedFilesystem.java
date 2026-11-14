@@ -77,12 +77,12 @@ public class SandboxBackedFilesystem extends BaseSandboxFilesystem implements Sa
     }
 
     @Override
-    public io.agentscope.core.session.AtomicSessionStorage sessionStorage(RuntimeContext context) {
+    public io.agentscope.core.journal.AtomicJournalStorage journalStorage(RuntimeContext context) {
         if (runtimeFilesystem == null) {
             throw new UnsupportedOperationException(
                     "Filesystem does not support durable session storage: " + getClass().getName());
         }
-        return runtimeFilesystem.sessionStorage(context);
+        return runtimeFilesystem.journalStorage(context);
     }
 
     @Override
