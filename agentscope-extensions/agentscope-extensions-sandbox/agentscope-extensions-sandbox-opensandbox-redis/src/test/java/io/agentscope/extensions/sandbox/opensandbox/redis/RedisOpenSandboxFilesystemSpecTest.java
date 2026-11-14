@@ -129,7 +129,7 @@ class RedisOpenSandboxFilesystemSpecTest {
     }
 
     @Test
-    void harnessOwnsOnlyInternallyCreatedClient(@TempDir Path workspace) throws Exception {
+    void harnessLeavesClientLifecycleToCaller(@TempDir Path workspace) throws Exception {
         RedissonClient redisson = mock(RedissonClient.class);
         CapturingRedisOpenSandboxFilesystemSpec ownedSpec =
                 new CapturingRedisOpenSandboxFilesystemSpec(redisson);
@@ -145,6 +145,8 @@ class RedisOpenSandboxFilesystemSpecTest {
         ownedAgent.close();
         ownedAgent.close();
 
+        assertFalse(ownedScheduler.isShutdown());
+        ownedSpec.client().close();
         assertTrue(ownedScheduler.isShutdown());
 
         SandboxClient<?> externalClient =
@@ -189,7 +191,7 @@ class RedisOpenSandboxFilesystemSpecTest {
 
             for (RedisOpenSandboxClient client : spec.clients()) {
                 ScheduledExecutorService scheduler = field(client, "scheduler");
-                assertTrue(scheduler.isShutdown());
+                assertFalse(scheduler.isShutdown());
             }
         } finally {
             if (first != null) {

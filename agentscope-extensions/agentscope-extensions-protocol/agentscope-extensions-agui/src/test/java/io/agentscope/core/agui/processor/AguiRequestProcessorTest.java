@@ -49,8 +49,11 @@ import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.state.AgentStateStore;
 import io.agentscope.core.state.InMemoryAgentStateStore;
+import io.agentscope.core.state.State;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -475,9 +478,32 @@ class AguiRequestProcessorTest {
         AtomicInteger adapterCount = new AtomicInteger();
         java.util.concurrent.atomic.AtomicBoolean activeSubscribed =
                 new java.util.concurrent.atomic.AtomicBoolean();
+        // Cancellation releases the run lease asynchronously; wait on the store instead of
+        // racing the release with a fixed poll budget.
+        CountDownLatch leaseReleased = new CountDownLatch(1);
+        InMemoryAgentStateStore store =
+                new InMemoryAgentStateStore() {
+                    @Override
+                    public long saveIfVersion(
+                            String userId,
+                            String sessionId,
+                            String key,
+                            State value,
+                            long expectedVersion) {
+                        long result =
+                                super.saveIfVersion(userId, sessionId, key, value, expectedVersion);
+                        if (result != AgentStateStore.UNVERSIONED
+                                && value instanceof AguiResumeState state
+                                && state.activeRun() == null) {
+                            leaseReleased.countDown();
+                        }
+                        return result;
+                    }
+                };
         AguiRequestProcessor processor =
                 AguiRequestProcessor.builder()
                         .agentResolver(resolver)
+                        .resumeStateStore(store)
                         .adapterFactory(
                                 (resolvedAgent, config) -> {
                                     adapterCount.incrementAndGet();
@@ -501,9 +527,10 @@ class AguiRequestProcessorTest {
             activeRun.dispose();
         }
 
+        assertTrue(leaseReleased.await(10, TimeUnit.SECONDS), "disposed run lease not released");
         Disposable nextRun = processor.process(request(input("run-3"))).events().subscribe();
         try {
-            for (int i = 0; i < 100 && adapterCount.get() < 2; i++) {
+            for (int i = 0; i < 500 && adapterCount.get() < 2; i++) {
                 Thread.sleep(10L);
             }
             assertEquals(2, adapterCount.get());
@@ -576,11 +603,12 @@ class AguiRequestProcessorTest {
     }
 
     @Test
-    void processClearsActiveRunWhenAdapterStreamFailsWithErrorSignal() {
+    void processClearsActiveRunWhenAdapterStreamFailsWithErrorSignal() throws Exception {
         // Defense-in-depth contract for doOnError: if an adapter's stream fails with a
         // raw error signal (escaping the adapter's own error-to-RunError conversion),
-        // the marker must be cleared before the error reaches the caller, so an
-        // immediate follow-up run on the same thread can start.
+        // the marker must be cleared so an immediate follow-up run on the same thread
+        // can start. Lease release is asynchronous (boundedElastic), so wait for the
+        // release write before issuing the follow-up.
         AgentResolver resolver = mock(AgentResolver.class);
         ReActAgent agent = mock(ReActAgent.class);
         when(resolver.resolveAgent(eq("default"), eq("thread-1"), nullable(String.class)))
@@ -597,15 +625,43 @@ class AguiRequestProcessorTest {
                                 : Flux.empty();
                     }
                 };
+        CountDownLatch leaseReleased = new CountDownLatch(1);
         AguiRequestProcessor processor =
                 AguiRequestProcessor.builder()
                         .agentResolver(resolver)
+                        .resumeStateStore(
+                                new InMemoryAgentStateStore() {
+                                    @Override
+                                    public long saveIfVersion(
+                                            String userId,
+                                            String sessionId,
+                                            String key,
+                                            State value,
+                                            long expectedVersion) {
+                                        long result =
+                                                super.saveIfVersion(
+                                                        userId,
+                                                        sessionId,
+                                                        key,
+                                                        value,
+                                                        expectedVersion);
+                                        if (result != AgentStateStore.UNVERSIONED
+                                                && value instanceof AguiResumeState state
+                                                && state.activeRun() == null) {
+                                            leaseReleased.countDown();
+                                        }
+                                        return result;
+                                    }
+                                })
                         .adapterFactory((resolvedAgent, config) -> failingAdapter)
                         .build();
 
         assertThrows(
                 IllegalStateException.class,
                 () -> processor.process(request(input("run-1"))).events().collectList().block());
+        assertTrue(
+                leaseReleased.await(10, TimeUnit.SECONDS),
+                "failed run lease was not released after the error signal");
 
         List<AguiEvent> followUp =
                 processor.process(request(input("run-2"))).events().collectList().block();
