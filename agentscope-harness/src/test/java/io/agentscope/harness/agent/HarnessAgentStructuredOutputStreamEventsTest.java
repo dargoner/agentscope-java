@@ -42,9 +42,9 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.mockito.stubbing.OngoingStubbing;
 import reactor.core.publisher.Flux;
 
 /**
@@ -182,10 +182,12 @@ class HarnessAgentStructuredOutputStreamEventsTest {
     }
 
     /**
-     * Model driving the fallback path for {@code cycles} consecutive streamEvents invocations:
-     * each invocation needs exactly two model calls (tool use, then terminating text).
+     * Model driving the structured fallback path across consecutive streamEvents invocations. Main
+     * agent calls (which carry tool schemas) alternate the structured tool use with a terminating
+     * text response; auxiliary calls (memory flush/consolidation) get a neutral text response so
+     * harness background maintenance, which shares this model, cannot desynchronize the fixture.
      */
-    private static Model repeatedFallbackModel(int cycles) {
+    private static Model structuredFallbackModel() {
         Map<String, Object> toolInput =
                 Map.of(
                         "response",
@@ -216,10 +218,16 @@ class HarnessAgentStructuredOutputStreamEventsTest {
 
         Model model = mock(Model.class);
         when(model.getModelName()).thenReturn("stub");
-        OngoingStubbing<Flux<ChatResponse>> stubbing = when(model.stream(anyList(), any(), any()));
-        for (int i = 0; i < cycles; i++) {
-            stubbing = stubbing.thenReturn(Flux.just(toolUse)).thenReturn(Flux.just(done));
-        }
+        AtomicInteger mainCalls = new AtomicInteger();
+        when(model.stream(anyList(), any(), any()))
+                .thenAnswer(
+                        invocation -> {
+                            List<?> tools = invocation.getArgument(1);
+                            if (tools == null || tools.isEmpty()) {
+                                return Flux.just(done);
+                            }
+                            return Flux.just(mainCalls.getAndIncrement() % 2 == 0 ? toolUse : done);
+                        });
         return model;
     }
 
@@ -228,7 +236,7 @@ class HarnessAgentStructuredOutputStreamEventsTest {
         try (HarnessAgent agent =
                 HarnessAgent.builder()
                         .name("weather-agent")
-                        .model(repeatedFallbackModel(4))
+                        .model(structuredFallbackModel())
                         .workspace(workspace)
                         .abstractFilesystem(new LocalFilesystem(workspace))
                         .build()) {
@@ -294,7 +302,7 @@ class HarnessAgentStructuredOutputStreamEventsTest {
         try (HarnessAgent agent =
                 HarnessAgent.builder()
                         .name("weather-agent")
-                        .model(repeatedFallbackModel(2))
+                        .model(structuredFallbackModel())
                         .workspace(workspace)
                         .filesystem(spec)
                         .build()) {
