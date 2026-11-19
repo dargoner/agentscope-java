@@ -146,6 +146,8 @@ class HarnessAgentSubagentStreamEventsTest {
                                                 childId,
                                                 "task",
                                                 "research X",
+                                                "reusable",
+                                                true,
                                                 "timeout_seconds",
                                                 60))))
                 .thenReturn(
@@ -243,6 +245,8 @@ class HarnessAgentSubagentStreamEventsTest {
                                                                         childId,
                                                                         "task",
                                                                         "first task",
+                                                                        "reusable",
+                                                                        true,
                                                                         "timeout_seconds",
                                                                         60)),
                                                         toolCallBlock(
@@ -253,6 +257,8 @@ class HarnessAgentSubagentStreamEventsTest {
                                                                         childId,
                                                                         "task",
                                                                         "second task",
+                                                                        "reusable",
+                                                                        true,
                                                                         "timeout_seconds",
                                                                         60))),
                                                 null,
@@ -356,6 +362,8 @@ class HarnessAgentSubagentStreamEventsTest {
                                                 childId,
                                                 "task",
                                                 "research first",
+                                                "reusable",
+                                                true,
                                                 "timeout_seconds",
                                                 60))))
                 .thenReturn(Flux.just(stopChunk("c1", "first complete")))
@@ -370,6 +378,8 @@ class HarnessAgentSubagentStreamEventsTest {
                                                 childId,
                                                 "task",
                                                 "research second",
+                                                "reusable",
+                                                true,
                                                 "timeout_seconds",
                                                 60))))
                 .thenReturn(Flux.just(stopChunk("c2", "second complete")))
@@ -464,6 +474,8 @@ class HarnessAgentSubagentStreamEventsTest {
                                                 childId,
                                                 "task",
                                                 "research X",
+                                                "reusable",
+                                                true,
                                                 "timeout_seconds",
                                                 60))))
                 .thenReturn(
@@ -560,6 +572,8 @@ class HarnessAgentSubagentStreamEventsTest {
                                                 childId,
                                                 "task",
                                                 "format data",
+                                                "reusable",
+                                                true,
                                                 "timeout_seconds",
                                                 60))))
                 .thenReturn(Flux.just(stopChunk("c1", "formatted")))
@@ -639,6 +653,8 @@ class HarnessAgentSubagentStreamEventsTest {
                                                 childId,
                                                 "task",
                                                 "analyse data",
+                                                "reusable",
+                                                true,
                                                 "timeout_seconds",
                                                 60))))
                 .thenReturn(Flux.just(stopChunk("c1", "analysis complete")))
@@ -719,6 +735,8 @@ class HarnessAgentSubagentStreamEventsTest {
                                                 childId,
                                                 "task",
                                                 "help with X",
+                                                "reusable",
+                                                true,
                                                 "timeout_seconds",
                                                 60))))
                 .thenReturn(Flux.just(stopChunk("c1", "helped")))
