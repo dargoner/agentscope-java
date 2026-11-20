@@ -82,6 +82,7 @@ import io.agentscope.harness.agent.memory.MemoryConfig;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.middleware.AgentTraceMiddleware;
 import io.agentscope.harness.agent.middleware.SubagentEntry;
+import io.agentscope.harness.agent.middleware.SubagentsMiddleware;
 import io.agentscope.harness.agent.middleware.WorkspaceContextMiddleware;
 import io.agentscope.harness.agent.sandbox.SandboxAcquireResult;
 import io.agentscope.harness.agent.sandbox.SandboxContext;
@@ -89,9 +90,11 @@ import io.agentscope.harness.agent.sandbox.SandboxException;
 import io.agentscope.harness.agent.subagent.AgentSpecLoader;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
 import io.agentscope.harness.agent.subagent.WorkspaceMode;
+import io.agentscope.harness.agent.subagent.task.TaskRepository;
 import io.agentscope.harness.agent.testing.HarnessQuiescence;
 import io.agentscope.harness.agent.workspace.WorkspaceConstants;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.net.http.HttpClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -187,6 +190,22 @@ class HarnessAgentTest {
         assertFalse(toolNames.contains("memory_search"));
         assertFalse(toolNames.contains("memory_get"));
         assertFalse(toolNames.contains("thread_search"));
+    }
+
+    @Test
+    void externalSubagentMiddlewareWiresTaskRepositoryIntoWaitTool() throws Exception {
+        TaskRepository taskRepository = mock(TaskRepository.class);
+        SubagentsMiddleware externalSubagents =
+                new SubagentsMiddleware(List.of(), new Object(), taskRepository);
+        HarnessAgent.Builder builder =
+                HarnessAgent.builder().middlewares(List.of(externalSubagents));
+
+        Method method =
+                HarnessAgent.Builder.class.getDeclaredMethod(
+                        "resolveWaitTaskRepository", Object.class);
+        method.setAccessible(true);
+
+        assertSame(taskRepository, method.invoke(builder, new Object()));
     }
 
     @Test

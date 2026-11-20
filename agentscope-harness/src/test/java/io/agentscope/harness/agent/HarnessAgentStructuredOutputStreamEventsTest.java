@@ -43,6 +43,8 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import reactor.core.publisher.Flux;
@@ -56,6 +58,29 @@ import reactor.core.publisher.Flux;
 class HarnessAgentStructuredOutputStreamEventsTest {
 
     @TempDir Path workspace;
+
+    private String previousStateHome;
+
+    /**
+     * Keeps the legacy {@code JsonFileAgentStateStore} baseline inside the per-test workspace.
+     * Left unset it defaults to {@code ~/.agentscope/state/<agentId>}, so repeated local runs
+     * accumulate history that the durable journal imports, eventually triggering compaction and
+     * desynchronizing the fixture's model responses.
+     */
+    @BeforeEach
+    void isolateStateHome() {
+        previousStateHome = System.getProperty("agentscope.state.home");
+        System.setProperty("agentscope.state.home", workspace.resolve("state-home").toString());
+    }
+
+    @AfterEach
+    void restoreStateHome() {
+        if (previousStateHome != null) {
+            System.setProperty("agentscope.state.home", previousStateHome);
+        } else {
+            System.clearProperty("agentscope.state.home");
+        }
+    }
 
     static class WeatherResponse {
         public String location;
@@ -297,8 +322,6 @@ class HarnessAgentStructuredOutputStreamEventsTest {
         Files.createDirectories(workspace);
         Files.writeString(workspace.resolve("AGENTS.md"), "# Test\n");
 
-        String previousStateHome = System.getProperty("agentscope.state.home");
-        System.setProperty("agentscope.state.home", workspace.resolve("state-home").toString());
         try (HarnessAgent agent =
                 HarnessAgent.builder()
                         .name("weather-agent")
@@ -338,12 +361,6 @@ class HarnessAgentStructuredOutputStreamEventsTest {
                     client.getResumeCount(),
                     "second subscription must resume the sandbox saved by the first subscription's"
                             + " release (release persisted state exactly once)");
-        } finally {
-            if (previousStateHome != null) {
-                System.setProperty("agentscope.state.home", previousStateHome);
-            } else {
-                System.clearProperty("agentscope.state.home");
-            }
         }
     }
 }

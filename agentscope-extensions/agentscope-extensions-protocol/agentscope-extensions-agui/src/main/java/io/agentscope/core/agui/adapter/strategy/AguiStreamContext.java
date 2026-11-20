@@ -286,13 +286,16 @@ public class AguiStreamContext {
             return;
         }
         Map<String, AguiMessage> messagesById = new LinkedHashMap<>();
+        Set<String> convertedSourceIds = new LinkedHashSet<>();
         List<Msg> authoritativeMessages = authoritativeMessagesSupplier.get();
         boolean hasAuthoritativeMessages =
                 authoritativeMessages != null && !authoritativeMessages.isEmpty();
         if (authoritativeMessages != null) {
             for (Msg message : authoritativeMessages) {
-                if (message != null && !isGeneratedTextSegmentId(message.getId())) {
-                    messagesById.put(message.getId(), messageConverter.toAguiMessage(message));
+                if (message != null
+                        && !isGeneratedTextSegmentId(message.getId())
+                        && convertedSourceIds.add(message.getId())) {
+                    putConvertedMessages(messagesById, message);
                 }
             }
         }
@@ -307,10 +310,30 @@ public class AguiStreamContext {
                 }
             }
         }
-        messagesById.put(finalResult.getId(), messageConverter.toAguiMessage(finalResult));
+        if (convertedSourceIds.add(finalResult.getId())) {
+            putConvertedMessages(messagesById, finalResult);
+        }
         emit(
                 new AguiEvent.MessagesSnapshot(
                         threadId, runId, new ArrayList<>(messagesById.values())));
+    }
+
+    /**
+     * Converts a message with {@link AguiMessageConverter#toAguiMessages(Msg)} and stores the
+     * result. A message that converts to exactly one AG-UI message keeps its source id as the map
+     * key so run-input entries can still be deduplicated by id; a message split into several AG-UI
+     * messages (reasoning + content, or a multi-result tool message) is stored under each converted
+     * message's own id.
+     */
+    private void putConvertedMessages(Map<String, AguiMessage> messagesById, Msg message) {
+        List<AguiMessage> converted = messageConverter.toAguiMessages(message);
+        if (converted.size() == 1) {
+            messagesById.put(message.getId(), converted.get(0));
+            return;
+        }
+        for (AguiMessage aguiMessage : converted) {
+            messagesById.put(aguiMessage.getId(), aguiMessage);
+        }
     }
 
     public void startReasoningMessage(String messageId) {

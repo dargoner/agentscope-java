@@ -44,10 +44,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.function.Function;
 import java.util.function.ToLongFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import reactor.core.Exceptions;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -87,12 +89,29 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
     private final WorkspaceManager workspaceManager;
     private final Model model;
     private final CompactionConfig config;
+    private final boolean memoryHooksEnabled;
 
     public CompactionMiddleware(
             WorkspaceManager workspaceManager, Model model, CompactionConfig config) {
+        this(workspaceManager, model, config, true);
+    }
+
+    /**
+     * Creates a compaction middleware that flushes long-term memory from the summarized prefix
+     * before compacting, unless memory hooks are disabled for the agent.
+     *
+     * @param memoryHooksEnabled whether long-term memory hooks are active; {@code false} skips the
+     *     compaction-time memory flush so no memory is written and no extra model call is spent
+     */
+    public CompactionMiddleware(
+            WorkspaceManager workspaceManager,
+            Model model,
+            CompactionConfig config,
+            boolean memoryHooksEnabled) {
         this.workspaceManager = workspaceManager;
         this.model = model;
         this.config = config;
+        this.memoryHooksEnabled = memoryHooksEnabled;
     }
 
     /** Narrow declaration: subclasses overriding more hooks must extend this set. */
@@ -201,7 +220,8 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                                                             .keepTokens(0)
                                                             .flushBeforeCompact(
                                                                     config.isFlushBeforeCompact())
-                                                            .build());
+                                                            .build(),
+                                                    memoryHooksEnabled);
                                     return forced.prepareCandidate(
                                                     agent,
                                                     ctx,
@@ -217,26 +237,75 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                                                     before)
                                             .flatMapMany(
                                                     candidate -> {
-                                                        if (candidate.history().equals(before)
+                                                        // Accept the recovery only when
+                                                        // compaction actually reduced the model
+                                                        // view, and only while no concurrent state
+                                                        // change happened. The candidate is never
+                                                        // written to durable history here: the
+                                                        // retry goes through the final request
+                                                        // preparer, which validates budget and
+                                                        // tool pairing and owns the only commit
+                                                        // point. Durable history stays untouched
+                                                        // when it carries synthetics that can
+                                                        // never re-commit; the reduced view still
+                                                        // unblocks the retry.
+                                                        if (candidate
+                                                                        .input()
+                                                                        .messages()
+                                                                        .equals(retryMessages)
                                                                 || !state.getContext()
                                                                         .equals(before))
                                                             return Flux.error(error);
-                                                        applyToContext(state, candidate.history());
                                                         // next creates a new model call; the turn,
                                                         // execution and writer stay unchanged.
                                                         return next.apply(
-                                                                new ReasoningInput(
-                                                                        candidate
-                                                                                .input()
-                                                                                .messages(),
-                                                                        candidate.input().tools(),
-                                                                        candidate
-                                                                                .input()
-                                                                                .options()));
+                                                                        new ReasoningInput(
+                                                                                candidate
+                                                                                        .input()
+                                                                                        .messages(),
+                                                                                candidate
+                                                                                        .input()
+                                                                                        .tools(),
+                                                                                candidate
+                                                                                        .input()
+                                                                                        .options()))
+                                                                .onErrorResume(
+                                                                        retryError ->
+                                                                                Flux.error(
+                                                                                        associateFirstOverflow(
+                                                                                                error,
+                                                                                                retryError)));
                                                     });
                                 });
             }
         };
+    }
+
+    /**
+     * Keeps the original overflow discoverable when the compacted retry fails for its own reason:
+     * the retry error stays primary, the first overflow rides along as cause or suppressed.
+     */
+    private static Throwable associateFirstOverflow(Throwable first, Throwable retryError) {
+        if (retryError == first
+                || retryError.getCause() == first
+                || retryError instanceof CancellationException
+                || Exceptions.isCancel(retryError)
+                || Exceptions.isFatal(retryError)
+                || ExceptionUtils.containsInterruptedException(retryError)) return retryError;
+        for (Throwable suppressed : retryError.getSuppressed()) {
+            if (suppressed == first) return retryError;
+        }
+        if (retryError.getCause() == null) {
+            try {
+                retryError.initCause(first);
+                return retryError;
+            } catch (IllegalStateException alreadyInitialized) {
+                // Providers build errors with an explicit null cause; that slot rejects
+                // initCause(), so fall through and attach the overflow as suppressed.
+            }
+        }
+        retryError.addSuppressed(first);
+        return retryError;
     }
 
     public static boolean isContextOverflowError(Throwable error) {
@@ -340,6 +409,9 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                             config.withEffective(
                                     Math.max(1, trigger),
                                     Math.min(keep, Math.max(0, conversationBudget / 2)));
+                    if (!memoryHooksEnabled) {
+                        effective = effective.withoutMemoryFlush();
+                    }
                     // Dedicated compaction model when configured; otherwise the executing
                     // agent's per-call model (context pin or identity resolution, else its
                     // default), so the summary follows the model serving the conversation.

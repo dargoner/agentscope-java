@@ -219,7 +219,7 @@ public class MemoryFlushManager {
             if (JournalException.causedBy(e))
                 throw new JournalException(
                         "Memory read cannot advance without its recorded outcome", e);
-            log.debug("Could not read {}: {}", relativePath, e.getMessage());
+            log.debug("Could not read {} ({})", relativePath, e.getClass().getSimpleName());
             return "";
         }
     }

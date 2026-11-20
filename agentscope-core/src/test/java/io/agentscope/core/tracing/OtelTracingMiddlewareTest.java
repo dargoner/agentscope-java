@@ -16,6 +16,7 @@
 package io.agentscope.core.tracing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -164,7 +165,12 @@ class OtelTracingMiddlewareTest {
         List<SpanData> spans = spanExporter.getFinishedSpanItems();
         assertEquals(1, spans.size());
         assertEquals(StatusCode.ERROR, spans.get(0).getStatus().getStatusCode());
-        assertTrue(spans.get(0).getStatus().getDescription().contains("boom"));
+        assertEquals("RuntimeException", spans.get(0).getStatus().getDescription());
+        assertFalse(spans.get(0).getStatus().getDescription().contains("boom"));
+        assertTrue(
+                spans.get(0).getEvents().stream()
+                        .noneMatch(event -> "exception".equals(event.getName())),
+                "raw exceptions must not be recorded on the span");
     }
 
     @Test

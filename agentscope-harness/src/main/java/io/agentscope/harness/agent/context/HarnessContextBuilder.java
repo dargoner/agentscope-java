@@ -25,9 +25,12 @@ import io.agentscope.core.middleware.ModelCallInput;
 import io.agentscope.core.middleware.ModelRequestPreparer;
 import io.agentscope.core.middleware.ReasoningInput;
 import io.agentscope.core.middleware.TaskContextProjection;
+import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.state.AgentState;
 import io.agentscope.core.state.TaskContextState;
 import io.agentscope.core.util.JsonUtils;
+import io.agentscope.harness.agent.attachment.AttachmentRequestCompiler;
+import io.agentscope.harness.agent.attachment.AttachmentResolveContext;
 import io.agentscope.harness.agent.middleware.CompactionMiddleware;
 import io.agentscope.harness.agent.middleware.ToolResultEvictionMiddleware;
 import java.nio.charset.StandardCharsets;
@@ -68,6 +71,7 @@ public final class HarnessContextBuilder implements ModelRequestPreparer {
     private final ToolResultEvictionMiddleware eviction;
     private final ContextSources sources;
     private final ContextSelectionPolicy selectionPolicy;
+    private final AttachmentRequestCompiler attachments;
 
     public HarnessContextBuilder(
             ContextPolicy policy,
@@ -87,11 +91,22 @@ public final class HarnessContextBuilder implements ModelRequestPreparer {
             ToolResultEvictionMiddleware eviction,
             ContextSources sources,
             ContextSelectionPolicy selectionPolicy) {
+        this(policy, compaction, eviction, sources, selectionPolicy, null);
+    }
+
+    public HarnessContextBuilder(
+            ContextPolicy policy,
+            CompactionMiddleware compaction,
+            ToolResultEvictionMiddleware eviction,
+            ContextSources sources,
+            ContextSelectionPolicy selectionPolicy,
+            AttachmentRequestCompiler attachments) {
         this.policy = Objects.requireNonNull(policy);
         this.compaction = compaction;
         this.eviction = eviction;
         this.sources = Objects.requireNonNull(sources);
         this.selectionPolicy = Objects.requireNonNull(selectionPolicy);
+        this.attachments = attachments;
     }
 
     public ContextSources sources() {
@@ -313,7 +328,7 @@ public final class HarnessContextBuilder implements ModelRequestPreparer {
         } else {
             compiled = Mono.just(new CompactionMiddleware.Candidate(current, history));
         }
-        return compiled.map(
+        return compiled.flatMap(
                 candidate -> {
                     ModelCallInput result = candidate.input();
                     if (!result.messages().equals(before.messages()))
@@ -324,100 +339,142 @@ public final class HarnessContextBuilder implements ModelRequestPreparer {
                                             ? project(result, snapshot)
                                             : result,
                                     candidate.history());
-                    var estimate = policy.estimator().estimate(prepared);
-                    long finalLimit = inputLimit(prepared);
-                    RuntimeException validationError = null;
-                    String validation = "passed";
-                    try {
-                        validateToolPairs(prepared.messages());
-                    } catch (IllegalArgumentException error) {
-                        validationError = error;
-                        validation = "invalid_tool_pairs";
-                    }
-                    if (validationError == null && estimate.tokens() > finalLimit) {
-                        validationError =
-                                new ContextBudgetExceededException(estimate.tokens(), finalLimit);
-                        validation = "budget_exceeded";
-                    }
-                    List<ContextManifest.Item> items = new ArrayList<>();
-                    for (Msg msg : prepared.messages()) {
-                        String kind =
-                                msg.getRole() == MsgRole.SYSTEM
-                                        ? "system_input"
-                                        : msg.isRequestProjection(candidate.history())
-                                                ? "runtime_projection"
-                                                : "message";
-                        items.add(
-                                new ContextManifest.Item(
-                                        kind,
-                                        msg.getId(),
-                                        hash(JsonUtils.getJsonCodec().toJson(msg.getContent()))));
-                    }
-                    for (var tool : prepared.tools()) {
-                        items.add(
-                                new ContextManifest.Item(
-                                        "tool_schema",
-                                        tool.getName(),
-                                        hash(JsonUtils.getJsonCodec().toJson(tool))));
-                    }
-                    for (ContextItem item : selected) {
-                        if (!item.content().isBlank())
-                            items.add(
-                                    new ContextManifest.Item(
-                                            item.kind(),
-                                            item.sourceId(),
-                                            hash(item.content()),
-                                            item.revision(),
-                                            item.placement().name(),
-                                            item.required(),
-                                            item.priority()));
-                    }
-                    ContextManifest manifest =
-                            new ContextManifest(
-                                    callId,
-                                    purpose.name(),
-                                    prepared.model().getModelName(),
-                                    "harness-context-v2",
-                                    estimate.tokens(),
-                                    finalLimit,
-                                    estimate.method(),
-                                    estimate.exact(),
-                                    snapshot == null ? 0 : snapshot.tasks().getRevision(),
-                                    items,
-                                    transforms,
-                                    validation);
-                    rc.put(ModelRequestPreparer.MANIFEST_ATTRIBUTE_PREFIX + callId, manifest);
-                    if (validationError != null) throw validationError;
-                    // Agent calls serialize access to state. Recheck the snapshot after
-                    // asynchronous work;
-                    // never overwrite a history changed by a hook or another owner while preparing.
-                    if (state != null) {
-                        if (state.getTasksContext().getRevision() != snapshot.tasks().getRevision()
-                                || state.getPlanModeContext().isPlanActive()
-                                        != snapshot.planActive()
-                                || !Objects.equals(
-                                        state.getPlanModeContext().getCurrentPlanFile(),
-                                        snapshot.planFile())) {
-                            rc.put(
-                                    ModelRequestPreparer.MANIFEST_ATTRIBUTE_PREFIX + callId,
-                                    manifest.withValidation("state_conflict"));
-                            throw new ConcurrentModificationException(
-                                    "Task or plan changed during context preparation");
-                        }
-                        if (!state.contextMutable().equals(original)) {
-                            rc.put(
-                                    ModelRequestPreparer.MANIFEST_ATTRIBUTE_PREFIX + callId,
-                                    manifest.withValidation("history_conflict"));
-                            throw new ConcurrentModificationException(
-                                    "History changed during context preparation");
-                        }
-                        if (!candidate.history().equals(original)) {
-                            state.contextMutable().clear();
-                            state.contextMutable().addAll(candidate.history());
-                        }
-                    }
-                    return prepared;
+                    return compileAttachments(prepared, agent, rc, callId)
+                            .map(
+                                    finalInput -> {
+                                        var estimate = policy.estimator().estimate(finalInput);
+                                        long finalLimit = inputLimit(finalInput);
+                                        RuntimeException validationError = null;
+                                        String validation = "passed";
+                                        try {
+                                            validateToolPairs(finalInput.messages());
+                                        } catch (IllegalArgumentException error) {
+                                            validationError = error;
+                                            validation = "invalid_tool_pairs";
+                                        }
+                                        if (validationError == null
+                                                && estimate.tokens() > finalLimit) {
+                                            validationError =
+                                                    new ContextBudgetExceededException(
+                                                            estimate.tokens(), finalLimit);
+                                            validation = "budget_exceeded";
+                                        }
+                                        List<ContextManifest.Item> items = new ArrayList<>();
+                                        for (Msg msg : finalInput.messages()) {
+                                            String kind =
+                                                    msg.getRole() == MsgRole.SYSTEM
+                                                            ? "system_input"
+                                                            : msg.isRequestProjection(
+                                                                            candidate.history())
+                                                                    ? "runtime_projection"
+                                                                    : "message";
+                                            items.add(
+                                                    new ContextManifest.Item(
+                                                            kind,
+                                                            msg.getId(),
+                                                            hash(
+                                                                    JsonUtils.getJsonCodec()
+                                                                            .toJson(
+                                                                                    msg
+                                                                                            .getContent()))));
+                                        }
+                                        for (var tool : finalInput.tools()) {
+                                            items.add(
+                                                    new ContextManifest.Item(
+                                                            "tool_schema",
+                                                            tool.getName(),
+                                                            hash(
+                                                                    JsonUtils.getJsonCodec()
+                                                                            .toJson(tool))));
+                                        }
+                                        for (ContextItem item : selected) {
+                                            if (!item.content().isBlank())
+                                                items.add(
+                                                        new ContextManifest.Item(
+                                                                item.kind(),
+                                                                item.sourceId(),
+                                                                hash(item.content()),
+                                                                item.revision(),
+                                                                item.placement().name(),
+                                                                item.required(),
+                                                                item.priority()));
+                                        }
+                                        ContextManifest manifest =
+                                                new ContextManifest(
+                                                        callId,
+                                                        purpose.name(),
+                                                        finalInput.model().getModelName(),
+                                                        "harness-context-v2",
+                                                        estimate.tokens(),
+                                                        finalLimit,
+                                                        estimate.method(),
+                                                        estimate.exact(),
+                                                        snapshot == null
+                                                                ? 0
+                                                                : snapshot.tasks().getRevision(),
+                                                        items,
+                                                        transforms,
+                                                        validation);
+                                        rc.put(
+                                                ModelRequestPreparer.MANIFEST_ATTRIBUTE_PREFIX
+                                                        + callId,
+                                                manifest);
+                                        if (validationError != null) throw validationError;
+                                        // Agent calls serialize access to state. Recheck the
+                                        // snapshot after
+                                        // asynchronous work;
+                                        // never overwrite a history changed by a hook or another
+                                        // owner while preparing.
+                                        if (state != null) {
+                                            if (state.getTasksContext().getRevision()
+                                                            != snapshot.tasks().getRevision()
+                                                    || state.getPlanModeContext().isPlanActive()
+                                                            != snapshot.planActive()
+                                                    || !Objects.equals(
+                                                            state.getPlanModeContext()
+                                                                    .getCurrentPlanFile(),
+                                                            snapshot.planFile())) {
+                                                rc.put(
+                                                        ModelRequestPreparer
+                                                                        .MANIFEST_ATTRIBUTE_PREFIX
+                                                                + callId,
+                                                        manifest.withValidation("state_conflict"));
+                                                throw new ConcurrentModificationException(
+                                                        "Task or plan changed during context"
+                                                                + " preparation");
+                                            }
+                                            if (!state.contextMutable().equals(original)) {
+                                                rc.put(
+                                                        ModelRequestPreparer
+                                                                        .MANIFEST_ATTRIBUTE_PREFIX
+                                                                + callId,
+                                                        manifest.withValidation(
+                                                                "history_conflict"));
+                                                throw new ConcurrentModificationException(
+                                                        "History changed during context"
+                                                                + " preparation");
+                                            }
+                                            if (!candidate.history().equals(original)) {
+                                                state.contextMutable().clear();
+                                                state.contextMutable().addAll(candidate.history());
+                                            }
+                                        }
+                                        return finalInput;
+                                    });
                 });
+    }
+
+    private Mono<ModelCallInput> compileAttachments(
+            ModelCallInput prepared, Agent agent, RuntimeContext rc, String callId) {
+        if (attachments == null || !AttachmentRequestCompiler.hasReferences(prepared.messages()))
+            return Mono.just(prepared);
+        return attachments.compile(
+                prepared,
+                new AttachmentResolveContext(
+                        rc.getUserId(),
+                        rc.getSessionId(),
+                        agent == null ? null : agent.getAgentId(),
+                        callId));
     }
 
     private void observe(ContextManifest manifest) {
@@ -623,11 +680,16 @@ public final class HarnessContextBuilder implements ModelRequestPreparer {
         long window = input.model().getContextWindowSize();
         long output = policy.reservedOutputTokens();
         if (output == 0) output = window > 0 ? Math.min(4096, Math.max(1, window / 8)) : 4096;
-        if (input.options() != null) {
-            if (input.options().getMaxTokens() != null)
-                output = Math.max(output, input.options().getMaxTokens());
-            if (input.options().getMaxCompletionTokens() != null)
-                output = Math.max(output, input.options().getMaxCompletionTokens());
+        // The provider applies the model's default options to the outgoing request, so the
+        // output reservation must be read from the same effective options: a default
+        // maxTokens that never appears in request options still consumes budget.
+        GenerateOptions effective = input.model().resolveOptions(input.options());
+        if (effective == null) effective = input.options();
+        if (effective != null) {
+            if (effective.getMaxTokens() != null)
+                output = Math.max(output, effective.getMaxTokens());
+            if (effective.getMaxCompletionTokens() != null)
+                output = Math.max(output, effective.getMaxCompletionTokens());
         }
         long safety =
                 policy.safetyMarginTokens() > 0

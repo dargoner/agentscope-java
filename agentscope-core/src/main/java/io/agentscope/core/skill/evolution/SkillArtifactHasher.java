@@ -16,6 +16,7 @@
 package io.agentscope.core.skill.evolution;
 
 import io.agentscope.core.skill.AgentSkill;
+import java.util.Map;
 import java.util.Objects;
 
 /** Canonical, versioned hashing for immutable skill artifacts. */
@@ -41,6 +42,34 @@ public final class SkillArtifactHasher {
     public static boolean verify(AgentSkill skill, String algorithm, String expectedHash) {
         requireSupportedAlgorithm(algorithm);
         return hash(skill).equals(CanonicalSkillHasher.requireHash(expectedHash, "expectedHash"));
+    }
+
+    /**
+     * Returns the canonical hash of a persisted artifact from its raw fields.
+     *
+     * <p>Use this entry point when re-hashing artifacts that were written before the live skill
+     * name policy; it does not construct an {@link AgentSkill} and therefore does not reject names
+     * that the current policy no longer allows.
+     *
+     * @throws IllegalArgumentException if metadata cannot be canonicalized or normalized resource
+     *     paths collide
+     */
+    public static String hash(
+            Map<String, Object> metadata, String skillContent, Map<String, String> resources) {
+        return CanonicalSkillHasher.hashMaterialized(
+                SkillArtifactMaterializer.materialize(metadata, skillContent, resources));
+    }
+
+    /** Verifies an algorithm-tagged hash of a persisted artifact from its raw fields. */
+    public static boolean verify(
+            Map<String, Object> metadata,
+            String skillContent,
+            Map<String, String> resources,
+            String algorithm,
+            String expectedHash) {
+        requireSupportedAlgorithm(algorithm);
+        return hash(metadata, skillContent, resources)
+                .equals(CanonicalSkillHasher.requireHash(expectedHash, "expectedHash"));
     }
 
     static String requireSupportedAlgorithm(String algorithm) {

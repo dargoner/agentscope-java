@@ -59,6 +59,8 @@ import io.agentscope.core.tool.ToolExecutionContext;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.builtin.RequirementTools;
 import io.agentscope.harness.agent.artifact.ArtifactDeliveryTarget;
+import io.agentscope.harness.agent.attachment.AttachmentRequestCompiler;
+import io.agentscope.harness.agent.attachment.AttachmentResolver;
 import io.agentscope.harness.agent.context.ContextPolicy;
 import io.agentscope.harness.agent.context.ContextSelectionPolicy;
 import io.agentscope.harness.agent.context.ContextSource;
@@ -1566,6 +1568,7 @@ public class HarnessAgent implements Agent, AutoCloseable {
         ContextPolicy contextPolicy = ContextPolicy.defaults();
         ContextSources contextSources = ContextSources.empty();
         ContextSelectionPolicy contextSelectionPolicy = ContextSelectionPolicy.defaults();
+        AttachmentResolver attachmentResolver;
 
         /** Loads read-only business data before each reasoning request, not during registration. */
         public Builder contextSource(String id, ContextSource source) {
@@ -1596,6 +1599,17 @@ public class HarnessAgent implements Agent, AutoCloseable {
 
         public Builder contextSelectionPolicy(ContextSelectionPolicy policy) {
             contextSelectionPolicy = Objects.requireNonNull(policy);
+            return this;
+        }
+
+        /**
+         * Resolves persisted attachment references into core media blocks at the model boundary.
+         *
+         * <p>Optional: when unset, messages keep only their placeholder text and no reference is
+         * expanded. The resolver is product-owned and must enforce session/user isolation.
+         */
+        public Builder attachmentResolver(AttachmentResolver resolver) {
+            this.attachmentResolver = Objects.requireNonNull(resolver);
             return this;
         }
 
@@ -2917,6 +2931,32 @@ public class HarnessAgent implements Agent, AutoCloseable {
             }
         }
 
+        /**
+         * Wait tools may be used with repositories supplied by external subagent middleware, not
+         * only by the middleware built in {@link #buildInstance}. Prefer the middleware that
+         * produced the task IDs before falling back to builder-level repositories.
+         */
+        private TaskRepository resolveWaitTaskRepository(Object internalSubagentMw) {
+            if (internalSubagentMw instanceof SubagentsMiddleware sm) {
+                return sm.getTaskRepository();
+            }
+            if (internalSubagentMw instanceof DynamicSubagentsMiddleware dsm) {
+                return dsm.getTaskRepository();
+            }
+            for (MiddlewareBase middleware : middlewares) {
+                if (middleware instanceof SubagentsMiddleware sm) {
+                    return sm.getTaskRepository();
+                }
+                if (middleware instanceof DynamicSubagentsMiddleware dsm) {
+                    return dsm.getTaskRepository();
+                }
+            }
+            if (taskRepository != null) {
+                return taskRepository;
+            }
+            return distributedStore != null ? distributedStore.taskRepository() : null;
+        }
+
         private HarnessAgent buildInstance(ReActAgent.Builder inner) {
             // Toolkit deep-copy: each agent gets its own toolkit so harness-registered tools and
             // user-registered tools never bleed across builds.
@@ -3172,7 +3212,10 @@ public class HarnessAgent implements Agent, AutoCloseable {
                     // time. The gate above still requires a dedicated or default model to exist.
                     compactionHook =
                             new CompactionMiddleware(
-                                    wsManager, compactionConfig.getModel(), compactionConfig);
+                                    wsManager,
+                                    compactionConfig.getModel(),
+                                    compactionConfig,
+                                    !disableMemoryHooks);
                     inner.middleware(compactionHook.overflowRecovery());
                 }
             }
@@ -3187,7 +3230,10 @@ public class HarnessAgent implements Agent, AutoCloseable {
                             compactionHook,
                             contextEviction,
                             contextSources,
-                            contextSelectionPolicy));
+                            contextSelectionPolicy,
+                            attachmentResolver == null
+                                    ? null
+                                    : new AttachmentRequestCompiler(attachmentResolver)));
             if (messageBus != null) {
                 inner.middleware(new InboxMiddleware(messageBus, 100, asyncToolRegistry, null));
             }
@@ -3245,12 +3291,7 @@ public class HarnessAgent implements Agent, AutoCloseable {
                         new AsyncToolMiddleware(messageBus, asyncToolTimeout, asyncToolRegistry));
             }
             if (messageBus != null) {
-                TaskRepository waitTaskRepo = null;
-                if (capturedSubagentMw instanceof SubagentsMiddleware sm) {
-                    waitTaskRepo = sm.getTaskRepository();
-                } else if (capturedSubagentMw instanceof DynamicSubagentsMiddleware dsm) {
-                    waitTaskRepo = dsm.getTaskRepository();
-                }
+                TaskRepository waitTaskRepo = resolveWaitTaskRepository(capturedSubagentMw);
                 io.agentscope.harness.agent.tool.WaitAsyncResultsTool waitTool =
                         new io.agentscope.harness.agent.tool.WaitAsyncResultsTool(
                                 messageBus, waitTaskRepo);

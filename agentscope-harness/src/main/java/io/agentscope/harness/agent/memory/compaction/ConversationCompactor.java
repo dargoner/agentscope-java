@@ -19,19 +19,23 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.formatter.DocumentReferenceRenderer;
 import io.agentscope.core.journal.InvocationRecorder;
 import io.agentscope.core.journal.JournalException;
+import io.agentscope.core.message.AudioBlock;
 import io.agentscope.core.message.ContentBlock;
+import io.agentscope.core.message.DataBlock;
 import io.agentscope.core.message.DocumentBlock;
+import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.ToolResultBlock;
-import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
+import io.agentscope.core.message.VideoBlock;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.FinishReasons;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.util.ExceptionUtils;
 import io.agentscope.core.util.JsonUtils;
+import io.agentscope.harness.agent.attachment.AttachmentReference;
 import io.agentscope.harness.agent.context.ContextModelCalls;
 import io.agentscope.harness.agent.memory.MemoryFlushManager;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig.TruncateArgsConfig;
@@ -144,7 +148,7 @@ public class ConversationCompactor {
         return Mono.usingWhen(
                 recorder.record(
                                 "compaction/start",
-                                Map.of("compactionId", id, "inputMessages", conversationMessages))
+                                compactionStartPayload(id, beforeMsgCount, beforeTokenCount))
                         .thenReturn(new CompactionExecution(id)),
                 execution ->
                         compactCandidate(rc, conversationMessages, config, agentId, sessionId)
@@ -202,6 +206,16 @@ public class ConversationCompactor {
                 compactionEndPayload(compactionId, "completed", beforeMsgCount, beforeTokenCount);
         payload.put("afterMsgCount", afterMessages.size());
         payload.put("afterTokenCount", tokenCounter.applyAsLong(afterMessages));
+        return payload;
+    }
+
+    private static Map<String, Object> compactionStartPayload(
+            String compactionId, int beforeMsgCount, long beforeTokenCount) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("compactionId", compactionId);
+        payload.put("status", "started");
+        payload.put("beforeMsgCount", beforeMsgCount);
+        payload.put("beforeTokenCount", beforeTokenCount);
         return payload;
     }
 
@@ -310,7 +324,7 @@ public class ConversationCompactor {
                                             }
                                             log.warn(
                                                     "Memory flush before compaction failed: {}",
-                                                    e.getMessage());
+                                                    e.getClass().getSimpleName());
                                             return Mono.empty();
                                         })
                         : Mono.empty();
@@ -413,7 +427,8 @@ public class ConversationCompactor {
     /**
      * Determines the cutoff index separating the prefix-to-summarize from the tail-to-keep.
      *
-     * <p>The cutoff is adjusted so that ASSISTANT/TOOL pairs are never split.
+     * <p>The cutoff is adjusted so that ASSISTANT/TOOL pairs are never split and so that messages
+     * carrying raw media or attachment references are never deleted by summarization.
      */
     private int determineCutoffIndex(
             List<Msg> messages, long totalTokens, CompactionConfig config) {
@@ -426,7 +441,75 @@ public class ConversationCompactor {
         } else {
             rawCutoff = findMessageBasedCutoff(messages, config.getKeepMessages());
         }
-        return findSafeCutoffPoint(messages, rawCutoff);
+        int cutoff = findSafeCutoffPoint(messages, rawCutoff);
+        return findRetentionSafeCutoff(messages, cutoff);
+    }
+
+    /**
+     * Moves the cutoff before the earliest retention-protected message so raw media blocks and
+     * attachment references are not removed from the working history by summarization.
+     *
+     * <p>When the tool-group rule cannot keep the protected message without splitting its pair,
+     * the cutoff collapses to 0 and the caller falls back to the lightweight non-summarizing
+     * result: media is never sacrificed to satisfy the budget.
+     */
+    private static int findRetentionSafeCutoff(List<Msg> messages, int cutoffIndex) {
+        if (cutoffIndex <= 0) {
+            return cutoffIndex;
+        }
+        int protectedIndex = -1;
+        for (int i = 0; i < cutoffIndex; i++) {
+            if (isRetentionProtected(messages.get(i))) {
+                protectedIndex = i;
+                break;
+            }
+        }
+        if (protectedIndex < 0) {
+            return cutoffIndex;
+        }
+        int adjusted = findSafeCutoffPoint(messages, protectedIndex);
+        if (adjusted > protectedIndex) {
+            // Orphaned tool results would push the protected message back into the prefix.
+            return 0;
+        }
+        return adjusted;
+    }
+
+    /** Returns true when deleting this message via summarization would drop media or references. */
+    private static boolean isRetentionProtected(Msg msg) {
+        if (msg == null) {
+            return false;
+        }
+        if (!AttachmentReference.listFromMetadata(msg.getMetadata()).isEmpty()) {
+            return true;
+        }
+        List<ContentBlock> blocks = msg.getContent();
+        if (blocks == null) {
+            return false;
+        }
+        for (ContentBlock block : blocks) {
+            if (containsMediaBlock(block)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsMediaBlock(ContentBlock block) {
+        if (block instanceof ImageBlock
+                || block instanceof AudioBlock
+                || block instanceof VideoBlock
+                || block instanceof DataBlock) {
+            return true;
+        }
+        if (block instanceof ToolResultBlock tr && tr.getOutput() != null) {
+            for (ContentBlock child : tr.getOutput()) {
+                if (containsMediaBlock(child)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** Returns the earliest index such that {@code messages[index:]} fits within the token budget. */
@@ -600,6 +683,7 @@ public class ConversationCompactor {
     }
 
     private static final int SUMMARY_PREVIEW_CHARS = 600;
+    private static final CompactionMediaRenderer MEDIA_RENDERER = new CompactionMediaRenderer();
 
     private static String renderMessageForSummary(Msg msg) {
         // Prior summaries and synthetic messages can carry USER role without being user
@@ -620,6 +704,7 @@ public class ConversationCompactor {
 
         StringBuilder sb = new StringBuilder(roleLabel).append(": ");
         boolean first = true;
+        int ordinal = 0;
         for (ContentBlock block : msg.getContent()) {
             if (!first) sb.append(" ");
             first = false;
@@ -632,18 +717,20 @@ public class ConversationCompactor {
                         .append(renderToolArgsForSummary(tu))
                         .append("]");
             } else if (block instanceof ToolResultBlock tr) {
-                sb.append("[tool_result: ").append(tr.getName() != null ? tr.getName() : "?");
-                if (tr.getState() == ToolResultState.ERROR) {
-                    sb.append(" (error)");
-                }
-                sb.append("] ");
-                sb.append(buildPrunePreview(extractToolResultText(tr), SUMMARY_PREVIEW_CHARS));
-                for (DocumentBlock doc : extractToolResultDocuments(tr)) {
-                    sb.append(" ").append(DocumentReferenceRenderer.render(doc));
-                }
+                sb.append(
+                        MEDIA_RENDERER.renderBlock(
+                                tr,
+                                new CompactionMediaRenderer.RenderContext(msg.getId(), ordinal)));
             } else if (block instanceof DocumentBlock doc) {
                 sb.append(DocumentReferenceRenderer.render(doc));
+            } else {
+                String rendered =
+                        MEDIA_RENDERER.renderBlock(
+                                block,
+                                new CompactionMediaRenderer.RenderContext(msg.getId(), ordinal));
+                if (!rendered.isBlank()) sb.append(rendered);
             }
+            ordinal++;
         }
         // Escape label-like line starts inside the body (the message's own leading label is
         // excluded by the \A lookahead) so quoted labels cannot masquerade as message boundaries.
@@ -670,29 +757,6 @@ public class ConversationCompactor {
                                                 codec.toJson(entry.getValue()),
                                                 SUMMARY_PREVIEW_CHARS))
                 .collect(Collectors.joining(",", "{", "}"));
-    }
-
-    private static String extractToolResultText(ToolResultBlock tr) {
-        if (tr.getOutput() == null) return "";
-        return tr.getOutput().stream()
-                .filter(TextBlock.class::isInstance)
-                .map(b -> ((TextBlock) b).getText())
-                .filter(t -> t != null && !t.isBlank())
-                .collect(Collectors.joining(" "));
-    }
-
-    /**
-     * Collects the documents of a tool result.
-     *
-     * <p>They are rendered outside the preview budget on purpose: a long result would otherwise
-     * truncate the reference away and the attachment would disappear from the summary again.
-     */
-    private static List<DocumentBlock> extractToolResultDocuments(ToolResultBlock tr) {
-        if (tr.getOutput() == null) return List.of();
-        return tr.getOutput().stream()
-                .filter(DocumentBlock.class::isInstance)
-                .map(DocumentBlock.class::cast)
-                .toList();
     }
 
     // -------------------------------------------------------------------------
@@ -874,7 +938,7 @@ public class ConversationCompactor {
                 blocks, half, "", "\n\n...(" + removed + " chars pruned)...\n\n");
     }
 
-    private static String buildPrunePreview(String text, int maxChars) {
+    static String buildPrunePreview(String text, int maxChars) {
         if (text.length() <= (maxChars / 2) * 2) {
             return text;
         }

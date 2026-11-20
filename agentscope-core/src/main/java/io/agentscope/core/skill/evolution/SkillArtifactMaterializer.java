@@ -55,15 +55,34 @@ public final class SkillArtifactMaterializer {
      */
     public static Map<String, byte[]> materialize(AgentSkill skill) {
         Objects.requireNonNull(skill, "skill must not be null");
-        Map<String, Object> metadata = canonicalMetadata(skill.getMetadata());
+        return materialize(skill.getMetadata(), skill.getSkillContent(), skill.getResources());
+    }
+
+    /**
+     * Materializes a persisted artifact from its raw fields.
+     *
+     * <p>This path deliberately does not construct an {@link AgentSkill}, so artifacts written
+     * under earlier naming rules can still be re-hashed after the live name policy is tightened.
+     *
+     * <p>The returned map is unmodifiable and path-sorted, identical to {@link
+     * #materialize(AgentSkill)} for the same fields.
+     *
+     * @throws IllegalArgumentException if metadata is not canonicalizable, a resource escapes the
+     *     artifact, aliases another resource, conflicts with a resource directory, or masquerades
+     *     as {@value #SKILL_FILE}
+     */
+    public static Map<String, byte[]> materialize(
+            Map<String, Object> metadata, String skillContent, Map<String, String> resources) {
+        Map<String, Object> canonicalMetadata = canonicalMetadata(metadata);
         String skillMarkdown =
                 normalizeText(
                         MarkdownSkillParser.generate(
-                                metadata, normalizeText(skill.getSkillContent())));
+                                canonicalMetadata, normalizeText(skillContent)));
 
         TreeMap<String, byte[]> files = new TreeMap<>();
         files.put(SKILL_FILE, utf8(skillMarkdown));
-        for (Map.Entry<String, String> resource : skill.getResources().entrySet()) {
+        Map<String, String> resourceValues = resources == null ? Map.of() : resources;
+        for (Map.Entry<String, String> resource : resourceValues.entrySet()) {
             String path = normalizeResourcePath(resource.getKey());
             rejectSkillFileAlias(path);
             rejectPathConflict(files.keySet(), path);

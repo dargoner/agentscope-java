@@ -310,12 +310,26 @@ public class CompactionConfig {
      * context window. Used by {@code CompactionMiddleware} to resolve dynamic defaults.
      */
     public CompactionConfig withEffective(int effectiveTriggerTokens, int effectiveKeepTokens) {
+        Builder b = copyBuilder();
+        b.triggerTokens = effectiveTriggerTokens;
+        b.keepTokens = effectiveKeepTokens;
+        return new CompactionConfig(b);
+    }
+
+    /** Returns a copy with the compaction-time long-term memory flush disabled. */
+    public CompactionConfig withoutMemoryFlush() {
+        Builder b = copyBuilder();
+        b.flushBeforeCompact = false;
+        return new CompactionConfig(b);
+    }
+
+    private Builder copyBuilder() {
         Builder b = new Builder();
         b.triggerMessages = this.triggerMessages;
-        b.triggerTokens = effectiveTriggerTokens;
+        b.triggerTokens = this.triggerTokens;
         b.reserved = this.reserved;
         b.keepMessages = this.keepMessages;
-        b.keepTokens = effectiveKeepTokens;
+        b.keepTokens = this.keepTokens;
         b.keepTokensMin = this.keepTokensMin;
         b.keepTokensMax = this.keepTokensMax;
         b.keepTokensRatio = this.keepTokensRatio;
@@ -325,7 +339,7 @@ public class CompactionConfig {
         b.pruneConfig = this.pruneConfig;
         b.model = this.model;
         b.strategy = this.strategy;
-        return new CompactionConfig(b);
+        return b;
     }
 
     public static Builder builder() {

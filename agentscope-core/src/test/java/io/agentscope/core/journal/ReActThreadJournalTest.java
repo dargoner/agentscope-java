@@ -23,9 +23,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.agent.ThreadKey;
+import io.agentscope.core.message.Base64Source;
+import io.agentscope.core.message.ImageBlock;
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.message.UserMessage;
+import io.agentscope.core.middleware.ModelCallInput;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
@@ -148,6 +153,63 @@ class ReActThreadJournalTest {
                                 store.open(new ThreadKey("u", "stable", "s", "main"), context()))
                         .activeRuns()
                         .isEmpty());
+    }
+
+    @Test
+    void preparedRequestLogRedactsMediaNestedInToolResults() {
+        var store = new InMemoryThreadJournalStore();
+        var log = store.open(new ThreadKey("u", "tool", "s", "main"), context());
+        var recorder = new InvocationRecorder(log, null, "turn-1", null);
+        String base64 = "SECRETTOOLRESULTBASE64";
+        Msg toolMessage =
+                Msg.builder()
+                        .role(MsgRole.TOOL)
+                        .content(
+                                ToolResultBlock.builder()
+                                        .id("call-1")
+                                        .name("screenshot")
+                                        .output(
+                                                List.of(
+                                                        TextBlock.builder().text("ok").build(),
+                                                        ImageBlock.builder()
+                                                                .source(
+                                                                        Base64Source.builder()
+                                                                                .mediaType(
+                                                                                        "image/png")
+                                                                                .data(base64)
+                                                                                .build())
+                                                                .build()))
+                                        .build())
+                        .build();
+        Model model =
+                new Model() {
+                    public String getModelName() {
+                        return "fake";
+                    }
+
+                    public Flux<ChatResponse> stream(
+                            List<Msg> messages, List<ToolSchema> tools, GenerateOptions options) {
+                        return Flux.empty();
+                    }
+                };
+
+        recorder.prepareModel(
+                        new ModelCallInput(List.of(toolMessage), List.of(), null, model),
+                        "call-1",
+                        "REASONING",
+                        AgentState.builder().sessionId("s").context(List.of()).build())
+                .block(Duration.ofSeconds(5));
+
+        var events =
+                store.open(new ThreadKey("u", "tool", "s", "main"), context()).readAfter(0, 100);
+        var prepared =
+                events.stream()
+                        .filter(e -> e.type().equals("request/prepared"))
+                        .findFirst()
+                        .orElseThrow();
+        assertFalse(prepared.payloadJson().contains(base64), prepared.payloadJson());
+        assertTrue(prepared.payloadJson().contains("redacted"));
+        assertTrue(prepared.payloadJson().contains("ok"));
     }
 
     @Test

@@ -250,7 +250,9 @@ public class MemoryFlushMiddleware implements HarnessRuntimeMiddleware {
                             MemoryBackgroundTasks.end();
                             drainFlushQueue(key);
                         })
-                .subscribe(null, e -> log.warn("Memory flush failed: {}", e.getMessage()));
+                .subscribe(
+                        null,
+                        e -> log.warn("Memory flush failed: {}", e.getClass().getSimpleName()));
     }
 
     private void drainFlushQueue(String key) {
@@ -322,7 +324,7 @@ public class MemoryFlushMiddleware implements HarnessRuntimeMiddleware {
                         e -> {
                             if (Boolean.TRUE.equals(rc.get(INLINE_CONTEXT_KEY))
                                     && JournalException.causedBy(e)) return Mono.error(e);
-                            log.warn("Memory flush failed: {}", e.getMessage());
+                            log.warn("Memory flush failed: {}", e.getClass().getSimpleName());
                             return Mono.empty();
                         });
     }
