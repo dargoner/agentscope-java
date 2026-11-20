@@ -857,6 +857,32 @@ public class HarnessAgent implements Agent, AutoCloseable {
         return call(new UserMessage(text), ctx);
     }
 
+    /**
+     * Calls the agent with a plain text input, structured output class, and per-call
+     * {@link RuntimeContext}.
+     *
+     * @param text           input text (wrapped into a {@link UserMessage})
+     * @param structuredModel class defining the expected structure
+     * @param ctx             runtime context to propagate into the call
+     * @return response message with structured data in metadata
+     */
+    public Mono<Msg> call(String text, Class<?> structuredModel, RuntimeContext ctx) {
+        return call(List.of(new UserMessage(text)), structuredModel, ctx);
+    }
+
+    /**
+     * Calls the agent with a plain text input, structured output JSON schema, and per-call
+     * {@link RuntimeContext}.
+     *
+     * @param text  input text (wrapped into a {@link UserMessage})
+     * @param schema JSON schema defining the expected structure
+     * @param ctx   runtime context to propagate into the call
+     * @return response message with structured data in metadata
+     */
+    public Mono<Msg> call(String text, JsonNode schema, RuntimeContext ctx) {
+        return call(List.of(new UserMessage(text)), schema, ctx);
+    }
+
     public Mono<Msg> call(List<Msg> msgs, RuntimeContext ctx) {
         RuntimeContext effective =
                 ensureSessionDefaults(ctx != null ? ctx : RuntimeContext.empty());

@@ -1388,6 +1388,19 @@ public class ReActAgent extends AgentBase implements AutoCloseable {
     }
 
     /**
+     * Calls the agent with a plain text input, structured output JSON schema, and per-call
+     * {@link RuntimeContext}.
+     *
+     * @param text         input text (wrapped into a {@link UserMessage})
+     * @param outputSchema JSON schema defining the structure
+     * @param context      per-call runtime context
+     * @return response message with structured data in metadata
+     */
+    public Mono<Msg> call(String text, JsonNode outputSchema, RuntimeContext context) {
+        return call(List.of(new UserMessage(text)), outputSchema, context);
+    }
+
+    /**
      * Attaches the caller-supplied {@link RuntimeContext} to the Reactor Context of the given
      * publisher under {@link AgentBase#RUNTIME_CONTEXT_KEY}, so the call lifecycle reads it
      * per-subscription (concurrency-safe) rather than from a shared instance field.
