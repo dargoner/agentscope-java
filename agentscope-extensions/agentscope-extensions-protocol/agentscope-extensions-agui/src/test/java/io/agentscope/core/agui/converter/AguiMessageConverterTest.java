@@ -1419,8 +1419,10 @@ class AguiMessageConverterTest {
         assertTrue(msg.hasContentBlocks(ImageBlock.class));
         AguiMessage roundTrip = converter.toAguiMessage(msg);
         assertEquals("assistant", roundTrip.getRole());
-        assertTrue(roundTrip.hasBlocks());
-        assertEquals(1, ((MessageContent.Blocks) roundTrip.getContent()).parts().size());
+        // Structured input parts are only valid on user/tool messages, so assistant media
+        // falls back to a text reference on the way out.
+        assertFalse(roundTrip.hasBlocks());
+        assertEquals("[image: https://example.com/img.png]", roundTrip.getTextContent());
     }
 
     @Test
