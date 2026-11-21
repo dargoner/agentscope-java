@@ -72,6 +72,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 
 /**
@@ -157,6 +158,8 @@ public class AguiMessageConverter {
         String toolCallId = null;
         String error = null;
         boolean toolMessage = msg.getRole() == MsgRole.TOOL;
+        boolean structuredContentAllowed =
+                msg.getRole() == MsgRole.USER || msg.getRole() == MsgRole.TOOL;
 
         for (ContentBlock block : msg.getContent()) {
             if (block instanceof ThinkingBlock tb) {
@@ -179,16 +182,39 @@ public class AguiMessageConverter {
                         addAguiContentPart(inputContents, output);
                     }
                 }
-            } else if (block instanceof DataBlock db
-                    && db.getSource() instanceof URLSource urlSource) {
-                InputContent inputContent = dataBlockInputContent(urlSource);
-                if (inputContent != null) {
-                    inputContents.add(inputContent);
+            } else if (block instanceof ImageBlock ib) {
+                if (structuredContentAllowed) {
+                    addMediaInputContent(inputContents, ib.getSource(), ImageInputContent::new);
+                } else {
+                    appendContent(content, mediaReference("image", ib.getSource()));
+                }
+            } else if (block instanceof AudioBlock ab) {
+                if (structuredContentAllowed) {
+                    addMediaInputContent(inputContents, ab.getSource(), AudioInputContent::new);
+                } else {
+                    appendContent(content, mediaReference("audio", ab.getSource()));
+                }
+            } else if (block instanceof VideoBlock vb) {
+                if (structuredContentAllowed) {
+                    addMediaInputContent(inputContents, vb.getSource(), VideoInputContent::new);
+                } else {
+                    appendContent(content, mediaReference("video", vb.getSource()));
+                }
+            } else if (block instanceof DataBlock db) {
+                if (structuredContentAllowed) {
+                    InputContent inputContent = dataBlockInputContent(db.getSource());
+                    if (inputContent != null) {
+                        inputContents.add(inputContent);
+                    }
+                } else {
+                    appendContent(content, mediaReference("data", db.getSource()));
                 }
             } else if (block instanceof DocumentBlock db) {
-                addDocumentInputContent(inputContents, content, db);
-            } else {
-                addAguiContentPart(inputContents, block);
+                if (structuredContentAllowed) {
+                    addDocumentInputContent(inputContents, content, db);
+                } else {
+                    appendContent(content, DocumentReferenceRenderer.render(db));
+                }
             }
         }
 
@@ -284,19 +310,13 @@ public class AguiMessageConverter {
         }
     }
 
-    private void addAguiContentPart(List<InputContent> contentParts, ContentBlock block) {
+    private static void addAguiContentPart(List<InputContent> contentParts, ContentBlock block) {
         if (block instanceof ImageBlock image) {
-            contentParts.add(
-                    new ImageInputContent(
-                            toInputContentSource(image.getSource()), Collections.emptyMap()));
+            addMediaInputContent(contentParts, image.getSource(), ImageInputContent::new);
         } else if (block instanceof AudioBlock audio) {
-            contentParts.add(
-                    new AudioInputContent(
-                            toInputContentSource(audio.getSource()), Collections.emptyMap()));
+            addMediaInputContent(contentParts, audio.getSource(), AudioInputContent::new);
         } else if (block instanceof VideoBlock video) {
-            contentParts.add(
-                    new VideoInputContent(
-                            toInputContentSource(video.getSource()), Collections.emptyMap()));
+            addMediaInputContent(contentParts, video.getSource(), VideoInputContent::new);
         }
     }
 
@@ -558,6 +578,25 @@ public class AguiMessageConverter {
         target.append(value);
     }
 
+    private static String mediaReference(String kind, Source source) {
+        if (source instanceof URLSource url) {
+            String mimeType = url.getMimeType();
+            return "["
+                    + kind
+                    + ": "
+                    + url.getUrl()
+                    + (mimeType == null || mimeType.isBlank() ? "" : ", " + mimeType)
+                    + "]";
+        }
+        if (source instanceof Base64Source base64) {
+            return "[" + kind + ": inline " + base64.getMediaType() + "]";
+        }
+        if (source instanceof FileIdSource fileId) {
+            return "[" + kind + ": " + fileId.getProvider() + "/" + fileId.getFileId() + "]";
+        }
+        return "[" + kind + ": unsupported source]";
+    }
+
     /**
      * Join the text and document-reference parts of a tool result into a single string.
      */
@@ -584,6 +623,17 @@ public class AguiMessageConverter {
         for (ContentBlock output : result.getOutput()) {
             if (output instanceof TextBlock textBlock) {
                 appendContent(text, textBlock.getText());
+            } else if (output instanceof ImageBlock image) {
+                addMediaInputContent(parts, image.getSource(), ImageInputContent::new);
+            } else if (output instanceof AudioBlock audio) {
+                addMediaInputContent(parts, audio.getSource(), AudioInputContent::new);
+            } else if (output instanceof VideoBlock video) {
+                addMediaInputContent(parts, video.getSource(), VideoInputContent::new);
+            } else if (output instanceof DataBlock data) {
+                InputContent inputContent = dataBlockInputContent(data.getSource());
+                if (inputContent != null) {
+                    parts.add(inputContent);
+                }
             } else if (output instanceof DocumentBlock document) {
                 addDocumentInputContent(parts, text, document);
             } else {
@@ -699,25 +749,86 @@ public class AguiMessageConverter {
         throw new IllegalStateException("Unhandled InputContentSource type: " + inputSource);
     }
 
-    private InputContentSource toInputContentSource(Source source) {
+    /**
+     * Appends an AG-UI input content for a media block source, when the source can be expressed.
+     *
+     * @param target the target input content list
+     * @param source the AgentScope media source
+     * @param factory builds the typed AG-UI input content for the block kind
+     */
+    private static void addMediaInputContent(
+            List<InputContent> target,
+            Source source,
+            BiFunction<InputContentSource, Map<String, Object>, InputContent> factory) {
+        InputContentSource inputSource = toInputContentSource(source);
+        if (inputSource != null) {
+            target.add(factory.apply(inputSource, Collections.emptyMap()));
+        }
+    }
+
+    /**
+     * Maps an AgentScope media {@link Source} onto the AG-UI protocol source model.
+     *
+     * <p>Mapping:
+     * <ul>
+     *   <li>{@link URLSource} &rarr; {@link InputContentUrlSource} (type {@code url})</li>
+     *   <li>{@link Base64Source} &rarr; {@link InputContentDataSource} (type {@code data})</li>
+     *   <li>{@link FileIdSource} &rarr; {@link InputContentFileSource} (type {@code file}),
+     *       preserving the provider that issued the handle</li>
+     * </ul>
+     *
+     * @param source the AgentScope media source
+     * @return the AG-UI protocol source, or {@code null} when the source cannot be expressed
+     */
+    private static InputContentSource toInputContentSource(Source source) {
         if (source instanceof URLSource url) {
             return new InputContentUrlSource(url.getUrl(), url.getMimeType());
         }
-        if (source instanceof Base64Source data) {
-            return new InputContentDataSource(data.getData(), data.getMediaType());
+        if (source instanceof Base64Source base64) {
+            return new InputContentDataSource(base64.getData(), base64.getMediaType());
         }
-        throw new IllegalStateException("Unhandled Source type: " + source);
+        if (source instanceof FileIdSource fileId) {
+            return new InputContentFileSource(fileId.getFileId(), fileId.getProvider(), null);
+        }
+        return null;
     }
 
-    private static InputContent dataBlockInputContent(URLSource source) {
+    /**
+     * Builds the AG-UI input content for a {@link DataBlock}, routing by MIME type.
+     *
+     * <p>URL sources keep resolving the MIME type from the URL; inline data uses its declared
+     * media type; a provider file handle, whose bytes are not inspectable here, maps to the
+     * document part as the protocol's generic carrier for opaque data.
+     *
+     * @param source the data block source
+     * @return the AG-UI input content, or {@code null} when the MIME type cannot be resolved
+     */
+    private static InputContent dataBlockInputContent(Source source) {
+        if (source instanceof Base64Source base64) {
+            String mediaType = base64.getMediaType();
+            return typedDataBlockInputContent(
+                    new InputContentDataSource(base64.getData(), mediaType), mediaType);
+        }
+        if (source instanceof FileIdSource fileId) {
+            return new DocumentInputContent(
+                    new InputContentFileSource(fileId.getFileId(), fileId.getProvider(), null),
+                    Collections.emptyMap());
+        }
+        if (!(source instanceof URLSource url)) {
+            return null;
+        }
         String mimeType;
         try {
-            mimeType = MediaUtils.resolveMimeType(source);
+            mimeType = MediaUtils.resolveMimeType(url);
         } catch (IllegalArgumentException unreadableMimeType) {
             return null;
         }
+        return typedDataBlockInputContent(
+                new InputContentUrlSource(url.getUrl(), mimeType), mimeType);
+    }
 
-        InputContentUrlSource inputSource = new InputContentUrlSource(source.getUrl(), mimeType);
+    private static InputContent typedDataBlockInputContent(
+            InputContentSource inputSource, String mimeType) {
         if (mimeType.startsWith("image/")) {
             return new ImageInputContent(inputSource, Collections.emptyMap());
         }
