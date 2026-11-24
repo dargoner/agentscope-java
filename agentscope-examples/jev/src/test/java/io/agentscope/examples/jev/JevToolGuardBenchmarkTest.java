@@ -393,6 +393,7 @@ class JevToolGuardBenchmarkTest {
                 HarnessAgent.builder()
                         .name("refund-fixture")
                         .workspace(workspace)
+                        .stateStore(new InMemoryAgentStateStore())
                         .threadJournalStore(new InMemoryThreadJournalStore())
                         .stateStore(new InMemoryAgentStateStore())
                         .model(model)

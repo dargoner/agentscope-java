@@ -40,11 +40,15 @@ import java.util.Objects;
  * <p>The {@code content} field uses {@link MessageContent}, a type-safe sealed union
  * that can represent either plain text or a list of structured {@link InputContent}
  * parts (text, image, audio, video, document).
+ *
+ * <p>The optional {@code name} field carries the message sender's name, per the AG-UI
+ * protocol's {@code BaseMessage.name}; it is {@code null} when the peer does not send one.
  */
 public class AguiMessage {
 
     private final String id;
     private final String role;
+    private final String name;
     private final MessageContent content;
     private final List<AguiToolCall> toolCalls;
     private final String toolCallId;
@@ -69,7 +73,17 @@ public class AguiMessage {
         this(id, role, content, toolCalls, toolCallId, null);
     }
 
-    /** Creates a legacy tool message carrying an error string. */
+    /**
+     * Creates a message without a sender name, including an optional tool error.
+     *
+     * @param id The unique message ID
+     * @param role The message role (user, assistant, system, tool, reasoning)
+     * @param content The message content (plain text or structured blocks), may be null
+     * @param toolCalls Tool calls for assistant messages (optional)
+     * @param toolCallId Tool call ID for tool messages (optional)
+     * @param error The error a frontend tool reported, per the AG-UI protocol's {@code error}
+     *     field on tool messages; may be null
+     */
     public AguiMessage(
             @JsonProperty("id") String id,
             @JsonProperty("role") String role,
@@ -77,7 +91,31 @@ public class AguiMessage {
             @JsonProperty("toolCalls") List<AguiToolCall> toolCalls,
             @JsonProperty("toolCallId") String toolCallId,
             @JsonProperty("error") String error) {
-        this(id, role, content, toolCalls, toolCallId, null, error);
+        this(id, role, null, content, toolCalls, toolCallId, error);
+    }
+
+    /**
+     * Creates a new AguiMessage.
+     *
+     * @param id The unique message ID
+     * @param role The message role (user, assistant, system, tool, reasoning)
+     * @param name The message sender's name, per the AG-UI protocol's optional {@code name}
+     *     field; may be null
+     * @param content The message content (plain text or structured blocks), may be null
+     * @param toolCalls Tool calls for assistant messages (optional)
+     * @param toolCallId Tool call ID for tool messages (optional)
+     * @param error The error a frontend tool reported, per the AG-UI protocol's {@code error}
+     *     field on tool messages; may be null
+     */
+    public AguiMessage(
+            String id,
+            String role,
+            String name,
+            MessageContent content,
+            List<AguiToolCall> toolCalls,
+            String toolCallId,
+            String error) {
+        this(id, role, name, content, toolCalls, toolCallId, null, error);
     }
 
     /** Full constructor including the optional status and error extensions. */
@@ -85,6 +123,7 @@ public class AguiMessage {
     public AguiMessage(
             @JsonProperty("id") String id,
             @JsonProperty("role") String role,
+            @JsonProperty("name") String name,
             @JsonProperty("content") MessageContent content,
             @JsonProperty("toolCalls") List<AguiToolCall> toolCalls,
             @JsonProperty("toolCallId") String toolCallId,
@@ -92,6 +131,7 @@ public class AguiMessage {
             @JsonProperty("error") String error) {
         this.id = Objects.requireNonNull(id, "id cannot be null");
         this.role = Objects.requireNonNull(role, "role cannot be null");
+        this.name = name;
         this.content = content;
         this.toolCalls =
                 toolCalls != null
@@ -114,6 +154,18 @@ public class AguiMessage {
     }
 
     /**
+     * Creates a simple user message with plain text content and a sender name.
+     *
+     * @param id The message ID
+     * @param content The message content as plain text
+     * @param name The message sender's name, may be null
+     * @return A new user message
+     */
+    public static AguiMessage userMessage(String id, String content, String name) {
+        return new AguiMessage(id, "user", name, wrapText(content), null, null, null);
+    }
+
+    /**
      * Creates a user message with structured content blocks.
      *
      * @param id The message ID
@@ -122,6 +174,19 @@ public class AguiMessage {
      */
     public static AguiMessage userMessage(String id, List<InputContent> blocks) {
         return new AguiMessage(id, "user", new MessageContent.Blocks(blocks), null, null);
+    }
+
+    /**
+     * Creates a user message with structured content blocks and a sender name.
+     *
+     * @param id The message ID
+     * @param blocks The structured content parts
+     * @param name The message sender's name, may be null
+     * @return A new user message
+     */
+    public static AguiMessage userMessage(String id, List<InputContent> blocks, String name) {
+        return new AguiMessage(
+                id, "user", name, new MessageContent.Blocks(blocks), null, null, null);
     }
 
     /**
@@ -136,6 +201,18 @@ public class AguiMessage {
     }
 
     /**
+     * Creates a simple assistant message with a sender name.
+     *
+     * @param id The message ID
+     * @param content The message content as plain text
+     * @param name The message sender's name, may be null
+     * @return A new assistant message
+     */
+    public static AguiMessage assistantMessage(String id, String content, String name) {
+        return new AguiMessage(id, "assistant", name, wrapText(content), null, null, null);
+    }
+
+    /**
      * Creates a system message.
      *
      * @param id The message ID
@@ -144,6 +221,18 @@ public class AguiMessage {
      */
     public static AguiMessage systemMessage(String id, String content) {
         return new AguiMessage(id, "system", wrapText(content), null, null);
+    }
+
+    /**
+     * Creates a system message with a sender name.
+     *
+     * @param id The message ID
+     * @param content The message content as plain text
+     * @param name The message sender's name, may be null
+     * @return A new system message
+     */
+    public static AguiMessage systemMessage(String id, String content, String name) {
+        return new AguiMessage(id, "system", name, wrapText(content), null, null, null);
     }
 
     /**
@@ -158,9 +247,56 @@ public class AguiMessage {
         return new AguiMessage(id, "tool", wrapText(content), null, toolCallId);
     }
 
-    /** Creates an assistant reasoning message. */
+    /**
+     * Creates a tool result message that reports a frontend tool failure.
+     *
+     * @param id The message ID
+     * @param toolCallId The ID of the tool call this is responding to
+     * @param content The tool result content as plain text
+     * @param error The error reported by the frontend tool
+     * @return A new tool message
+     */
+    public static AguiMessage toolMessage(
+            String id, String toolCallId, String content, String error) {
+        return new AguiMessage(id, "tool", wrapText(content), null, toolCallId, error);
+    }
+
+    /**
+     * Creates a tool result message with a sender name.
+     *
+     * @param id The message ID
+     * @param toolCallId The ID of the tool call this is responding to
+     * @param content The tool result content as plain text
+     * @param error The error reported by the frontend tool, may be null
+     * @param name The message sender's name, may be null
+     * @return A new tool message
+     */
+    public static AguiMessage toolMessage(
+            String id, String toolCallId, String content, String error, String name) {
+        return new AguiMessage(id, "tool", name, wrapText(content), null, toolCallId, error);
+    }
+
+    /**
+     * Creates a reasoning message.
+     *
+     * @param id The message ID
+     * @param content The reasoning content as plain text
+     * @return A new reasoning message
+     */
     public static AguiMessage reasoningMessage(String id, String content) {
         return new AguiMessage(id, "reasoning", wrapText(content), null, null);
+    }
+
+    /**
+     * Creates a reasoning message with a sender name.
+     *
+     * @param id The message ID
+     * @param content The reasoning content as plain text
+     * @param name The message sender's name, may be null
+     * @return A new reasoning message
+     */
+    public static AguiMessage reasoningMessage(String id, String content, String name) {
+        return new AguiMessage(id, "reasoning", name, wrapText(content), null, null, null);
     }
 
     /**
@@ -225,6 +361,16 @@ public class AguiMessage {
      */
     public String getRole() {
         return role;
+    }
+
+    /**
+     * Get the message sender's name, per the AG-UI protocol's optional {@code name} field.
+     *
+     * @return The sender name, or null if not set
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getName() {
+        return name;
     }
 
     /**
@@ -359,6 +505,8 @@ public class AguiMessage {
                 + id
                 + "', role='"
                 + role
+                + "', name='"
+                + name
                 + "', content="
                 + content
                 + ", toolCalls="
@@ -379,6 +527,7 @@ public class AguiMessage {
         AguiMessage that = (AguiMessage) o;
         return Objects.equals(id, that.id)
                 && Objects.equals(role, that.role)
+                && Objects.equals(name, that.name)
                 && Objects.equals(content, that.content)
                 && Objects.equals(toolCalls, that.toolCalls)
                 && Objects.equals(toolCallId, that.toolCallId)
@@ -388,6 +537,6 @@ public class AguiMessage {
 
     @Override
     public int hashCode() {
-        return Objects.hash(id, role, content, toolCalls, toolCallId, status, error);
+        return Objects.hash(id, role, name, content, toolCalls, toolCallId, status, error);
     }
 }
