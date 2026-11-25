@@ -423,7 +423,7 @@ public class OpenAIResponsesChatModel extends ChatModelBase {
             model.setContextWindowSize(
                     contextWindowSize >= 0
                             ? contextWindowSize
-                            : ModelContextWindows.lookup(modelName, ModelContextWindows.OPENAI));
+                            : ModelContextWindows.resolve(modelName, ModelContextWindows.OPENAI));
 
             model.applyNativeStructuredOutputDefaults();
 
