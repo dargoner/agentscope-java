@@ -3163,7 +3163,7 @@ public class HarnessAgent implements Agent, AutoCloseable {
                                     compactionConfig.getModel(),
                                     compactionConfig,
                                     learnedWindows,
-                                    memoryEnabled && !disableMemoryHooks);
+                                    memoryEnabled);
                     inner.middleware(compactionHook.overflowRecovery());
                 }
             }

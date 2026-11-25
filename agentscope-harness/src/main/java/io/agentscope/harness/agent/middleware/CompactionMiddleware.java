@@ -288,21 +288,10 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                                             .flatMapMany(
                                                     candidate -> {
                                                         // Accept the recovery only when
-                                                        // compaction actually reduced the model
-                                                        // view, and only while no concurrent state
-                                                        // change happened. The candidate is never
-                                                        // written to durable history here: the
-                                                        // retry goes through the final request
-                                                        // preparer, which validates budget and
-                                                        // tool pairing and owns the only commit
-                                                        // point. Durable history stays untouched
-                                                        // when it carries synthetics that can
-                                                        // never re-commit; the reduced view still
-                                                        // unblocks the retry.
-                                                        if (candidate
-                                                                        .input()
-                                                                        .messages()
-                                                                        .equals(retryMessages)
+                                                        // compaction actually reduced the durable
+                                                        // history, and only while no concurrent
+                                                        // state change happened.
+                                                        if (candidate.history().equals(before)
                                                                 || !state.getContext()
                                                                         .equals(before))
                                                             return Flux.error(error);
@@ -319,6 +308,18 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                                                                                 candidate
                                                                                         .input()
                                                                                         .options()))
+                                                                // Commit only after the retry
+                                                                // succeeds so a rejected retry
+                                                                // leaves durable history untouched.
+                                                                .doOnComplete(
+                                                                        () -> {
+                                                                            if (state.getContext()
+                                                                                    .equals(before))
+                                                                                applyToContext(
+                                                                                        state,
+                                                                                        candidate
+                                                                                                .history());
+                                                                        })
                                                                 .onErrorResume(
                                                                         retryError ->
                                                                                 Flux.error(
